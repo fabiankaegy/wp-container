@@ -78,5 +78,11 @@ enum MCPTools {
                 "keepBranch": bool("Keep the git branch (default true)."),
                 "keepWorktree": bool("Keep the worktree checkout on disk (default false)."),
              ], required: ["envSlug"])),
+        Tool(name: "xdebug_toggle",
+             description: "Enable or disable Xdebug for the scoped site. Uses a derived Xdebug WordPress image (built lazily) and points client_host at the host gateway; restarts the site to apply when running.",
+             inputSchema: obj(["enabled": bool("Turn Xdebug on (true) or off (false).")], required: ["enabled"])),
+        Tool(name: "elasticsearch_toggle",
+             description: "Enable or disable the per-site Elasticsearch sidecar (single-node, security off). Wires ELASTICSEARCH_URL/EP_HOST into WordPress; restarts the site to apply when running.",
+             inputSchema: obj(["enabled": bool("Turn Elasticsearch on (true) or off (false).")], required: ["enabled"])),
     ]
 }

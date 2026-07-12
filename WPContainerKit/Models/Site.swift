@@ -29,6 +29,13 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     public var customDomain: String?
     /// WordPress network type — single site or a multisite network (PLAN.md §2j).
     public var networkType: NetworkType
+    /// Where the agent-tools artifacts (MCP configs + doc) were written, so
+    /// disable/regenerate targets the same place (PLAN.md §2d rework). nil = the
+    /// site folder default. Absolute path.
+    public var agentToolsRoot: String?
+    /// The doc filename the agent-tools block was written into (AGENTS.md or
+    /// CLAUDE.md).
+    public var agentToolsDoc: String?
 
     /// Runtime-derived; NOT persisted.
     public var status: SiteStatus = .stopped
@@ -36,6 +43,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     private enum CodingKeys: String, CodingKey {
         case id, name, slug, path, port, imageTag, phpVersion, createdAt, provisioned, groupID, httpsEnabled
         case xdebugEnabled, elasticsearchEnabled, customDomain, networkType
+        case agentToolsRoot, agentToolsDoc
     }
 
     public init(
@@ -54,6 +62,8 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         elasticsearchEnabled: Bool = false,
         customDomain: String? = nil,
         networkType: NetworkType = .none,
+        agentToolsRoot: String? = nil,
+        agentToolsDoc: String? = nil,
         status: SiteStatus = .stopped
     ) {
         self.id = id
@@ -71,6 +81,8 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.elasticsearchEnabled = elasticsearchEnabled
         self.customDomain = customDomain
         self.networkType = networkType
+        self.agentToolsRoot = agentToolsRoot
+        self.agentToolsDoc = agentToolsDoc
         self.status = status
     }
 
@@ -93,6 +105,8 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.elasticsearchEnabled = (try? c.decode(Bool.self, forKey: .elasticsearchEnabled)) ?? false
         self.customDomain = try? c.decodeIfPresent(String.self, forKey: .customDomain)
         self.networkType = (try? c.decodeIfPresent(NetworkType.self, forKey: .networkType)) ?? .none
+        self.agentToolsRoot = try? c.decodeIfPresent(String.self, forKey: .agentToolsRoot)
+        self.agentToolsDoc = try? c.decodeIfPresent(String.self, forKey: .agentToolsDoc)
     }
 
     // MARK: Derived paths
@@ -134,6 +148,13 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     }
     /// The effective WP Admin URL, honoring HTTPS + custom domains.
     public var wpAdminURL: URL { url.appendingPathComponent("wp-admin") }
+    /// Compact host label for lists/menus, derived from the effective URL — the
+    /// single source of truth (§2f/§2i): `localhost:<port>` for a plain local
+    /// site, else the proxy hostname.
+    public var displayHost: String {
+        if (customDomain?.isEmpty ?? true) && !httpsEnabled { return "localhost:\(port)" }
+        return primaryHost
+    }
 }
 
 extension Site: RunnableInstance {

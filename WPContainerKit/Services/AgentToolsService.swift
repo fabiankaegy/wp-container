@@ -1,88 +1,153 @@
 import Foundation
 
 /// Writes (and removes) the per-site AI-agent integration files (PLAN.md §2d):
-/// `.mcp.json` (Claude Code), `.cursor/mcp.json`, `.vscode/mcp.json`, a generated
-/// `CLAUDE.md` project-context file, `.gitignore` entries, and the `wp` shim.
+/// `.mcp.json` (Claude Code), `.cursor/mcp.json`, `.vscode/mcp.json`, a marked
+/// block in an `AGENTS.md` (or `CLAUDE.md`) doc, `.gitignore` entries, and the
+/// `wp` shim — all at a chosen **placement root** (the site folder by default,
+/// or a git repo under `wp-content` where the user actually opens their IDE).
 ///
-/// All operations are idempotent. `enable` overwrites the generated files;
-/// `disable` removes them (leaving the `wp` shim, which is a §2e site fixture).
+/// The doc block is wrapped in `<!-- BEGIN:wp-container:<slug> -->` /
+/// `<!-- END:wp-container:<slug> -->` markers (AGENTS.md convention) and is
+/// appended/updated NON-destructively: existing user content is always
+/// preserved; only our block is replaced or removed.
 public enum AgentToolsService {
     /// Installed CLI path the generated configs invoke.
     public static let cliPath = "/usr/local/bin/wp-container"
 
     /// Canonical MCP tool names (single source of truth shared with the server
-    /// and CLAUDE.md so they never drift).
+    /// and the doc so they never drift). 18 tools (PLAN.md §2c added two).
     public static let mcpToolNames: [String] = [
         "wp_cli", "read_error_log", "read_access_log", "wp_debug_toggle",
         "read_wp_config", "edit_wp_config", "get_site_info", "site_health_check",
         "site_start", "site_stop", "site_restart", "site_status", "list_sites",
         "worktree_create", "worktree_list", "worktree_delete",
+        "xdebug_toggle", "elasticsearch_toggle",
     ]
 
-    private static let gitignoreBegin = "# BEGIN WP Container agent tools"
-    private static let gitignoreEnd = "# END WP Container agent tools"
-    private static let generatedFiles = [".mcp.json", ".cursor/mcp.json", ".vscode/mcp.json", "CLAUDE.md"]
+    public static let defaultDocName = "AGENTS.md"
+    public static let alternateDocName = "CLAUDE.md"
+
+    private static let configFiles = [".mcp.json", ".cursor/mcp.json", ".vscode/mcp.json"]
+    private static let gitignoreBegin = "# BEGIN wp-container agent tools"
+    private static let gitignoreEnd = "# END wp-container agent tools"
 
     public struct Result: Sendable {
         public let written: [String]
+        public let root: String
+        public let docName: String
+    }
+
+    private static func beginMarker(_ slug: String) -> String { "<!-- BEGIN:wp-container:\(slug) -->" }
+    private static func endMarker(_ slug: String) -> String { "<!-- END:wp-container:\(slug) -->" }
+
+    // MARK: - Placement
+
+    /// Choose the doc filename for a root: keep an existing AGENTS.md; else if a
+    /// CLAUDE.md already exists (and no AGENTS.md), append to it; else AGENTS.md.
+    public static func preferredDocName(inRoot root: URL) -> String {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: root.appendingPathComponent(defaultDocName).path) { return defaultDocName }
+        if fm.fileExists(atPath: root.appendingPathComponent(alternateDocName).path) { return alternateDocName }
+        return defaultDocName
     }
 
     // MARK: - Enable
 
+    /// Enable agent tools at `root`. `repoRelPath` (relative to `wordpress/`)
+    /// prefills the worktree commands when the root IS a repo under wp-content.
     @discardableResult
-    public static func enable(site: Site) throws -> Result {
-        let root = site.path
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    public static func enable(site: Site, root: URL, docName: String? = nil, repoRelPath: String? = nil) throws -> Result {
+        let fm = FileManager.default
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        let doc = docName ?? preferredDocName(inRoot: root)
         var written: [String] = []
 
-        // .mcp.json (Claude Code) + .cursor/mcp.json share the `mcpServers` shape.
         let mcpServers = mcpServersJSON(slug: site.slug)
-        try write(mcpServers, to: root.appendingPathComponent(".mcp.json"))
-        written.append(".mcp.json")
+        try write(mcpServers, to: root.appendingPathComponent(".mcp.json")); written.append(".mcp.json")
 
-        try FileManager.default.createDirectory(at: root.appendingPathComponent(".cursor"), withIntermediateDirectories: true)
-        try write(mcpServers, to: root.appendingPathComponent(".cursor/mcp.json"))
-        written.append(".cursor/mcp.json")
+        try fm.createDirectory(at: root.appendingPathComponent(".cursor"), withIntermediateDirectories: true)
+        try write(mcpServers, to: root.appendingPathComponent(".cursor/mcp.json")); written.append(".cursor/mcp.json")
 
-        // VS Code uses a top-level `servers` key.
-        try FileManager.default.createDirectory(at: root.appendingPathComponent(".vscode"), withIntermediateDirectories: true)
-        try write(vscodeJSON(slug: site.slug), to: root.appendingPathComponent(".vscode/mcp.json"))
-        written.append(".vscode/mcp.json")
+        try fm.createDirectory(at: root.appendingPathComponent(".vscode"), withIntermediateDirectories: true)
+        try write(vscodeJSON(slug: site.slug), to: root.appendingPathComponent(".vscode/mcp.json")); written.append(".vscode/mcp.json")
 
-        // Generated project context.
-        try claudeMarkdown(site: site).write(to: root.appendingPathComponent("CLAUDE.md"), atomically: true, encoding: .utf8)
-        written.append("CLAUDE.md")
+        // Marked doc block (append/update, never clobber).
+        let docURL = root.appendingPathComponent(doc)
+        let existing = (try? String(contentsOf: docURL, encoding: .utf8)) ?? ""
+        let block = docBlock(site: site, root: root, repoRelPath: repoRelPath)
+        try upsertBlock(in: existing, slug: site.slug, block: block).write(to: docURL, atomically: true, encoding: .utf8)
+        written.append(doc)
 
-        // wp shim (also a §2e fixture — harmless to (re)write here).
-        _ = try? WPCLIShim.writeShim(slug: site.slug, siteRoot: root)
+        // wp shim at the root, pointing at the site's absolute wordpress path.
+        _ = try? WPCLIShim.writeShim(slug: site.slug, siteRoot: root, wordpressFolder: site.wordpressFolder)
         written.append("wp")
 
-        try updateGitignore(root: root, enabled: true)
-        written.append(".gitignore")
+        try updateGitignore(root: root, docName: doc, enabled: true); written.append(".gitignore")
 
-        return Result(written: written)
+        return Result(written: written, root: root.path, docName: doc)
     }
 
     // MARK: - Disable
 
-    public static func disable(site: Site) throws {
-        let root = site.path
-        for rel in generatedFiles {
-            try? FileManager.default.removeItem(at: root.appendingPathComponent(rel))
-        }
-        // Remove now-empty .cursor/.vscode dirs if we created them.
+    public static func disable(site: Site, root: URL, docName: String? = nil) throws {
+        let fm = FileManager.default
+        for rel in configFiles { try? fm.removeItem(at: root.appendingPathComponent(rel)) }
         for dir in [".cursor", ".vscode"] {
             let url = root.appendingPathComponent(dir)
-            if let contents = try? FileManager.default.contentsOfDirectory(atPath: url.path), contents.isEmpty {
-                try? FileManager.default.removeItem(at: url)
+            if let contents = try? fm.contentsOfDirectory(atPath: url.path), contents.isEmpty {
+                try? fm.removeItem(at: url)
             }
         }
-        try updateGitignore(root: root, enabled: false)
+        // Remove only our block from the doc; leave the rest of the file intact.
+        let doc = docName ?? preferredDocName(inRoot: root)
+        let docURL = root.appendingPathComponent(doc)
+        if let existing = try? String(contentsOf: docURL, encoding: .utf8) {
+            let stripped = removeBlock(in: existing, slug: site.slug)
+            if stripped.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                try? fm.removeItem(at: docURL)
+            } else {
+                try? stripped.write(to: docURL, atomically: true, encoding: .utf8)
+            }
+        }
+        try updateGitignore(root: root, docName: doc, enabled: false)
     }
 
-    /// True when the marker config files are present.
+    /// True when the marker `.mcp.json` is present at the site's recorded root
+    /// (or the site folder default).
     public static func isEnabled(site: Site) -> Bool {
-        FileManager.default.fileExists(atPath: site.path.appendingPathComponent(".mcp.json").path)
+        let root = site.agentToolsRoot.map { URL(fileURLWithPath: $0) } ?? site.path
+        return FileManager.default.fileExists(atPath: root.appendingPathComponent(".mcp.json").path)
+    }
+
+    // MARK: - Marked-block upsert (pure, testable)
+
+    /// Insert or replace our `<!-- BEGIN:wp-container:<slug> -->…END` block in
+    /// `contents`. Appends when absent, replaces in place when present.
+    public static func upsertBlock(in contents: String, slug: String, block: String) -> String {
+        let begin = beginMarker(slug), end = endMarker(slug)
+        let wrapped = "\(begin)\n\(block)\n\(end)"
+        var lines = contents.components(separatedBy: "\n")
+        if let b = lines.firstIndex(of: begin), let e = lines[b...].firstIndex(of: end) {
+            lines.replaceSubrange(b...e, with: wrapped.components(separatedBy: "\n"))
+            return lines.joined(separator: "\n")
+        }
+        var out = contents
+        if !out.isEmpty && !out.hasSuffix("\n") { out += "\n" }
+        if !out.isEmpty { out += "\n" }
+        return out + wrapped + "\n"
+    }
+
+    /// Remove our block (marker-to-marker) from `contents`, tidying blank runs.
+    public static func removeBlock(in contents: String, slug: String) -> String {
+        let begin = beginMarker(slug), end = endMarker(slug)
+        var lines = contents.components(separatedBy: "\n")
+        if let b = lines.firstIndex(of: begin), let e = lines[b...].firstIndex(of: end) {
+            lines.removeSubrange(b...e)
+            // Drop a single leading blank the append left behind.
+            if b > 0, b - 1 < lines.count, lines[b - 1].isEmpty { lines.remove(at: b - 1) }
+        }
+        while lines.last?.isEmpty == true { lines.removeLast() }
+        return lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
     }
 
     // MARK: - JSON payloads
@@ -113,79 +178,58 @@ public enum AgentToolsService {
         """
     }
 
-    // MARK: - CLAUDE.md
+    // MARK: - Doc block content (concise, absolute paths)
 
-    private static func claudeMarkdown(site: Site) -> String {
-        let toolList = mcpToolNames.map { "- `\($0)`" }.joined(separator: "\n")
+    private static func docBlock(site: Site, root: URL, repoRelPath: String?) -> String {
+        let shim = root.appendingPathComponent("wp").path
+        let repoArg = repoRelPath ?? "wp-content/plugins/your-plugin"
+        let toolList = mcpToolNames.map { "`\($0)`" }.joined(separator: ", ")
+        let repoLine = repoRelPath.map { "\nThis repo lives at `wp-content/\($0.hasPrefix("wp-content/") ? String($0.dropFirst("wp-content/".count)) : $0)` inside the site." } ?? ""
         return """
-        # \(site.name) — WP Container project context
+        # \(site.name) — WP Container
 
-        This WordPress site runs on Apple `container` via **WP Container**. It is managed
-        by the `wp-container` CLI and exposes an MCP server (already registered in
-        `.mcp.json`) so you can operate it with structured tools.
+        This directory is part of the local WordPress site **\(site.name)** (`\(site.slug)`),
+        running on Apple `container` via WP Container.\(repoLine)
 
-        ## Site facts
+        - **Site URL:** \(site.url.absoluteString)
+        - **WP Admin:** \(site.wpAdminURL.absoluteString) — user `\(SiteRecipe.adminUser)`, password `\(SiteRecipe.adminPassword)`
+        - **WordPress root:** `\(site.wordpressFolder.path)`
 
-        | Key | Value |
-        | --- | --- |
-        | Slug | `\(site.slug)` |
-        | Local URL | \(site.localURL.absoluteString) |
-        | HTTPS URL | \(site.secureURL.absoluteString)\(site.httpsEnabled ? "" : " (enable HTTPS first)") |
-        | Port | \(site.port) |
-        | Site folder | `\(site.path.path)` |
-        | WordPress root | `\(site.wordpressFolder.path)` |
-        | Database dir | `\(site.databaseFolder.path)` |
-        | Image | `\(site.imageTag)` |
-        | Admin user | `\(SiteRecipe.adminUser)` |
-        | Admin password | `\(SiteRecipe.adminPassword)` |
+        ## Running wp-cli
 
-        ## WP-CLI
-
-        Every wp-cli command works through the site's `wp` shim (resolves the DB
-        container automatically):
+        Use the site's shim (containerized wp-cli), by ABSOLUTE path so it works from any cwd:
 
         ```bash
-        cd "\(site.path.path)"
-        ./wp plugin list
-        ./wp option get siteurl
+        \(shim) plugin list
         ```
 
-        Or through the CLI proxy from anywhere: `wp-container wp \(site.slug) -- plugin list`.
+        ⚠️ Plain `wp` typed in a shell usually resolves to Homebrew's wp-cli
+        (`/opt/homebrew/bin/wp`), which does NOT know this container and will fail with
+        "not a WordPress installation". Either call the shim above, or install the global
+        router once with `wp-container setup wp` so plain `wp` inside this site works.
 
         ## Branch environments (git worktrees)
 
-        Spin up an isolated clone of this site bound to a git branch of a repo under
-        `wp-content` — the parent site keeps running untouched:
-
         ```bash
-        # Create (prints a JSON descriptor with url/port/paths):
-        wp-container worktree create --site \(site.slug) --repo wp-content/plugins/my-plugin --branch feature-x --json
-        # List / delete:
-        wp-container worktree list --site \(site.slug) --json
+        wp-container worktree create --site \(site.slug) --repo \(repoArg) --branch feature-x --json
         wp-container worktree delete \(site.slug)-wt-feature-x
         ```
 
-        The same actions are available as the `worktree_create` / `worktree_list` /
-        `worktree_delete` MCP tools.
+        ## MCP tools
 
-        ## MCP tools available
-
-        \(toolList)
-
-        Prefer these tools over ad-hoc shell commands: they return structured JSON and
-        keep the site's state consistent.
+        An MCP server is registered in `.mcp.json` (this directory). Tools: \(toolList).
+        Prefer them over ad-hoc shell — they return structured JSON and keep state consistent.
         """
     }
 
     // MARK: - .gitignore
 
-    private static func updateGitignore(root: URL, enabled: Bool) throws {
+    private static func updateGitignore(root: URL, docName: String, enabled: Bool) throws {
         let url = root.appendingPathComponent(".gitignore")
         var lines: [String] = []
         if let existing = try? String(contentsOf: url, encoding: .utf8) {
             lines = existing.components(separatedBy: "\n")
         }
-        // Strip any prior managed block.
         if let start = lines.firstIndex(of: gitignoreBegin), let end = lines.firstIndex(of: gitignoreEnd), end >= start {
             lines.removeSubrange(start...end)
             while lines.last == "" { lines.removeLast() }
@@ -194,11 +238,8 @@ public enum AgentToolsService {
             if !lines.isEmpty && lines.last != "" { lines.append("") }
             lines.append(contentsOf: [
                 gitignoreBegin,
-                ".mcp.json",
-                ".cursor/mcp.json",
-                ".vscode/mcp.json",
-                "CLAUDE.md",
-                "/wp",
+                ".mcp.json", ".cursor/mcp.json", ".vscode/mcp.json",
+                docName, "/wp",
                 gitignoreEnd,
             ])
         }

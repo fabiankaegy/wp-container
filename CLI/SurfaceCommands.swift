@@ -20,24 +20,43 @@ private func loadSite(_ slug: String, _ ctx: CLIContext) async throws -> Site {
     return site
 }
 
+/// Relative path of `root` under the site's `wordpress/` (for prefilled worktree
+/// commands), or nil when it isn't inside wordpress/.
+private func repoRelPath(root: URL, site: Site) -> String? {
+    let wp = site.wordpressFolder.resolvingSymlinksInPath().path
+    let r = root.resolvingSymlinksInPath().path
+    guard r != wp, r.hasPrefix(wp + "/") else { return nil }
+    return String(r.dropFirst(wp.count + 1))
+}
+
 struct AgentToolsEnable: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "enable", abstract: "Write MCP configs, CLAUDE.md, .gitignore entries and the wp shim into the site folder.")
+    static let configuration = CommandConfiguration(commandName: "enable", abstract: "Write MCP configs, an AGENTS.md block, .gitignore entries and the wp shim into a chosen root (default: the site folder).")
     @Argument(help: "Site slug.") var slug: String
+    @Option(name: .long, help: "Placement root for the generated files (default: site folder). Use your wp-content repo root for IDE discovery.") var root: String?
+    @Option(name: .long, help: "Doc filename: AGENTS.md (default) or CLAUDE.md.") var doc: String?
     @OptionGroup var output: JSONOptions
 
     func run() async throws {
         let ctx = CLIContext()
         do {
             let site = try await loadSite(slug, ctx)
-            let result = try AgentToolsService.enable(site: site)
-            if output.json { emitLine(MCPJSON.string(["ok": true, "written": result.written])) }
-            else { emitLine("Enabled agent tools for \(slug): \(result.written.joined(separator: ", ")).") }
+            let rootURL = root.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) } ?? site.path
+            let result = try AgentToolsService.enable(site: site, root: rootURL, docName: doc,
+                                                      repoRelPath: repoRelPath(root: rootURL, site: site))
+            _ = try await ctx.persistence.mutate { env in
+                if let i = env.sites.firstIndex(where: { $0.id == site.id }) {
+                    env.sites[i].agentToolsRoot = result.root
+                    env.sites[i].agentToolsDoc = result.docName
+                }
+            }
+            if output.json { emitLine(MCPJSON.string(["ok": true, "root": result.root, "doc": result.docName, "written": result.written])) }
+            else { emitLine("Enabled agent tools for \(slug) at \(result.root): \(result.written.joined(separator: ", ")).") }
         } catch { throw failCommand(error, json: output.json) }
     }
 }
 
 struct AgentToolsDisable: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "disable", abstract: "Remove the generated MCP configs and CLAUDE.md from the site folder.")
+    static let configuration = CommandConfiguration(commandName: "disable", abstract: "Remove the generated MCP configs and doc block from the recorded root.")
     @Argument(help: "Site slug.") var slug: String
     @OptionGroup var output: JSONOptions
 
@@ -45,7 +64,14 @@ struct AgentToolsDisable: AsyncParsableCommand {
         let ctx = CLIContext()
         do {
             let site = try await loadSite(slug, ctx)
-            try AgentToolsService.disable(site: site)
+            let rootURL = site.agentToolsRoot.map { URL(fileURLWithPath: $0) } ?? site.path
+            try AgentToolsService.disable(site: site, root: rootURL, docName: site.agentToolsDoc)
+            _ = try await ctx.persistence.mutate { env in
+                if let i = env.sites.firstIndex(where: { $0.id == site.id }) {
+                    env.sites[i].agentToolsRoot = nil
+                    env.sites[i].agentToolsDoc = nil
+                }
+            }
             if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "agent tools disabled for \(slug)"))) }
             else { emitLine("Disabled agent tools for \(slug).") }
         } catch { throw failCommand(error, json: output.json) }

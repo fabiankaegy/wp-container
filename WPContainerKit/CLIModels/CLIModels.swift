@@ -36,7 +36,7 @@ public struct SiteJSON: Codable, Sendable {
         self.name = site.name
         self.slug = site.slug
         self.status = site.status.token
-        self.url = site.localURL.absoluteString
+        self.url = site.url.absoluteString   // effective URL via SiteURL (§2f/§2i)
         self.port = site.port
         self.path = site.path.path
         self.image = site.imageTag

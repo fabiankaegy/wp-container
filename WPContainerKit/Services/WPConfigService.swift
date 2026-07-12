@@ -105,6 +105,43 @@ public enum WPConfigService {
         return backup
     }
 
+    // MARK: - Development constants (§2c-bis)
+
+    /// Debug switches surfaced in Settings → Development (all boolean).
+    public static let debugConstants = ["WP_DEBUG", "WP_DEBUG_LOG", "WP_DEBUG_DISPLAY", "SCRIPT_DEBUG", "SAVEQUERIES"]
+    public static let developmentModeConstant = "WP_DEVELOPMENT_MODE"
+    public static let environmentTypeConstant = "WP_ENVIRONMENT_TYPE"
+
+    /// Set a constant only when it is absent (never overwrite a user value).
+    /// Returns true if it was written.
+    @discardableResult
+    public static func setConstantIfAbsent(_ name: String, value: String, rawValue: Bool, wordpressFolder: URL) throws -> Bool {
+        let parsed = try? read(wordpressFolder: wordpressFolder)
+        if parsed?.constants[name] != nil { return false }
+        try setConstant(name, value: value, rawValue: rawValue, wordpressFolder: wordpressFolder)
+        return true
+    }
+
+    /// Inject the tool's default dev constants (`WP_DEVELOPMENT_MODE=all`,
+    /// `WP_ENVIRONMENT_TYPE=local`) if absent — idempotent (§2c-bis).
+    public static func ensureDevelopmentConstants(wordpressFolder: URL) throws {
+        guard FileManager.default.fileExists(atPath: configURL(for: wordpressFolder).path) else { return }
+        try setConstantIfAbsent(developmentModeConstant, value: "all", rawValue: false, wordpressFolder: wordpressFolder)
+        try setConstantIfAbsent(environmentTypeConstant, value: "local", rawValue: false, wordpressFolder: wordpressFolder)
+    }
+
+    /// Read a boolean constant (a missing constant reads as false).
+    public static func boolConstant(_ name: String, wordpressFolder: URL) -> Bool {
+        guard let parsed = try? read(wordpressFolder: wordpressFolder),
+              let raw = parsed.constants[name] else { return false }
+        return raw.lowercased() == "true" || raw == "1"
+    }
+
+    /// Set a boolean constant verbatim (`true`/`false`).
+    public static func setBoolConstant(_ name: String, _ value: Bool, wordpressFolder: URL) throws {
+        try setConstant(name, value: value ? "true" : "false", rawValue: true, wordpressFolder: wordpressFolder)
+    }
+
     // MARK: - HTTPS proxy snippet (§2f)
 
     private static let forwardedProtoMarker = "// WP Container: honor X-Forwarded-Proto from the local HTTPS proxy"

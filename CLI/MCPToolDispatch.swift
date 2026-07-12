@@ -26,6 +26,8 @@ enum MCPToolDispatch {
             case "worktree_create":   return try await worktreeCreate(args, ctx: ctx, slug: scopedSlug)
             case "worktree_list":     return try await worktreeList(args, ctx: ctx, slug: scopedSlug)
             case "worktree_delete":   return try await worktreeDelete(args, ctx: ctx)
+            case "xdebug_toggle":     return try await addonToggle(args, ctx: ctx, slug: scopedSlug, kind: .xdebug)
+            case "elasticsearch_toggle": return try await addonToggle(args, ctx: ctx, slug: scopedSlug, kind: .elasticsearch)
             default:
                 return MCPResult.failure("Unknown tool: \(params.name)")
             }
@@ -109,19 +111,16 @@ enum MCPToolDispatch {
 
     private static func wpDebugToggle(_ args: [String: Value], ctx: CLIContext, slug: String) async throws -> CallTool.Result {
         let site = try await resolveSite(slug, ctx: ctx)
-        let host = try await dbHost(for: site, ctx: ctx)
         let enabled = args["enabled"]?.boolValue ?? true
         let wpDebug = args["wpDebug"]?.boolValue ?? enabled
         let wpDebugLog = args["wpDebugLog"]?.boolValue ?? enabled
         let scriptDebug = args["scriptDebug"]?.boolValue ?? enabled
-
-        func setConst(_ name: String, _ value: Bool) async throws {
-            _ = try await ctx.cli.runCapturing(SiteRecipe.wpProxyArgs(
-                site, dbHost: host, wpArgs: ["config", "set", name, value ? "true" : "false", "--raw", "--type=constant"]))
-        }
-        try await setConst("WP_DEBUG", wpDebug)
-        try await setConst("WP_DEBUG_LOG", wpDebugLog)
-        try await setConst("SCRIPT_DEBUG", scriptDebug)
+        // Single file-based write path (WPConfigService) — works whether or not
+        // the site is running; constants take effect per-request, no restart.
+        let folder = site.wordpressFolder
+        try WPConfigService.setBoolConstant("WP_DEBUG", wpDebug, wordpressFolder: folder)
+        try WPConfigService.setBoolConstant("WP_DEBUG_LOG", wpDebugLog, wordpressFolder: folder)
+        try WPConfigService.setBoolConstant("SCRIPT_DEBUG", scriptDebug, wordpressFolder: folder)
         return MCPResult.json([
             "WP_DEBUG": wpDebug, "WP_DEBUG_LOG": wpDebugLog, "SCRIPT_DEBUG": scriptDebug,
         ])
@@ -312,6 +311,38 @@ enum MCPToolDispatch {
         await ctx.worktrees.delete(env, parent: parent, keepBranch: keepBranch, keepWorktree: keepWorktree)
         _ = try await ctx.persistence.mutate { store in store.envs.removeAll { $0.id == env.id } }
         return MCPResult.json(["ok": true, "envSlug": envSlug])
+    }
+
+    // MARK: - Add-on toggles (§2c)
+
+    private enum Addon { case xdebug, elasticsearch }
+
+    private static func addonToggle(_ args: [String: Value], ctx: CLIContext, slug: String, kind: Addon) async throws -> CallTool.Result {
+        guard let enabled = args["enabled"]?.boolValue else { throw ToolError("bad_args", "`enabled` is required.") }
+        let site = try await resolveSite(slug, ctx: ctx)
+        let updated = try await ctx.persistence.mutate { env in
+            if let i = env.sites.firstIndex(where: { $0.id == site.id }) {
+                switch kind {
+                case .xdebug:        env.sites[i].xdebugEnabled = enabled
+                case .elasticsearch: env.sites[i].elasticsearchEnabled = enabled
+                }
+            }
+        }
+        let newSite = updated.sites.first { $0.id == site.id } ?? site
+        let running = await ctx.runningContainerNames()
+        var restarted = false
+        if running.contains(site.wpContainerName) {
+            await ctx.lifecycle.stop(newSite)
+            _ = try await ctx.lifecycle.startSite(newSite)
+            await ctx.lifecycle.markRunning(newSite.id)
+            restarted = true
+        }
+        return MCPResult.json([
+            "ok": true,
+            "addon": kind == .xdebug ? "xdebug" : "elasticsearch",
+            "enabled": enabled,
+            "restarted": restarted,
+        ])
     }
 
     // MARK: - Small utilities

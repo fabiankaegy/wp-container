@@ -127,6 +127,9 @@ public actor SiteLifecycle {
                 throw error
             }
         }
+        // Ensure the tool's default dev constants exist (idempotent; never
+        // overwrites user-changed values) on every start (§2c-bis).
+        try? WPConfigService.ensureDevelopmentConstants(wordpressFolder: site.wordpressFolder)
         emit(site.id, .running)
         return provisioned
     }

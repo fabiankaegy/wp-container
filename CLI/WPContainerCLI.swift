@@ -135,7 +135,7 @@ struct ListCommand: AsyncParsableCommand {
                     emitLine("No sites.")
                 }
                 for s in envelope.sites {
-                    emitLine("\(s.status.token.padding(toLength: 8, withPad: " ", startingAt: 0))  \(s.slug)  \(s.localURL.absoluteString)")
+                    emitLine("\(s.status.token.padding(toLength: 8, withPad: " ", startingAt: 0))  \(s.slug)  \(s.url.absoluteString)")
                 }
                 for e in envelope.envs {
                     emitLine("\(e.status.token.padding(toLength: 8, withPad: " ", startingAt: 0))  \(e.envSlug) [env]  \(e.localURL.absoluteString)")
