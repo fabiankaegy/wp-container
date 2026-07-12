@@ -35,8 +35,8 @@ enum Theme {
     // Text/controls that sit on the dark chrome (forced light regardless of
     // system appearance, because the frame is always dark).
     static let onFrame = Color.white.opacity(0.92)
-    static let onFrameSecondary = Color.white.opacity(0.52)
-    static let onFrameTertiary = Color.white.opacity(0.34)
+    static let onFrameSecondary = Color.white.opacity(0.65)
+    static let onFrameTertiary = Color.white.opacity(0.45)
     /// Rounded selection / hover fills for sidebar rows.
     static let sidebarSelection = Color.white.opacity(0.14)
     static let sidebarHover = Color.white.opacity(0.07)
@@ -60,7 +60,9 @@ enum Theme {
         case .starting: return .orange
         case .stopping: return .orange
         case .error:    return .red
-        case .stopped:  return .secondary
+        // Fixed neutral gray — NOT `.secondary`, which resolves to near-black
+        // in light appearance and would vanish on the constant-dark sidebar.
+        case .stopped:  return .gray
         }
     }
 

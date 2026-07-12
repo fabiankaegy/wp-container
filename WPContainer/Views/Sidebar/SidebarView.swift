@@ -99,31 +99,14 @@ struct SidebarView: View {
     }
 
     private func groupHeader(_ group: SiteGroup, count: Int, isCollapsed: Bool) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: "chevron.right")
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(Theme.onFrameSecondary)
-                .rotationEffect(.degrees(isCollapsed ? 0 : 90))
-            Text(group.name.uppercased())
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(Theme.onFrameSecondary)
-                .lineLimit(1)
-            Text("\(count)")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(Theme.onFrameTertiary)
-            Spacer()
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-        .contentShape(Rectangle())
-        .onTapGesture {
+        GroupHeaderRow(group: group, count: count, isCollapsed: isCollapsed) {
             withAnimation(.easeOut(duration: 0.15)) {
                 if isCollapsed { collapsed.remove(group.id) } else { collapsed.insert(group.id) }
             }
-        }
-        .contextMenu {
-            Button("Rename Group…") { renameText = group.name; renamingGroup = group }
-            Button("Delete Group", role: .destructive) { vm.deleteGroup(group) }
+        } onRename: {
+            renameText = group.name; renamingGroup = group
+        } onDelete: {
+            vm.deleteGroup(group)
         }
     }
 
@@ -147,25 +130,19 @@ struct SidebarView: View {
     // MARK: Brand
 
     private var brand: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "cube.transparent.fill")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(Theme.accent)
+        HStack(spacing: 9) {
+            // The real app icon artwork (Liquid Glass W mark) — reads far better
+            // at small size than an SF-symbol stand-in.
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 26, height: 26)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             Text("WP Container")
                 .font(.headline)
                 .foregroundStyle(Theme.onFrame)
             Spacer()
-            Menu {
-                Button("New Group…") { newGroupName = ""; newGroupPresented = true }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Theme.onFrameSecondary)
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("Sidebar options")
+            NewGroupButton { newGroupName = ""; newGroupPresented = true }
         }
         .padding(.horizontal, 16)
         .padding(.top, Theme.titlebarInset + 8)
@@ -206,6 +183,73 @@ struct SidebarView: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// A collapsible group section header on the dark chrome: chevron + uppercase
+/// name + count, all in explicit on-frame colors (brightening on hover), with
+/// the rename/delete context menu. All colors are fixed-light because the
+/// sidebar is constant-dark in both system appearances.
+private struct GroupHeaderRow: View {
+    let group: SiteGroup
+    let count: Int
+    let isCollapsed: Bool
+    let onToggle: () -> Void
+    let onRename: () -> Void
+    let onDelete: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "chevron.right")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(hovering ? Theme.onFrame : Theme.onFrameSecondary)
+                .rotationEffect(.degrees(isCollapsed ? 0 : 90))
+            Text(group.name.uppercased())
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(hovering ? Theme.onFrame : Theme.onFrameSecondary)
+                .lineLimit(1)
+            Text("\(count)")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(Theme.onFrameTertiary)
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .onTapGesture(perform: onToggle)
+        .contextMenu {
+            Button("Rename Group…", action: onRename)
+            Button("Delete Group", role: .destructive, action: onDelete)
+        }
+    }
+}
+
+/// The "New Group" affordance in the brand header: a plain-styled button with
+/// explicit on-frame coloring (system button/menu styles must never be used on
+/// the constant-dark chrome — they resolve dark in light appearance).
+private struct NewGroupButton: View {
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "folder.badge.plus")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(hovering ? Theme.onFrame : Theme.onFrameSecondary)
+                .frame(width: 24, height: 24)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(hovering ? Theme.sidebarHover : .clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .help("New Group…")
     }
 }
 
