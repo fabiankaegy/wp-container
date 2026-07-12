@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/icon-source.png" width="160" alt="WP Container icon">
+  <img src="docs/assets/icon.png" width="160" alt="WP Container icon">
 </p>
 
 <h1 align="center">WP Container</h1>
@@ -29,6 +29,18 @@ installation lives in a normal folder on your Mac** — drop your git-managed
 
 Sites are provisioned automatically (no install wizard) and log in with
 `admin` / `password`.
+
+<p align="center">
+  <img src="docs/assets/screenshot-main.png" alt="WP Container — site overview with branch environments" width="850">
+</p>
+
+<p align="center">
+  <img src="docs/assets/screenshot-settings.png" alt="Settings — trusted HTTPS, AI agent tools, Xdebug, Elasticsearch, and WP_DEBUG controls" width="850">
+</p>
+
+<p align="center">
+  <img src="docs/assets/screenshot-menubar.png" alt="Menu bar extra with per-site status and start/stop" width="420">
+</p>
 
 ## Highlights
 
