@@ -49,6 +49,10 @@ Sites are provisioned automatically (no install wizard) and log in with
 - **Ephemeral containers, durable sites** — containers are disposable (`--rm`);
   all state lives in the site folder. Sites survive app restarts and reconcile
   against real container state via labels.
+- **Studio-style dark-frame UI** — dark window shell with a light inset content
+  panel, Overview / Logs / Settings tabs, collapsible **site groups** with
+  drag & drop, and a **menu bar extra** for one-glance status and start/stop of
+  every site.
 
 ## In progress
 
@@ -63,7 +67,9 @@ Being built right now (tracked in [PLAN.md](PLAN.md)):
   host-side TLS proxy, one-time keychain trust.
 - **Xdebug & Elasticsearch toggles** — per-site, one click; recipes already
   validated on Apple container (see `scripts/validate-addons.sh`).
-- **Studio dark-frame UI, site groups, menu bar quick-toggle list.**
+- **Custom domains** (`mysite.local`) with managed /etc/hosts entries, **multisite**
+  networks (subdirectory & subdomain), and a **WP × PHP version matrix** in the
+  new-site setup guide.
 
 ## Requirements
 
