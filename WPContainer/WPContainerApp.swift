@@ -3,14 +3,23 @@ import WPContainerKit
 
 @main
 struct WPContainerApp: App {
-    @State private var viewModel = AppViewModel()
+    @State private var viewModel: AppViewModel
+
+    init() {
+        let vm = AppViewModel()
+        _viewModel = State(initialValue: vm)
+        // Bootstrap at APP level, not window level: the menu bar extra must have
+        // a loaded store + running reconcile loop even if the popover is opened
+        // before the main window appears (or after it has been closed).
+        Task { @MainActor in await vm.onAppear() }
+    }
 
     var body: some Scene {
         WindowGroup(id: "main") {
             MainWindow()
                 .environment(viewModel)
                 .frame(minWidth: 880, minHeight: 560)
-                .task { await viewModel.onAppear() }
+                .task { await viewModel.onAppear() } // idempotent belt-and-braces
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)

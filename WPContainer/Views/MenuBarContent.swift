@@ -19,39 +19,63 @@ struct MenuBarContent: View {
             Divider()
             if vm.sites.isEmpty {
                 emptyState
+            } else if rowCount <= 9 {
+                // Plain VStack so the popover window sizes to the content.
+                // (A ScrollView with `.frame(maxHeight:)` collapses to ZERO
+                // height inside a MenuBarExtra window — its ideal height is
+                // not derived from the content there, which rendered the list
+                // invisible while header/footer still showed.)
+                list
             } else {
+                // Long lists: scroll inside an EXPLICIT height (never maxHeight,
+                // see above).
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 1) {
-                        // Ungrouped sites first.
-                        ForEach(vm.sites.filter { $0.groupID == nil }) { site in
-                            SiteMenuRow(site: site, focus: focusMainWindow)
-                        }
-                        // Grouped sites, in sidebar order, with tiny headers.
-                        ForEach(vm.store.sortedGroups) { group in
-                            let sites = vm.sites.filter { $0.groupID == group.id }
-                            if !sites.isEmpty {
-                                sectionHeader(group.name)
-                                ForEach(sites) { site in
-                                    SiteMenuRow(site: site, focus: focusMainWindow)
-                                }
-                            }
-                        }
-                        // Running worktree environments.
-                        if !runningEnvs.isEmpty {
-                            sectionHeader("Environments")
-                            ForEach(runningEnvs) { env in
-                                EnvMenuRow(env: env, focus: focusMainWindow)
-                            }
-                        }
-                    }
-                    .padding(6)
+                    list
                 }
-                .frame(maxHeight: 380)
+                .frame(height: 380)
             }
             Divider()
             footer
         }
         .frame(width: 300)
+    }
+
+    /// Row-ish units used to decide between intrinsic sizing and scrolling.
+    private var rowCount: Int {
+        var count = vm.sites.count + runningEnvs.count
+        count += vm.store.sortedGroups.filter { group in
+            vm.sites.contains { $0.groupID == group.id }
+        }.count
+        if !runningEnvs.isEmpty { count += 1 }
+        return count
+    }
+
+    /// The site/env list itself (shared by the intrinsic and scrolling layouts).
+    private var list: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            // Ungrouped sites first.
+            ForEach(vm.sites.filter { $0.groupID == nil }) { site in
+                SiteMenuRow(site: site, focus: focusMainWindow)
+            }
+            // Grouped sites, in sidebar order, with tiny headers.
+            ForEach(vm.store.sortedGroups) { group in
+                let sites = vm.sites.filter { $0.groupID == group.id }
+                if !sites.isEmpty {
+                    sectionHeader(group.name)
+                    ForEach(sites) { site in
+                        SiteMenuRow(site: site, focus: focusMainWindow)
+                    }
+                }
+            }
+            // Running worktree environments.
+            if !runningEnvs.isEmpty {
+                sectionHeader("Environments")
+                ForEach(runningEnvs) { env in
+                    EnvMenuRow(env: env, focus: focusMainWindow)
+                }
+            }
+        }
+        .padding(6)
     }
 
     private var header: some View {

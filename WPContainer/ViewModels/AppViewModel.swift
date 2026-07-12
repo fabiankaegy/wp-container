@@ -34,6 +34,7 @@ public final class AppViewModel {
 
     @ObservationIgnored private var reconcileTask: Task<Void, Never>?
     @ObservationIgnored private var statusTask: Task<Void, Never>?
+    @ObservationIgnored private var started = false
 
     public init() {
         let cli = ContainerCLI()
@@ -56,7 +57,12 @@ public final class AppViewModel {
 
     // MARK: - Lifecycle of the view model
 
+    /// Idempotent: invoked once from the App's init (so the menu bar extra works
+    /// without the main window) and again from the window's `.task`, which is a
+    /// no-op after the first call.
     public func onAppear() async {
+        guard !started else { return }
+        started = true
         await store.start()
         await refreshSystemStatus()
         await refreshCATrusted()

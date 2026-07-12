@@ -182,6 +182,9 @@ public final class SiteStore {
     }
 
     private func startWatching() {
+        // Re-entrancy guard: never stack a second watcher on the first (a
+        // repeated `start()` would otherwise leak the old source + fd).
+        if watcher != nil { return }
         let path = persistence.fileURL.path
         // Ensure the file exists so we have something to watch.
         if !FileManager.default.fileExists(atPath: path) {
