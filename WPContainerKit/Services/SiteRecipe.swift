@@ -164,6 +164,23 @@ public enum SiteRecipe {
         return args
     }
 
+    /// Set `home`/`siteurl` to an arbitrary URL + flush cache — used when
+    /// toggling HTTPS on/off for a site (PLAN.md §2f).
+    public static func wpSetURLsArgs(_ inst: any RunnableInstance, dbHost: String, url: String) -> [String] {
+        var args = wpCLIBaseArgs(inst, dbHost: dbHost)
+        args += [
+            wpCLIImage,
+            "sh", "-c",
+            "wp option update home '\(url)' && wp option update siteurl '\(url)' && wp cache flush",
+        ]
+        return args
+    }
+
+    /// One-shot `container logs [<name>]` (non-follow) for log-reading tools.
+    public static func logsArgs(_ containerName: String) -> [String] {
+        ["logs", containerName]
+    }
+
     /// Arbitrary proxied one-shot wp-cli invocation (`wp-container wp <site> -- …`).
     public static func wpProxyArgs(_ inst: any RunnableInstance, dbHost: String, wpArgs: [String]) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
