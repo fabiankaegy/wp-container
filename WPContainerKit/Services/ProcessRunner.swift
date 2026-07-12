@@ -14,6 +14,26 @@ public struct CommandResult: Sendable {
     }
 }
 
+/// Sendable holder for a child pid so a `Task` cancellation handler can signal
+/// the process without capturing the non-`Sendable` `Process`. Tolerates the
+/// cancel firing before the process is launched (the `cancelled` flag makes
+/// `adopt` terminate immediately in that case).
+final class ProcessHandle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pid: pid_t = 0
+    private var cancelled = false
+    /// Record the launched child's pid; terminate at once if already cancelled.
+    func adopt(_ p: pid_t) {
+        lock.lock(); let c = cancelled; pid = p; lock.unlock()
+        if c && p > 0 { kill(p, SIGTERM) }
+    }
+    /// Mark cancelled and signal the child if it has been launched.
+    func terminate() {
+        lock.lock(); cancelled = true; let p = pid; lock.unlock()
+        if p > 0 { kill(p, SIGTERM) }
+    }
+}
+
 /// Thread-safe mutable box for shuttling captured output off background queues.
 final class DataBox: @unchecked Sendable {
     private let lock = NSLock()
@@ -29,6 +49,13 @@ final class DataBox: @unchecked Sendable {
 /// classic pipe-buffer deadlock on large output, and the whole blocking dance
 /// runs off the calling actor via a continuation so no cooperative thread is
 /// blocked.
+///
+/// Cancellation of the calling `Task` is honored: the child is sent `SIGTERM`,
+/// which closes its pipes, unblocks the drains, and lets the continuation resume
+/// normally. Without this a stalled `container image pull`/`run` (or any hung
+/// child) could never be interrupted, and cancelling a SwiftUI `Task` mid-call
+/// leaked the child process. The polling loops in `SiteLifecycle` already call
+/// `Task.checkCancellation()`; this makes those checks effective end-to-end.
 public enum ProcessRunner {
     public static func run(
         executable: String,
@@ -36,27 +63,32 @@ public enum ProcessRunner {
         cwd: URL? = nil,
         environment: [String: String]? = nil
     ) async throws -> CommandResult {
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<CommandResult, Error>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: executable)
-                process.arguments = args
-                if let cwd { process.currentDirectoryURL = cwd }
-                if let environment { process.environment = environment }
+        let handle = ProcessHandle()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<CommandResult, Error>) in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let process = Process()
+                    process.executableURL = URL(fileURLWithPath: executable)
+                    process.arguments = args
+                    if let cwd { process.currentDirectoryURL = cwd }
+                    if let environment { process.environment = environment }
 
-                let outPipe = Pipe()
-                let errPipe = Pipe()
-                process.standardOutput = outPipe
-                process.standardError = errPipe
+                    let outPipe = Pipe()
+                    let errPipe = Pipe()
+                    process.standardOutput = outPipe
+                    process.standardError = errPipe
 
-                do {
-                    try process.run()
-                } catch {
-                    cont.resume(throwing: error)
-                    return
-                }
+                    do {
+                        try process.run()
+                    } catch {
+                        cont.resume(throwing: error)
+                        return
+                    }
+                    // Adopt the pid so an out-of-band cancellation can signal it.
+                    // If cancellation already fired, this terminates immediately.
+                    handle.adopt(process.processIdentifier)
 
-                let outBox = DataBox()
+                    let outBox = DataBox()
                 let errBox = DataBox()
                 let outFD = outPipe.fileHandleForReading.fileDescriptor
                 let errFD = errPipe.fileHandleForReading.fileDescriptor
@@ -78,12 +110,15 @@ public enum ProcessRunner {
                 _ = outPipe
                 _ = errPipe
 
-                cont.resume(returning: CommandResult(
-                    stdout: String(decoding: outBox.data, as: UTF8.self),
-                    stderr: String(decoding: errBox.data, as: UTF8.self),
-                    exitCode: process.terminationStatus
-                ))
+                    cont.resume(returning: CommandResult(
+                        stdout: String(decoding: outBox.data, as: UTF8.self),
+                        stderr: String(decoding: errBox.data, as: UTF8.self),
+                        exitCode: process.terminationStatus
+                    ))
+                }
             }
+        } onCancel: {
+            handle.terminate()
         }
     }
 
