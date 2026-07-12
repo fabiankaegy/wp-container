@@ -44,8 +44,10 @@ Sites are provisioned automatically (no install wizard) and log in with
   # → {"url": "http://127.0.0.1:8882", "path": …, "worktreePath": …}
   ```
 - **`wp-container` CLI** — everything the app does, scriptable, with `--json`
-  everywhere: `list`, `create`, `start`, `stop`, `delete`, `worktree …`, `wp …`
-  (wp-cli proxy). Install with `make install-cli` (adds a `wpc` shortcut).
+  everywhere: `list`, `create` (`--wp/--php/--multisite/--domain/--group`),
+  `start`, `stop`, `delete`, `worktree …`, `wp …` (wp-cli proxy), `xdebug`,
+  `elasticsearch`, `domain`, `https`, `resolve-site`, `setup wp`. Install with
+  `make install-cli` (adds a `wpc` shortcut + the global `wp` router binary).
 - **Ephemeral containers, durable sites** — containers are disposable (`--rm`);
   all state lives in the site folder. Sites survive app restarts and reconcile
   against real container state via labels.
@@ -54,27 +56,37 @@ Sites are provisioned automatically (no install wizard) and log in with
   drag & drop, and a **menu bar extra** for one-glance status and start/stop of
   every site.
 
-- **MCP agent tools** — `wp-container agent-tools enable <site>` writes `.mcp.json`
-  (+ Cursor/VS Code configs and a `CLAUDE.md`) into the site folder; the bundled
-  MCP stdio server (`wp-container mcp --site <slug>`) exposes 16 tools in the
-  spirit of [10up/localwp-agent-tools](https://github.com/10up/localwp-agent-tools):
+- **Xdebug & Elasticsearch** — per-site one-click toggles in Settings → Development.
+  Xdebug builds a derived image once per base tag and points `client_host` at the
+  host gateway (port 9003); Elasticsearch runs a single-node sidecar wired into
+  WordPress (ElasticPress-ready). Recipes validated in `scripts/validate-addons.sh`.
+- **Custom domains** — give a site `mysite.local`; a managed `/etc/hosts` block plus
+  the host proxy route it (HTTP and HTTPS), the local cert re-issues to cover it,
+  and WordPress URLs update automatically.
+- **Multisite** — create subdirectory or subdomain networks from the setup guide
+  (`wp core multisite-install` + MULTISITE constants + network `.htaccess`); the
+  Overview tab lists network subsites.
+- **WP × PHP versions** — the new-site flow is a 3-step guide (name → WordPress ×
+  PHP version with a live image-tag preview → options); change PHP later (image
+  swap + restart) or update core from Settings → Software.
+- **MCP agent tools** — `wp-container agent-tools enable <site> [--root …]` writes
+  `.mcp.json` (+ Cursor/VS Code configs) and a marked `AGENTS.md` block into a
+  chosen root (site folder, or your `wp-content` repo root for IDE discovery);
+  the bundled MCP stdio server (`wp-container mcp --site <slug>`) exposes 18 tools
+  in the spirit of [10up/localwp-agent-tools](https://github.com/10up/localwp-agent-tools):
   `wp_cli`, log readers, `wp-config` editing, site info/health, start/stop/status,
-  `list_sites` — plus `worktree_create` / `worktree_list` / `worktree_delete`.
-- **Trusted HTTPS** — mkcert-style local CA with one-time keychain trust;
-  `https://<site>.localhost` served by a host-side TLS reverse proxy (port 443,
-  Host-header routing). Toggle per site in Settings → Integrations.
-- **wp-cli everywhere** — `wp-container wp <site> -- …`, a `./wp` shim in every
-  site folder, an interactive WP-CLI Terminal button, and the MCP `wp_cli` tool.
-
-## In progress
-
-Being built right now (tracked in [PLAN.md](PLAN.md)):
-
-- **Xdebug & Elasticsearch toggles** — per-site, one click; recipes already
-  validated on Apple container (see `scripts/validate-addons.sh`).
-- **Custom domains** (`mysite.local`) with managed /etc/hosts entries, **multisite**
-  networks (subdirectory & subdomain), and a **WP × PHP version matrix** in the
-  new-site setup guide.
+  `list_sites`, `worktree_*`, plus `xdebug_toggle` / `elasticsearch_toggle`.
+- **Trusted HTTPS** — mkcert-style local CA trusted per-user in the login keychain
+  (**no admin password — Touch ID supported**); `https://<site>.localhost` (or your
+  custom domain) served by a host-side TLS reverse proxy (443, Host-header routing).
+- **wp-cli everywhere** — `wp-container wp <site> -- …`; a `./wp` shim in every site
+  that maps your current subdirectory into the container; an optional global `wp`
+  router (`wp-container setup wp`) so plain `wp` inside a site runs containerized
+  wp-cli and defers to Homebrew's `wp` elsewhere; an interactive WP-CLI Terminal
+  button; and the MCP `wp_cli` tool.
+- **Dev-ready by default** — every site gets `WP_DEVELOPMENT_MODE=all` /
+  `WP_ENVIRONMENT_TYPE=local`, with live `WP_DEBUG`-family switches in
+  Settings → Development.
 
 ## Requirements
 

@@ -261,6 +261,28 @@ row. The list mirrors sidebar grouping order but flat/compact. App keeps running
 - wp-cli updates home/siteurl on domain change; wp-config gets the proxy-header
   snippet (shared with §2f).
 
+## 2f-bis. Privileged actions & Touch ID (shipped decisions + TODO)
+
+- **CA trust — no admin, Touch-ID-capable (shipped).** Empirically verified that
+  `security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db
+  ca.pem` (USER trust domain, no `-d`) trusts the CA **without** administrator
+  privileges and `security verify-cert` then passes; user-domain root trust is
+  honored by Safari/Chrome. The SecurityAgent confirmation dialog it may show
+  supports Touch ID. `CertificateAuthority.trustCA()` uses this path (was: an
+  osascript System-keychain admin prompt); `untrustCA()` is the documented undo.
+- **/etc/hosts (custom domains) — interim osascript, helper TODO.** Writing
+  `/etc/hosts` genuinely needs root. Shipped path: `HostsFileService.apply` stages
+  the rewritten file and copies it over via one `osascript … with administrator
+  privileges` prompt (password or Touch-ID-for-sudo if the user has `pam_tid`
+  enabled). The block-manipulation core is pure + spot-tested.
+  - **TODO (preferred):** a tiny privileged helper registered via `SMAppService`
+    (daemon) + XPC exposing exactly `writeHostsBlock(entries)` /
+    `removeHostsBlock()`, with the app calling `AuthorizationCreate` +
+    `kAuthorizationFlagInteractionAllowed` so the system auth dialog (Touch-ID
+    capable) gates the operation. Helper must hard-validate inputs (only our
+    marker block, only `127.0.0.1` lines, hostname regex). Deferred here because
+    an embedded, signed helper is not verifiable under this repo's ad-hoc signing.
+
 ## 2j. Multisite support
 
 - Add Site setup offers Network type: **Single site** (default) / **Multisite —
