@@ -1,0 +1,381 @@
+import ArgumentParser
+import Foundation
+import WPContainerKit
+
+// MARK: - Root command
+
+@main
+struct WPContainerCLI: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "wp-container",
+        abstract: "Manage local WordPress dev sites and git worktree environments running on Apple containers.",
+        version: "0.1.0",
+        subcommands: [
+            ListCommand.self,
+            CreateCommand.self,
+            StartCommand.self,
+            StopCommand.self,
+            DeleteCommand.self,
+            WorktreeCommand.self,
+            WPCommand.self,
+        ]
+    )
+}
+
+// MARK: - Shared options / helpers
+
+struct JSONOptions: ParsableArguments {
+    @Flag(name: .long, help: "Emit machine-readable JSON.")
+    var json = false
+}
+
+/// Bundle of services + persistence for a single CLI invocation.
+struct CLIContext {
+    let persistence = StorePersistence()
+    let cli = ContainerCLI()
+    let git = GitService()
+    let lifecycle: SiteLifecycle
+    let worktrees: WorktreeEnvService
+
+    init() {
+        let c = cli
+        let g = git
+        let lc = SiteLifecycle(cli: c)
+        self.lifecycle = lc
+        self.worktrees = WorktreeEnvService(cli: c, git: g, lifecycle: lc)
+    }
+
+    func load() async throws -> StoreEnvelope { try await persistence.load() }
+
+    /// Names of currently-running containers.
+    func runningContainerNames() async -> Set<String> {
+        guard let records = try? await cli.list(all: true) else { return [] }
+        return Set(records.filter { $0.isRunning }.map { $0.name })
+    }
+}
+
+enum ResolvedTarget {
+    case site(Site)
+    case env(WorktreeEnv)
+
+    var instance: any RunnableInstance {
+        switch self {
+        case .site(let s): return s
+        case .env(let e): return e
+        }
+    }
+}
+
+func resolveTarget(_ identifier: String, in envelope: StoreEnvelope) -> ResolvedTarget? {
+    if let s = envelope.sites.first(where: { $0.slug == identifier }) { return .site(s) }
+    if let e = envelope.envs.first(where: { $0.envSlug == identifier }) { return .env(e) }
+    return nil
+}
+
+func emitLine(_ text: String) {
+    FileHandle.standardOutput.write(Data((text + "\n").utf8))
+}
+
+/// Print an error (JSON on stderr when `--json`) and exit non-zero.
+func failCommand(_ error: Error, json: Bool) -> ExitCode {
+    let cliError = (error as? CLIErrorJSON) ?? CLIErrorJSON(humanText(error))
+    if json {
+        FileHandle.standardError.write(Data((CLIJSON.string(cliError) + "\n").utf8))
+    } else {
+        var line = cliError.error
+        if let d = cliError.detail { line += ": \(d)" }
+        FileHandle.standardError.write(Data((line + "\n").utf8))
+    }
+    return ExitCode.failure
+}
+
+private func humanText(_ error: Error) -> String {
+    if let e = error as? ContainerCLIError { return e.description }
+    if let e = error as? LifecycleError { return e.description }
+    if let e = error as? GitError { return e.description }
+    if let e = error as? WorktreeError { return e.description }
+    return "\(error)"
+}
+
+// MARK: - list
+
+struct ListCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "list", abstract: "List sites and worktree envs with status/url/port.")
+    @OptionGroup var output: JSONOptions
+
+    func run() async throws {
+        let ctx = CLIContext()
+        do {
+            var envelope = try await ctx.load()
+            let running = await ctx.runningContainerNames()
+            // Apply live status.
+            for i in envelope.sites.indices {
+                envelope.sites[i].status = running.contains(envelope.sites[i].wpContainerName) ? .running : .stopped
+            }
+            for i in envelope.envs.indices {
+                envelope.envs[i].status = running.contains(envelope.envs[i].wpContainerName) ? .running : .stopped
+            }
+            if output.json {
+                let payload = ListJSON(sites: envelope.sites.map(SiteJSON.init),
+                                       envs: envelope.envs.map(EnvJSON.init))
+                emitLine(CLIJSON.string(payload))
+            } else {
+                if envelope.sites.isEmpty && envelope.envs.isEmpty {
+                    emitLine("No sites.")
+                }
+                for s in envelope.sites {
+                    emitLine("\(s.status.token.padding(toLength: 8, withPad: " ", startingAt: 0))  \(s.slug)  \(s.localURL.absoluteString)")
+                }
+                for e in envelope.envs {
+                    emitLine("\(e.status.token.padding(toLength: 8, withPad: " ", startingAt: 0))  \(e.envSlug) [env]  \(e.localURL.absoluteString)")
+                }
+            }
+        } catch {
+            throw failCommand(error, json: output.json)
+        }
+    }
+}
+
+// MARK: - create
+
+struct CreateCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "create", abstract: "Create a new site (does not start it).")
+    @Argument(help: "Site name.") var name: String
+    @Option(name: .long, help: "Parent folder (default: ~/WP Container Sites).") var path: String?
+    @Option(name: .long, help: "WordPress image tag (e.g. wordpress:php8.3-apache).") var php: String?
+    @OptionGroup var output: JSONOptions
+
+    func run() async throws {
+        let ctx = CLIContext()
+        do {
+            let envelope = try await ctx.load()
+            let slug = Slug.unique(name, existing: Set(envelope.sites.map(\.slug)))
+            let taken = Set(envelope.sites.map(\.port)).union(envelope.envs.map(\.port))
+            guard let port = PortAllocator.firstFreePort(excluding: taken) else {
+                throw CLIErrorJSON("no_free_port")
+            }
+            let root = path.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) } ?? SiteFolders.defaultSitesRoot
+            let site = Site(name: name, slug: slug,
+                            path: root.appendingPathComponent(slug, isDirectory: true),
+                            port: port, imageTag: php ?? SiteRecipe.defaultWordPressImage, phpVersion: php)
+            try SiteFolders.ensure(for: site)
+            _ = try await ctx.persistence.mutate { $0.sites.append(site) }
+            if output.json { emitLine(CLIJSON.string(SiteJSON(from: site))) }
+            else { emitLine("Created \(site.slug) at \(site.path.path) (port \(site.port)).") }
+        } catch {
+            throw failCommand(error, json: output.json)
+        }
+    }
+}
+
+// MARK: - start / stop / delete
+
+struct StartCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "start", abstract: "Start a site or env.")
+    @Argument(help: "Site slug or env slug.") var target: String
+    @OptionGroup var output: JSONOptions
+
+    func run() async throws {
+        let ctx = CLIContext()
+        do {
+            let envelope = try await ctx.load()
+            guard let resolved = resolveTarget(target, in: envelope) else { throw CLIErrorJSON("not_found", detail: target) }
+            switch resolved {
+            case .site(let site):
+                let provisioned = try await ctx.lifecycle.startSite(site)
+                if provisioned != site.provisioned {
+                    _ = try await ctx.persistence.mutate { env in
+                        if let i = env.sites.firstIndex(where: { $0.id == site.id }) { env.sites[i].provisioned = provisioned }
+                    }
+                }
+            case .env(let env):
+                _ = try await ctx.lifecycle.startContainers(env)
+                await ctx.lifecycle.markRunning(env.id)
+            }
+            if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(target) started"))) }
+            else { emitLine("Started \(target).") }
+        } catch {
+            throw failCommand(error, json: output.json)
+        }
+    }
+}
+
+struct StopCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "stop", abstract: "Stop a site or env.")
+    @Argument(help: "Site slug or env slug.") var target: String
+    @OptionGroup var output: JSONOptions
+
+    func run() async throws {
+        let ctx = CLIContext()
+        do {
+            let envelope = try await ctx.load()
+            guard let resolved = resolveTarget(target, in: envelope) else { throw CLIErrorJSON("not_found", detail: target) }
+            await ctx.lifecycle.stop(resolved.instance)
+            if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(target) stopped"))) }
+            else { emitLine("Stopped \(target).") }
+        } catch {
+            throw failCommand(error, json: output.json)
+        }
+    }
+}
+
+struct DeleteCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "delete", abstract: "Delete a site (and its envs) or a single env.")
+    @Argument(help: "Site slug or env slug.") var target: String
+    @Flag(name: .long, help: "Do not trash the site folder on disk.") var keepFolder = false
+    @OptionGroup var output: JSONOptions
+
+    func run() async throws {
+        let ctx = CLIContext()
+        do {
+            let envelope = try await ctx.load()
+            guard let resolved = resolveTarget(target, in: envelope) else { throw CLIErrorJSON("not_found", detail: target) }
+            switch resolved {
+            case .site(let site):
+                for env in envelope.envs.filter({ $0.parentSiteID == site.id }) {
+                    await ctx.worktrees.delete(env, parent: site, keepBranch: true, keepWorktree: false)
+                }
+                await ctx.lifecycle.deleteContainers(site)
+                if !keepFolder { try? FileManager.default.trashItem(at: site.path, resultingItemURL: nil) }
+                _ = try await ctx.persistence.mutate { env in
+                    env.sites.removeAll { $0.id == site.id }
+                    env.envs.removeAll { $0.parentSiteID == site.id }
+                }
+            case .env(let env):
+                let parent = envelope.sites.first { $0.id == env.parentSiteID }
+                await ctx.worktrees.delete(env, parent: parent, keepBranch: true, keepWorktree: false)
+                _ = try await ctx.persistence.mutate { store in store.envs.removeAll { $0.id == env.id } }
+            }
+            if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(target) deleted"))) }
+            else { emitLine("Deleted \(target).") }
+        } catch {
+            throw failCommand(error, json: output.json)
+        }
+    }
+}
+
+// MARK: - worktree
+
+struct WorktreeCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "worktree",
+        abstract: "Manage git worktree environments.",
+        subcommands: [WorktreeCreate.self, WorktreeList.self, WorktreeDelete.self]
+    )
+}
+
+struct WorktreeCreate: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "create", abstract: "Create a branch environment for a repo under a site's wp-content.")
+    @Option(name: .long, help: "Parent site slug.") var site: String
+    @Option(name: .long, help: "Repo path relative to wordpress/ (e.g. wp-content/plugins/my-plugin).") var repo: String
+    @Option(name: .long, help: "Branch name.") var branch: String
+    @Option(name: .long, help: "Base ref for a new branch.") var from: String?
+    @OptionGroup var output: JSONOptions
+
+    func run() async throws {
+        let ctx = CLIContext()
+        do {
+            let envelope = try await ctx.load()
+            guard let parent = envelope.sites.first(where: { $0.slug == site }) else { throw CLIErrorJSON("site_not_found", detail: site) }
+            let taken = Set(envelope.sites.map(\.port)).union(envelope.envs.map(\.port))
+            guard let port = PortAllocator.firstFreePort(excluding: taken) else { throw CLIErrorJSON("no_free_port") }
+            let running = await ctx.runningContainerNames()
+            let parentRunning = running.contains(parent.wpContainerName)
+
+            let env = try await ctx.worktrees.create(parent: parent, parentIsRunning: parentRunning,
+                                                     repoRelPath: repo, branch: branch, from: from, port: port)
+            _ = try await ctx.persistence.mutate { $0.envs.append(env) }
+
+            if output.json { emitLine(CLIJSON.string(WorktreeDescriptor(from: env))) }
+            else { emitLine("Created env \(env.envSlug) at \(env.localURL.absoluteString) (worktree: \(env.worktreePath.path)).") }
+        } catch {
+            throw failCommand(error, json: output.json)
+        }
+    }
+}
+
+struct WorktreeList: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "list", abstract: "List worktree envs.")
+    @Option(name: .long, help: "Filter by parent site slug.") var site: String?
+    @OptionGroup var output: JSONOptions
+
+    func run() async throws {
+        let ctx = CLIContext()
+        do {
+            var envelope = try await ctx.load()
+            let running = await ctx.runningContainerNames()
+            for i in envelope.envs.indices {
+                envelope.envs[i].status = running.contains(envelope.envs[i].wpContainerName) ? .running : .stopped
+            }
+            var envs = envelope.envs
+            if let site { envs = envs.filter { $0.parentSlug == site } }
+            if output.json { emitLine(CLIJSON.string(envs.map(EnvJSON.init))) }
+            else {
+                if envs.isEmpty { emitLine("No environments.") }
+                for e in envs { emitLine("\(e.status.token)  \(e.envSlug)  \(e.branch)  \(e.localURL.absoluteString)") }
+            }
+        } catch {
+            throw failCommand(error, json: output.json)
+        }
+    }
+}
+
+struct WorktreeDelete: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "delete", abstract: "Delete a worktree env.")
+    @Argument(help: "Env slug.") var envSlug: String
+    @Flag(name: .long, help: "Keep the git branch.") var keepBranch = false
+    @Flag(name: .long, help: "Keep the git worktree checkout on disk.") var keepWorktree = false
+    @OptionGroup var output: JSONOptions
+
+    func run() async throws {
+        let ctx = CLIContext()
+        do {
+            let envelope = try await ctx.load()
+            guard let env = envelope.envs.first(where: { $0.envSlug == envSlug }) else { throw CLIErrorJSON("env_not_found", detail: envSlug) }
+            let parent = envelope.sites.first { $0.id == env.parentSiteID }
+            await ctx.worktrees.delete(env, parent: parent, keepBranch: keepBranch, keepWorktree: keepWorktree)
+            _ = try await ctx.persistence.mutate { store in store.envs.removeAll { $0.id == env.id } }
+            if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(envSlug) deleted"))) }
+            else { emitLine("Deleted env \(envSlug).") }
+        } catch {
+            throw failCommand(error, json: output.json)
+        }
+    }
+}
+
+// MARK: - wp (proxied one-shot wp-cli)
+
+struct WPCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "wp",
+        abstract: "Run a one-shot wp-cli command against a site or env: wp-container wp <target> -- <wp args>"
+    )
+    @Argument(help: "Site slug or env slug.") var target: String
+    @Argument(parsing: .captureForPassthrough, help: "wp-cli arguments (after --).") var wpArgs: [String] = []
+    @OptionGroup var output: JSONOptions
+
+    func run() async throws {
+        let ctx = CLIContext()
+        do {
+            let envelope = try await ctx.load()
+            guard let resolved = resolveTarget(target, in: envelope) else { throw CLIErrorJSON("not_found", detail: target) }
+            let inst = resolved.instance
+            guard let dbHost = try await ctx.cli.ipAddress(of: inst.dbContainerName) else {
+                throw CLIErrorJSON("not_running", detail: "start \(target) first")
+            }
+            let result = try await ctx.cli.runCapturing(SiteRecipe.wpProxyArgs(inst, dbHost: dbHost, wpArgs: wpArgs))
+            if output.json {
+                struct WPResult: Codable { let stdout: String; let stderr: String; let exitCode: Int32 }
+                emitLine(CLIJSON.string(WPResult(stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode)))
+            } else {
+                if !result.stdout.isEmpty { FileHandle.standardOutput.write(Data(result.stdout.utf8)) }
+                if !result.stderr.isEmpty { FileHandle.standardError.write(Data(result.stderr.utf8)) }
+            }
+            if result.exitCode != 0 { throw ExitCode(result.exitCode) }
+        } catch let code as ExitCode {
+            throw code
+        } catch {
+            throw failCommand(error, json: output.json)
+        }
+    }
+}
