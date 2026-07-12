@@ -26,7 +26,10 @@ public actor MultisiteService {
 
     /// Inject/refresh the multisite constants in wp-config.php (idempotent).
     public func injectConstants(site: Site, installURL: URL, subdomains: Bool) throws {
-        let host = installURL.host ?? site.primaryHost
+        // WordPress stores the network domain WITH the port for non-standard
+        // ports (verified: `wp core multisite-install --url=http://127.0.0.1:8882`
+        // writes `127.0.0.1:8882` into wp_site), so DOMAIN_CURRENT_SITE must match.
+        let host = Self.domainWithPort(installURL) ?? site.primaryHost
         let folder = site.wordpressFolder
         try WPConfigService.setConstant("WP_ALLOW_MULTISITE", value: "true", rawValue: true, wordpressFolder: folder)
         try WPConfigService.setConstant("MULTISITE", value: "true", rawValue: true, wordpressFolder: folder)
@@ -35,6 +38,15 @@ public actor MultisiteService {
         try WPConfigService.setConstant("PATH_CURRENT_SITE", value: "/", rawValue: false, wordpressFolder: folder)
         try WPConfigService.setConstant("SITE_ID_CURRENT_SITE", value: "1", rawValue: true, wordpressFolder: folder)
         try WPConfigService.setConstant("BLOG_ID_CURRENT_SITE", value: "1", rawValue: true, wordpressFolder: folder)
+    }
+
+    /// The `host[:port]` string WordPress uses for the network domain — the port
+    /// is included only when it is non-standard for the scheme.
+    static func domainWithPort(_ url: URL) -> String? {
+        guard let host = url.host else { return nil }
+        guard let port = url.port else { return host }
+        let isDefault = (url.scheme == "http" && port == 80) || (url.scheme == "https" && port == 443)
+        return isDefault ? host : "\(host):\(port)"
     }
 
     /// Write the network `.htaccess` into the mounted folder (host-side write).

@@ -26,7 +26,9 @@ public enum ShellPathService {
         if let b = lines.firstIndex(of: begin), let eRel = lines[b...].firstIndex(of: end) {
             lines.removeSubrange(b...eRel)
         }
-        lines.removeAll { $0 == begin || $0 == end }
+        // Our block is exactly {begin, pathExport, end}; removing all three by
+        // value cleans any half-written/corrupted remnant precisely.
+        lines.removeAll { $0 == begin || $0 == end || $0 == pathExport }
         while lines.last?.isEmpty == true { lines.removeLast() }
         if install {
             if !lines.isEmpty { lines.append("") }

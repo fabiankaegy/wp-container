@@ -38,6 +38,13 @@ public enum HostsFileService {
         if let begin = lines.firstIndex(of: beginMarker),
            let endRel = lines[begin...].firstIndex(of: endMarker) {
             lines.removeSubrange(begin...endRel)
+        } else if let begin = lines.firstIndex(of: beginMarker) {
+            // Corrupted: a begin without an end. Remove the marker and the run of
+            // our-format entry lines (`127.0.0.1\t<host>`) that follow it.
+            var last = begin
+            var i = begin + 1
+            while i < lines.count, lines[i].hasPrefix("\(loopbackIPv4)\t") { last = i; i += 1 }
+            lines.removeSubrange(begin...last)
         }
         // Drop any orphaned marker lines left by a corrupted prior edit.
         lines.removeAll { $0 == beginMarker || $0 == endMarker }

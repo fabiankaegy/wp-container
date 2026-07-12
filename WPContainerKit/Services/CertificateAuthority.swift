@@ -26,6 +26,15 @@ public actor CertificateAuthority {
     public static let opensslPath = "/usr/bin/openssl"
     public static let securityPath = "/usr/bin/security"
     public static let systemKeychain = "/Library/Keychains/System.keychain"
+    /// The per-user login keychain. Trusting the CA here needs NO admin rights;
+    /// the confirmation dialog that may appear is the SecurityAgent one, which
+    /// supports Touch ID (PLAN.md §2f Touch-ID follow-up). Verified empirically:
+    /// `security add-trusted-cert -r trustRoot -k login.keychain-db` succeeds
+    /// without elevation and `security verify-cert` then passes.
+    public static var loginKeychainPath: String {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Keychains/login.keychain-db").path
+    }
 
     /// PKCS#12 passphrase used only for the on-disk bundle handed to SecPKCS12Import.
     public static let p12Passphrase = "wpcontainer"
@@ -188,23 +197,31 @@ public actor CertificateAuthority {
         return result?.exitCode == 0
     }
 
-    /// Install the CA cert as a trusted root in the System keychain. Prompts for
-    /// administrator privileges via osascript (exactly mkcert's mechanism).
-    /// NOTE: triggers a GUI admin prompt — call only in response to explicit user intent.
+    /// Install the CA cert as a trusted root in the user's **login** keychain —
+    /// NO administrator privileges required. macOS may show the SecurityAgent
+    /// "modify certificate trust settings" dialog, which supports Touch ID.
+    /// User-domain root trust is honored by Safari/Chrome and by
+    /// `security verify-cert`. Reversible via `untrustCA()`.
     public func trustCA() async throws {
         try await ensureGenerated()
-        // Build the privileged `security add-trusted-cert` invocation and run it
-        // through osascript so macOS presents the standard admin auth dialog.
-        let inner = "\(Self.securityPath) add-trusted-cert -d -r trustRoot -k \(Self.systemKeychain) "
-            + shellQuote(caCertURL.path)
-        let script = "do shell script \"\(appleScriptEscape(inner))\" with administrator privileges"
+        // `add-trusted-cert` adds the cert to the keychain if absent and sets the
+        // trust settings; no `-d` (which would target the admin System domain).
         let result = try await ProcessRunner.run(
-            executable: "/usr/bin/osascript",
-            args: ["-e", script]
+            executable: Self.securityPath,
+            args: ["add-trusted-cert", "-r", "trustRoot", "-k", Self.loginKeychainPath, caCertURL.path]
         )
         if result.exitCode != 0 {
             throw CAError.openSSLFailed(result.stderr.isEmpty ? result.stdout : result.stderr)
         }
+    }
+
+    /// Remove the CA's trust settings from the login keychain (the documented
+    /// undo for `trustCA()`).
+    public func untrustCA() async throws {
+        _ = try? await ProcessRunner.run(
+            executable: Self.securityPath,
+            args: ["remove-trusted-cert", caCertURL.path]
+        )
     }
 
     // MARK: - Helpers
