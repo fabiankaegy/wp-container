@@ -10,13 +10,26 @@ public enum WPConfigService {
     public enum ConfigError: Error, Sendable, CustomStringConvertible {
         case notFound(String)
         case unreadable(String)
+        case invalidName(String)
 
         public var description: String {
             switch self {
             case .notFound(let p):   return "wp-config.php not found at \(p)"
             case .unreadable(let p): return "wp-config.php unreadable at \(p)"
+            case .invalidName(let n): return "\"\(n)\" is not a valid PHP constant name (expected [A-Za-z_][A-Za-z0-9_]*)."
             }
         }
+    }
+
+    /// A syntactically valid PHP constant identifier. Enforced before any write
+    /// so an untrusted `edit_wp_config` name (MCP) cannot inject arbitrary PHP
+    /// into wp-config.php or corrupt it (a stray quote/paren/newline would
+    /// otherwise white-screen the site).
+    static func isValidConstantName(_ name: String) -> Bool {
+        guard let first = name.unicodeScalars.first else { return false }
+        let isNameStart: (Unicode.Scalar) -> Bool = { $0 == "_" || ($0.isASCII && (($0 >= "A" && $0 <= "Z") || ($0 >= "a" && $0 <= "z"))) }
+        guard isNameStart(first) else { return false }
+        return name.unicodeScalars.allSatisfy { isNameStart($0) || ($0 >= "0" && $0 <= "9") }
     }
 
     /// A parsed view of wp-config.php.
@@ -85,6 +98,7 @@ public enum WPConfigService {
     @discardableResult
     public static func setConstant(_ name: String, value: String, rawValue: Bool,
                                    wordpressFolder: URL) throws -> String {
+        guard isValidConstantName(name) else { throw ConfigError.invalidName(name) }
         let url = configURL(for: wordpressFolder)
         guard FileManager.default.fileExists(atPath: url.path) else { throw ConfigError.notFound(url.path) }
         guard var text = try? String(contentsOf: url, encoding: .utf8) else { throw ConfigError.unreadable(url.path) }
