@@ -119,6 +119,60 @@ core moves into a shared framework and a CLI executable (binary `wp-container`, 
 environment…" sheet (repo picker auto-detected from git repos found under
 `wp-content`, branch field with existing-branch autocomplete).
 
+## 2c. Per-site add-ons: Xdebug & Elasticsearch (one-click toggles)
+
+Each site gets two independent toggles, persisted on `Site` and applied on (re)start;
+toggling while running offers "Restart now".
+
+**Xdebug**
+- The official wordpress image has no Xdebug → we build a derived image once per
+  base tag with `container build`: `wpc-wordpress-xdebug:<tag>` from a generated
+  Dockerfile (`FROM wordpress:<tag>` + `pecl install xdebug` + docker-php-ext-enable
+  + xdebug.ini: mode=debug,develop; start_with_request=yes; client_port=9003;
+  client_host=<host gateway IP as seen from the container — validated empirically>).
+  Built lazily on first enable (with progress UI), cached in the image store.
+- Enabled site starts its WP container from the xdebug image (+`-e XDEBUG_MODE`).
+  Disabled = plain image; no other change. UI shows IDE hint (path mapping:
+  `<site>/wordpress` ↔ `/var/www/html`, port 9003).
+
+**Elasticsearch**
+- Toggle starts a third per-site container `wpc-<slug>-es` (image `elasticsearch:8.x`,
+  single-node, security off, modest heap; exact image/flags + virtiofs/uid handling
+  validated empirically — data in `<site>/elasticsearch/` bind mount if the image
+  tolerates it, else a named managed volume as fallback).
+- Site start order becomes: db → es (if enabled) → wp. WP container gets
+  `-e ELASTICSEARCH_URL=http://<es-ip>:9200` (+ `EP_HOST` for ElasticPress).
+  UI shows the ES endpoint + a "works with ElasticPress" hint. Worktree envs
+  inherit the parent's toggles (their own es container).
+
+## 2d. Agent tools — MCP server (replicating 10up/localwp-agent-tools)
+
+Reference: https://github.com/10up/localwp-agent-tools (LocalWP add-on exposing an
+MCP server per site + auto-generated agent configs). We replicate the abilities,
+adapted to our stack:
+
+- **Server:** `wp-container mcp --site <slug>` — an MCP **stdio** server subcommand
+  in the existing CLI binary (Swift MCP SDK: modelcontextprotocol/swift-sdk via SPM).
+  stdio > embedded HTTP for us: no daemon, works with the app closed, one process
+  per agent session, trivial `.mcp.json`. (Optional later: `wp-container mcp serve`
+  streamable-HTTP for parity.)
+- **Tools (superset of localwp-agent-tools' 12):**
+  - `wp_cli` (arbitrary wp-cli via one-shot wordpress:cli container),
+  - `read_error_log` (PHP/apache error log via `container logs` + debug.log file),
+    `read_access_log` (apache access log), `wp_debug_toggle` (WP_DEBUG/LOG/SCRIPT_DEBUG
+    via wp-cli config set),
+  - `read_wp_config`, `edit_wp_config` (constants, with timestamped backup),
+  - `get_site_info`, `site_health_check` (db connectivity, http probe, disk, versions),
+  - `site_start`, `site_stop`, `site_restart`, `site_status`, `list_sites`,
+  - **ours:** `worktree_create`, `worktree_list`, `worktree_delete` (branch envs —
+    the killer tool for coding agents), `xdebug_toggle`, `elasticsearch_toggle`.
+- **Per-site "Enable agent tools" action** (UI toggle + `wp-container agent-tools
+  enable <slug>`): writes into the site folder — `.mcp.json` (Claude Code),
+  `.cursor/mcp.json`, `.vscode/mcp.json` (all pointing at
+  `wp-container mcp --site <slug>`), plus a generated `CLAUDE.md` project-context
+  file (site URL/port/paths/credentials, wp-content repo hints, worktree workflow
+  how-to) and `.gitignore` entries for the generated files.
+
 ## 3. App architecture (MVVM, Swift 6 concurrency)
 
 ```
