@@ -111,7 +111,7 @@ public final class AppViewModel {
     // MARK: - Site actions
 
     @discardableResult
-    public func createSite(name: String, parentFolder: URL? = nil, imageTag: String = SiteRecipe.defaultWordPressImage, phpVersion: String? = nil) async -> Site? {
+    public func createSite(name: String, parentFolder: URL? = nil, imageTag: String = SiteRecipe.defaultWordPressImage, phpVersion: String? = nil, groupID: UUID? = nil) async -> Site? {
         let root = parentFolder ?? SiteFolders.defaultSitesRoot
         let slug = Slug.unique(name, existing: store.existingSlugs)
         guard let port = PortAllocator.firstFreePort(excluding: store.takenPorts) else {
@@ -120,9 +120,31 @@ public final class AppViewModel {
         }
         let site = Site(name: name, slug: slug,
                         path: root.appendingPathComponent(slug, isDirectory: true),
-                        port: port, imageTag: imageTag, phpVersion: phpVersion)
+                        port: port, imageTag: imageTag, phpVersion: phpVersion, groupID: groupID)
         await store.upsertSite(site)
         return site
+    }
+
+    // MARK: - Group actions (PLAN.md §2g)
+
+    public func addGroup(named name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        Task { await store.addGroup(name: trimmed) }
+    }
+
+    public func renameGroup(_ group: SiteGroup, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        Task { await store.renameGroup(id: group.id, to: trimmed) }
+    }
+
+    public func deleteGroup(_ group: SiteGroup) {
+        Task { await store.deleteGroup(id: group.id) }
+    }
+
+    public func moveSite(_ site: Site, toGroup groupID: UUID?) {
+        Task { await store.moveSite(site.id, toGroup: groupID) }
     }
 
     /// Debug helper used by the placeholder UI.
@@ -138,8 +160,8 @@ public final class AppViewModel {
     /// events. Selects the new site. Returns nil on failure (error surfaced via
     /// `lastError`).
     @discardableResult
-    public func createAndStartSite(name: String, parentFolder: URL? = nil, imageTag: String = SiteRecipe.defaultWordPressImage, phpVersion: String? = nil) async -> Site? {
-        guard let site = await createSite(name: name, parentFolder: parentFolder, imageTag: imageTag, phpVersion: phpVersion) else {
+    public func createAndStartSite(name: String, parentFolder: URL? = nil, imageTag: String = SiteRecipe.defaultWordPressImage, phpVersion: String? = nil, groupID: UUID? = nil) async -> Site? {
+        guard let site = await createSite(name: name, parentFolder: parentFolder, imageTag: imageTag, phpVersion: phpVersion, groupID: groupID) else {
             return nil
         }
         selection = site.id

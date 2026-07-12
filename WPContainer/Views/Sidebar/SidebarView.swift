@@ -2,32 +2,146 @@ import SwiftUI
 import WPContainerKit
 
 /// The dark sidebar: a compact brand header (kept clear of the traffic lights),
-/// a scrollable list of sites with rounded selection/hover highlights, and a
-/// prominent bottom-pinned "Add Site" button. Rendered transparently over the
-/// window's dark frame.
+/// a scrollable list of sites organized into collapsible groups (PLAN.md §2g)
+/// with ungrouped sites at the top, and a prominent bottom-pinned "Add Site"
+/// button. Sites can be dragged between groups; groups have context menus for
+/// rename/delete and a "New Group" affordance lives in the header.
 struct SidebarView: View {
     @Environment(AppViewModel.self) private var vm
+
+    @State private var collapsed: Set<UUID> = []
+    @State private var newGroupPresented = false
+    @State private var newGroupName = ""
+    @State private var renamingGroup: SiteGroup?
+    @State private var renameText = ""
+
+    private var groups: [SiteGroup] { vm.store.sortedGroups }
+    private var ungrouped: [Site] { vm.sites.filter { $0.groupID == nil } }
 
     var body: some View {
         VStack(spacing: 0) {
             brand
-            if vm.sites.isEmpty {
+            if vm.sites.isEmpty && groups.isEmpty {
                 emptyState
             } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(vm.sites) { site in
-                            SidebarSiteRow(site: site)
-                        }
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.top, 2)
-                    .padding(.bottom, 8)
-                }
+                list
             }
             addButton
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .alert("New Group", isPresented: $newGroupPresented) {
+            TextField("Group name", text: $newGroupName)
+            Button("Create") { vm.addGroup(named: newGroupName); newGroupName = "" }
+            Button("Cancel", role: .cancel) { newGroupName = "" }
+        } message: {
+            Text("Organize sites into a named group in the sidebar.")
+        }
+        .alert("Rename Group", isPresented: renameBinding) {
+            TextField("Group name", text: $renameText)
+            Button("Rename") { if let g = renamingGroup { vm.renameGroup(g, to: renameText) }; renamingGroup = nil }
+            Button("Cancel", role: .cancel) { renamingGroup = nil }
+        }
+    }
+
+    private var renameBinding: Binding<Bool> {
+        Binding(get: { renamingGroup != nil }, set: { if !$0 { renamingGroup = nil } })
+    }
+
+    // MARK: List
+
+    private var list: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 2) {
+                // Ungrouped sites at the top.
+                ForEach(ungrouped) { site in
+                    SidebarSiteRow(site: site, groups: groups,
+                                   onMove: { vm.moveSite(site, toGroup: $0) })
+                }
+                // A drop target so a site can be dragged back to "ungrouped".
+                if !groups.isEmpty {
+                    ungroupedDropSpacer
+                }
+                // Groups.
+                ForEach(groups) { group in
+                    groupSection(group)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.top, 2)
+            .padding(.bottom, 8)
+        }
+    }
+
+    @ViewBuilder
+    private func groupSection(_ group: SiteGroup) -> some View {
+        let sites = vm.sites.filter { $0.groupID == group.id }
+        let isCollapsed = collapsed.contains(group.id)
+
+        VStack(alignment: .leading, spacing: 2) {
+            groupHeader(group, count: sites.count, isCollapsed: isCollapsed)
+            if !isCollapsed {
+                ForEach(sites) { site in
+                    SidebarSiteRow(site: site, groups: groups,
+                                   onMove: { vm.moveSite(site, toGroup: $0) })
+                }
+                if sites.isEmpty {
+                    Text("Drop sites here")
+                        .font(.caption)
+                        .foregroundStyle(Theme.onFrameTertiary)
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                }
+            }
+        }
+        .padding(.top, 6)
+        .dropDestination(for: String.self) { items, _ in
+            drop(items, into: group.id)
+        }
+    }
+
+    private func groupHeader(_ group: SiteGroup, count: Int, isCollapsed: Bool) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "chevron.right")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(Theme.onFrameSecondary)
+                .rotationEffect(.degrees(isCollapsed ? 0 : 90))
+            Text(group.name.uppercased())
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(Theme.onFrameSecondary)
+                .lineLimit(1)
+            Text("\(count)")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(Theme.onFrameTertiary)
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            withAnimation(.easeOut(duration: 0.15)) {
+                if isCollapsed { collapsed.remove(group.id) } else { collapsed.insert(group.id) }
+            }
+        }
+        .contextMenu {
+            Button("Rename Group…") { renameText = group.name; renamingGroup = group }
+            Button("Delete Group", role: .destructive) { vm.deleteGroup(group) }
+        }
+    }
+
+    private var ungroupedDropSpacer: some View {
+        Color.clear
+            .frame(height: 6)
+            .dropDestination(for: String.self) { items, _ in drop(items, into: nil) }
+    }
+
+    private func drop(_ items: [String], into groupID: UUID?) -> Bool {
+        var moved = false
+        for raw in items {
+            if let id = UUID(uuidString: raw), let site = vm.store.site(id: id) {
+                vm.moveSite(site, toGroup: groupID)
+                moved = true
+            }
+        }
+        return moved
     }
 
     // MARK: Brand
@@ -41,8 +155,19 @@ struct SidebarView: View {
                 .font(.headline)
                 .foregroundStyle(Theme.onFrame)
             Spacer()
+            Menu {
+                Button("New Group…") { newGroupName = ""; newGroupPresented = true }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Theme.onFrameSecondary)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Sidebar options")
         }
-        .padding(.horizontal, 18)
+        .padding(.horizontal, 16)
         .padding(.top, Theme.titlebarInset + 8)
         .padding(.bottom, 12)
     }
@@ -50,18 +175,16 @@ struct SidebarView: View {
     // MARK: Add button
 
     private var addButton: some View {
-        VStack(spacing: 0) {
-            Button {
-                vm.presentingAddSite = true
-            } label: {
-                Label("Add Site", systemImage: "plus")
-                    .font(.body.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-            }
-            .controlSize(.large)
-            .buttonStyle(.borderedProminent)
-            .tint(Theme.accent)
+        Button {
+            vm.presentingAddSite = true
+        } label: {
+            Label("Add Site", systemImage: "plus")
+                .font(.body.weight(.semibold))
+                .frame(maxWidth: .infinity)
         }
+        .controlSize(.large)
+        .buttonStyle(.borderedProminent)
+        .tint(Theme.accent)
         .padding(12)
     }
 
@@ -86,10 +209,13 @@ struct SidebarView: View {
     }
 }
 
-/// A selectable, hover-highlighted site row wired to the app selection.
+/// A selectable, hover-highlighted site row wired to the app selection, with a
+/// context menu to move it between groups and a drag payload (its site id).
 struct SidebarSiteRow: View {
     @Environment(AppViewModel.self) private var vm
     let site: Site
+    let groups: [SiteGroup]
+    let onMove: (UUID?) -> Void
 
     @State private var hovering = false
 
@@ -106,5 +232,21 @@ struct SidebarSiteRow: View {
             .onTapGesture { vm.selection = site.id }
             .animation(.easeOut(duration: 0.12), value: hovering)
             .animation(.easeOut(duration: 0.12), value: isSelected)
+            .draggable(site.id.uuidString) {
+                SiteRow(site: site, envCount: 0)
+                    .frame(width: 220)
+                    .background(Theme.sidebar, in: RoundedRectangle(cornerRadius: 8))
+            }
+            .contextMenu {
+                Menu("Move to Group") {
+                    Button("Ungrouped") { onMove(nil) }
+                        .disabled(site.groupID == nil)
+                    if !groups.isEmpty { Divider() }
+                    ForEach(groups) { group in
+                        Button(group.name) { onMove(group.id) }
+                            .disabled(site.groupID == group.id)
+                    }
+                }
+            }
     }
 }

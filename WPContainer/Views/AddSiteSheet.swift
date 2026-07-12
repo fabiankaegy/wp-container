@@ -14,6 +14,7 @@ struct AddSiteSheet: View {
     @State private var imageTag = SiteRecipe.defaultWordPressImage
     @State private var parentFolder: URL?
     @State private var choosingFolder = false
+    @State private var groupID: UUID?
 
     @State private var phase: Phase = .idle
     @State private var hintIndex = 0
@@ -24,24 +25,47 @@ struct AddSiteSheet: View {
     private let hints = ["Seeding WordPress core…", "Starting database…", "Installing WordPress…", "Finishing up…"]
 
     var body: some View {
+        // Step-container pattern: the sheet renders one "step" at a time so later
+        // phases (PLAN.md §2i–2k) can add version/options steps without reshaping
+        // the surrounding chrome. Today there is a single setup step.
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
-            Form {
-                Section {
-                    TextField("Site name", text: $name, prompt: Text("My Blog"))
-                        .textFieldStyle(.roundedBorder)
-                        .disabled(phase == .working)
-                    if !name.isEmpty {
-                        Text(pathPreview)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                            .truncationMode(.middle)
+            setupStep
+            if phase == .working { progressBar }
+            if phase == .failed, let errorText { errorBanner(errorText) }
+            Divider()
+            footer
+        }
+        .frame(width: 460)
+        .fileImporter(isPresented: $choosingFolder, allowedContentTypes: [.folder]) { result in
+            if case .success(let url) = result { parentFolder = url }
+        }
+    }
+
+    private var setupStep: some View {
+        Form {
+            Section {
+                TextField("Site name", text: $name, prompt: Text("My Blog"))
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(phase == .working)
+                if !name.isEmpty {
+                    Text(pathPreview)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                }
+                Picker("Group", selection: $groupID) {
+                    Text("None").tag(UUID?.none)
+                    ForEach(vm.store.sortedGroups) { group in
+                        Text(group.name).tag(UUID?.some(group.id))
                     }
                 }
+                .disabled(phase == .working)
+            }
 
-                Section("Location") {
+            Section("Location") {
                     HStack {
                         Text(rootFolder.path(percentEncoded: false))
                             .lineLimit(1).truncationMode(.middle)
@@ -66,17 +90,6 @@ struct AddSiteSheet: View {
                 }
             }
             .formStyle(.grouped)
-
-            if phase == .working { progressBar }
-            if phase == .failed, let errorText { errorBanner(errorText) }
-
-            Divider()
-            footer
-        }
-        .frame(width: 460)
-        .fileImporter(isPresented: $choosingFolder, allowedContentTypes: [.folder]) { result in
-            if case .success(let url) = result { parentFolder = url }
-        }
     }
 
     // MARK: Pieces
@@ -146,7 +159,8 @@ struct AddSiteSheet: View {
 
         let phpLabel = SiteRecipe.wordPressImageOptions.first { $0.tag == imageTag }?.label
         let site = await vm.createAndStartSite(name: name, parentFolder: parentFolder,
-                                               imageTag: imageTag, phpVersion: phpLabel)
+                                               imageTag: imageTag, phpVersion: phpLabel,
+                                               groupID: groupID)
 
         // Success iff the site now exists and is running; otherwise surface the error.
         if let site, vm.store.site(id: site.id)?.status.isRunning == true {
