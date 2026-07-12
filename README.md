@@ -54,17 +54,22 @@ Sites are provisioned automatically (no install wizard) and log in with
   drag & drop, and a **menu bar extra** for one-glance status and start/stop of
   every site.
 
+- **MCP agent tools** — `wp-container agent-tools enable <site>` writes `.mcp.json`
+  (+ Cursor/VS Code configs and a `CLAUDE.md`) into the site folder; the bundled
+  MCP stdio server (`wp-container mcp --site <slug>`) exposes 16 tools in the
+  spirit of [10up/localwp-agent-tools](https://github.com/10up/localwp-agent-tools):
+  `wp_cli`, log readers, `wp-config` editing, site info/health, start/stop/status,
+  `list_sites` — plus `worktree_create` / `worktree_list` / `worktree_delete`.
+- **Trusted HTTPS** — mkcert-style local CA with one-time keychain trust;
+  `https://<site>.localhost` served by a host-side TLS reverse proxy (port 443,
+  Host-header routing). Toggle per site in Settings → Integrations.
+- **wp-cli everywhere** — `wp-container wp <site> -- …`, a `./wp` shim in every
+  site folder, an interactive WP-CLI Terminal button, and the MCP `wp_cli` tool.
+
 ## In progress
 
 Being built right now (tracked in [PLAN.md](PLAN.md)):
 
-- **MCP agent tools** — `wp-container mcp --site <slug>` stdio server replicating
-  [10up/localwp-agent-tools](https://github.com/10up/localwp-agent-tools)
-  (`wp_cli`, log readers, `wp-config` editing, health checks, start/stop) plus
-  `worktree_create/list/delete`, with one-click `.mcp.json` + `CLAUDE.md`
-  generation per site.
-- **Trusted HTTPS** — mkcert-style local CA, `https://<site>.localhost` via a
-  host-side TLS proxy, one-time keychain trust.
 - **Xdebug & Elasticsearch toggles** — per-site, one click; recipes already
   validated on Apple container (see `scripts/validate-addons.sh`).
 - **Custom domains** (`mysite.local`) with managed /etc/hosts entries, **multisite**
