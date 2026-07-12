@@ -11,6 +11,9 @@ packages:
   swift-argument-parser:
     url: https://github.com/apple/swift-argument-parser
     from: "1.3.0"
+  mcp-swift-sdk:
+    url: https://github.com/modelcontextprotocol/swift-sdk
+    from: "0.12.1"
 
 settings:
   base:
@@ -80,6 +83,8 @@ targets:
       - target: WPContainerKit
       - package: swift-argument-parser
         product: ArgumentParser
+      - package: mcp-swift-sdk
+        product: MCP
     settings:
       base:
         PRODUCT_NAME: wp-container
