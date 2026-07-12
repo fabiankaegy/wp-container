@@ -116,7 +116,8 @@ struct ListCommand: AsyncParsableCommand {
                 envelope.envs[i].status = running.contains(envelope.envs[i].wpContainerName) ? .running : .stopped
             }
             if output.json {
-                let payload = ListJSON(sites: envelope.sites.map(SiteJSON.init),
+                let groupNames = Dictionary(uniqueKeysWithValues: envelope.groups.map { ($0.id, $0.name) })
+                let payload = ListJSON(sites: envelope.sites.map { SiteJSON(from: $0, group: $0.groupID.flatMap { groupNames[$0] }) },
                                        envs: envelope.envs.map(EnvJSON.init))
                 emitLine(CLIJSON.string(payload))
             } else {
@@ -143,6 +144,7 @@ struct CreateCommand: AsyncParsableCommand {
     @Argument(help: "Site name.") var name: String
     @Option(name: .long, help: "Parent folder (default: ~/WP Container Sites).") var path: String?
     @Option(name: .long, help: "WordPress image tag (e.g. wordpress:php8.3-apache).") var php: String?
+    @Option(name: .long, help: "Sidebar group name (created if it doesn't exist).") var group: String?
     @OptionGroup var output: JSONOptions
 
     func run() async throws {
@@ -159,9 +161,25 @@ struct CreateCommand: AsyncParsableCommand {
                             path: root.appendingPathComponent(slug, isDirectory: true),
                             port: port, imageTag: php ?? SiteRecipe.defaultWordPressImage, phpVersion: php)
             try SiteFolders.ensure(for: site)
-            _ = try await ctx.persistence.mutate { $0.sites.append(site) }
-            if output.json { emitLine(CLIJSON.string(SiteJSON(from: site))) }
-            else { emitLine("Created \(site.slug) at \(site.path.path) (port \(site.port)).") }
+            // Resolve/create the group (if requested) and persist atomically.
+            let groupName = group
+            let updated = try await ctx.persistence.mutate { env in
+                var s = site
+                if let groupName, !groupName.trimmingCharacters(in: .whitespaces).isEmpty {
+                    if let existing = env.groups.first(where: { $0.name.caseInsensitiveCompare(groupName) == .orderedSame }) {
+                        s.groupID = existing.id
+                    } else {
+                        let g = SiteGroup(name: groupName, sortOrder: (env.groups.map(\.sortOrder).max() ?? -1) + 1)
+                        env.groups.append(g)
+                        s.groupID = g.id
+                    }
+                }
+                env.sites.append(s)
+            }
+            let created = updated.sites.first { $0.id == site.id } ?? site
+            let resolvedGroupName = created.groupID.flatMap { id in updated.groups.first { $0.id == id }?.name }
+            if output.json { emitLine(CLIJSON.string(SiteJSON(from: created, group: resolvedGroupName))) }
+            else { emitLine("Created \(created.slug) at \(created.path.path) (port \(created.port))\(resolvedGroupName.map { " in group \"\($0)\"" } ?? "").") }
         } catch {
             throw failCommand(error, json: output.json)
         }

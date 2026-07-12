@@ -28,8 +28,10 @@ public struct SiteJSON: Codable, Sendable {
     public let path: String
     public let image: String
     public let provisioned: Bool
+    /// Sidebar group name, or nil when ungrouped (PLAN.md §2g).
+    public let group: String?
 
-    public init(from site: Site) {
+    public init(from site: Site, group: String? = nil) {
         self.id = site.id.uuidString
         self.name = site.name
         self.slug = site.slug
@@ -39,6 +41,7 @@ public struct SiteJSON: Codable, Sendable {
         self.path = site.path.path
         self.image = site.imageTag
         self.provisioned = site.provisioned
+        self.group = group
     }
 }
 
