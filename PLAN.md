@@ -210,6 +210,17 @@ wp-cli is a first-class citizen on all four surfaces (implementation: one-shot
 - UI: per-site HTTPS toggle + global "Trust CA" onboarding step; URL displays and
   Open/WP Admin buttons use the https URL when enabled.
 
+## 2g. Site groups
+
+Sidebar organization: sites can be grouped (e.g. "Clients", "Personal", "Experiments").
+- Model: `SiteGroup {id, name, sortOrder}`; `Site.groupID: UUID?` (nil = ungrouped,
+  shown in a default section). Store envelope gains `groups: []`.
+- Sidebar: collapsible group sections (group name header + site rows), ungrouped
+  sites at top level. Context menus: New Group, Rename, Delete (sites become
+  ungrouped, never deleted), Move to Group ▸. Drag & drop sites between groups.
+- AddSiteSheet gets an optional group picker; CLI: `wp-container create --group <name>`
+  (creates the group if missing), `list --json` includes `group` per site.
+
 ## 3. App architecture (MVVM, Swift 6 concurrency)
 
 ```
