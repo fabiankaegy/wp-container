@@ -15,11 +15,23 @@ enum SystemActions {
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
-    /// Open Terminal.app at the given directory.
-    static func openTerminal(at directory: URL) {
-        let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
-        let config = NSWorkspace.OpenConfiguration()
-        NSWorkspace.shared.open([directory], withApplicationAt: terminal, configuration: config)
+    /// Open Terminal.app at the given directory. When `pathPrepend` is set, the
+    /// new shell has that dir first on PATH (so a site's `./wp` shim answers to a
+    /// plain `wp` in that shell — a lightweight local alternative to the global
+    /// router).
+    static func openTerminal(at directory: URL, pathPrepend: URL? = nil) {
+        guard let pathPrepend else {
+            let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
+            let config = NSWorkspace.OpenConfiguration()
+            NSWorkspace.shared.open([directory], withApplicationAt: terminal, configuration: config)
+            return
+        }
+        let cmd = "cd \(shellQuote(directory.path)); export PATH=\(shellQuote(pathPrepend.path)):\"$PATH\"; clear"
+        openTerminalRunning(cmd)
+    }
+
+    private static func shellQuote(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     /// Open a new Terminal.app window running `command` (used for the interactive

@@ -64,6 +64,7 @@ public final class AppViewModel {
         guard !started else { return }
         started = true
         await store.start()
+        refreshStaleShims()
         await refreshSystemStatus()
         await refreshCATrusted()
         observeStatusEvents()
@@ -86,16 +87,196 @@ public final class AppViewModel {
             do {
                 if enabled {
                     try await httpsIntegration.enable(site)
-                    await ensureProxyRunning()
+                    await refreshProxyRouting()
                 } else {
                     try await httpsIntegration.disable(site)
                 }
                 var updated = site
                 updated.httpsEnabled = enabled
-                await store.upsertSite(updated)
+                await store.upsertSite(updated)   // @Observable → every URL surface re-renders
             } catch {
                 lastError = SiteLifecycleErrorText(error)
             }
+        }
+    }
+
+    /// Ensure the proxy is running and, when the app owns the listener, reload it
+    /// so cert SANs + the host map pick up HTTPS/domain changes immediately
+    /// (PLAN.md §2f/§2i auto-reload).
+    public func refreshProxyRouting() async {
+        await ensureProxyRunning()
+        if proxy.boundPort != nil {
+            try? await proxy.reload()
+            proxyPort = proxy.boundPort
+        }
+    }
+
+    // MARK: - Add-ons (§2c)
+
+    /// The running site's Elasticsearch endpoint (`http://<es-ip>:9200`), if any.
+    public func elasticsearchEndpoint(_ site: Site) async -> String? {
+        guard site.elasticsearchEnabled,
+              let ip = try? await cli.ipAddress(of: site.esContainerName), !ip.isEmpty else { return nil }
+        return "http://\(ip):9200"
+    }
+
+    public func setXdebug(_ site: Site, enabled: Bool) { toggleAddon(site) { $0.xdebugEnabled = enabled } }
+    public func setElasticsearch(_ site: Site, enabled: Bool) { toggleAddon(site) { $0.elasticsearchEnabled = enabled } }
+
+    /// Persist an add-on flag change and restart the site when it is running so
+    /// the new container recipe takes effect.
+    private func toggleAddon(_ site: Site, _ apply: @escaping (inout Site) -> Void) {
+        Task {
+            var updated = site
+            apply(&updated)
+            await store.upsertSite(updated)
+            if site.status.isRunning {
+                await lifecycle.stop(updated)
+                do {
+                    let provisioned = try await lifecycle.startSite(updated)
+                    if provisioned != updated.provisioned {
+                        updated.provisioned = provisioned
+                        await store.upsertSite(updated)
+                    }
+                } catch { lastError = SiteLifecycleErrorText(error) }
+            }
+        }
+    }
+
+    // MARK: - Custom domain (§2i)
+
+    public func setDomain(_ site: Site, domain: String) {
+        Task {
+            guard let normalized = DomainService.normalize(domain) else {
+                lastError = "\"\(domain)\" is not a valid hostname."
+                return
+            }
+            if store.sites.contains(where: { $0.id != site.id && $0.customDomain == normalized }) {
+                lastError = "\"\(normalized)\" is already used by another site."
+                return
+            }
+            var updated = site
+            updated.customDomain = normalized
+            await store.upsertSite(updated)
+            do {
+                let all = store.sites.compactMap(\.customDomain)
+                try await DomainService(cli: cli, ca: ca).apply(site: updated, allCustomDomains: all)
+                await refreshProxyRouting()
+            } catch { lastError = SiteLifecycleErrorText(error) }
+        }
+    }
+
+    public func clearDomain(_ site: Site) {
+        Task {
+            var updated = site
+            updated.customDomain = nil
+            await store.upsertSite(updated)
+            do {
+                let all = store.sites.compactMap(\.customDomain)
+                try await DomainService(cli: cli, ca: ca).apply(site: updated, allCustomDomains: all)
+                await refreshProxyRouting()
+            } catch { lastError = SiteLifecycleErrorText(error) }
+        }
+    }
+
+    // MARK: - WordPress / PHP versions (§2k)
+
+    /// Change the site's image tag (PHP/WP version) — files/DB untouched — and
+    /// restart when running.
+    public func changeImageTag(_ site: Site, imageTag: String, phpLabel: String?) {
+        Task {
+            var updated = site
+            updated.imageTag = imageTag
+            updated.phpVersion = phpLabel
+            await store.upsertSite(updated)
+            if site.status.isRunning {
+                await lifecycle.stop(updated)
+                do { _ = try await lifecycle.startSite(updated) }
+                catch { lastError = SiteLifecycleErrorText(error) }
+            }
+        }
+    }
+
+    /// Run `wp core update` (+ db) via a one-shot wp-cli container.
+    public func updateWordPressCore(_ site: Site) {
+        Task {
+            guard let dbHost = try? await cli.ipAddress(of: site.dbContainerName), !dbHost.isEmpty else {
+                lastError = "Start the site before updating WordPress core."
+                return
+            }
+            do { try await cli.run(SiteRecipe.wpCoreUpdateArgs(site, dbHost: dbHost)) }
+            catch { lastError = SiteLifecycleErrorText(error) }
+        }
+    }
+
+    /// Live WordPress version (`wp core version`) when the site is running.
+    public func liveWordPressVersion(_ site: Site) async -> String? {
+        guard let dbHost = try? await cli.ipAddress(of: site.dbContainerName), !dbHost.isEmpty else { return nil }
+        let result = try? await cli.runCapturing(SiteRecipe.wpCoreVersionArgs(site, dbHost: dbHost))
+        let v = result?.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (v?.isEmpty == false) ? v : nil
+    }
+
+    /// Multisite subsites (`wp site list`) when running (§2j).
+    public func subsites(_ site: Site) async -> [(blogID: String, url: String)] {
+        guard site.networkType.isMultisite,
+              let dbHost = try? await cli.ipAddress(of: site.dbContainerName), !dbHost.isEmpty,
+              let result = try? await cli.runCapturing(SiteRecipe.wpSiteListArgs(site, dbHost: dbHost)),
+              let data = result.stdout.data(using: .utf8),
+              let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
+        return rows.map { row in
+            let id = (row["blog_id"].map { "\($0)" }) ?? "?"
+            let url = (row["url"] as? String) ?? ""
+            return (id, url)
+        }
+    }
+
+    // MARK: - WP debug constants (§2c-bis)
+
+    /// Read the current debug/dev constants from wp-config (missing = false/off).
+    public func devConstants(_ site: Site) -> (debug: [String: Bool], mode: String, environment: String) {
+        let folder = site.wordpressFolder
+        var debug: [String: Bool] = [:]
+        for name in WPConfigService.debugConstants {
+            debug[name] = WPConfigService.boolConstant(name, wordpressFolder: folder)
+        }
+        let parsed = try? WPConfigService.read(wordpressFolder: folder)
+        let mode = parsed?.constants[WPConfigService.developmentModeConstant] ?? ""
+        let env = parsed?.constants[WPConfigService.environmentTypeConstant] ?? ""
+        return (debug, mode, env)
+    }
+
+    public func setDebugConstant(_ site: Site, name: String, enabled: Bool) {
+        do { try WPConfigService.setBoolConstant(name, enabled, wordpressFolder: site.wordpressFolder) }
+        catch { lastError = "\(error)" }
+    }
+
+    public func setDevelopmentMode(_ site: Site, mode: String) {
+        do {
+            if mode.isEmpty {
+                try WPConfigService.setConstant(WPConfigService.developmentModeConstant, value: "", rawValue: false, wordpressFolder: site.wordpressFolder)
+            } else {
+                try WPConfigService.setConstant(WPConfigService.developmentModeConstant, value: mode, rawValue: false, wordpressFolder: site.wordpressFolder)
+            }
+        } catch { lastError = "\(error)" }
+    }
+
+    // MARK: - Global `wp` router (§2e follow-up)
+
+    public var globalWPInstalled: Bool { ShellPathService.isInstalled() && WPCLIShim.routerInstalled }
+
+    public func setGlobalWP(enabled: Bool) {
+        Task {
+            do {
+                if enabled {
+                    _ = try WPCLIShim.writeRouter()
+                    let order = await ShellPathService.wpOnPath()
+                    if order.first != WPCLIShim.routerPath { try ShellPathService.apply(install: true) }
+                } else {
+                    try ShellPathService.apply(install: false)
+                    WPCLIShim.removeRouter()
+                }
+            } catch { lastError = "Global wp router: \(error)" }
         }
     }
 
@@ -127,13 +308,57 @@ public final class AppViewModel {
 
     public func agentToolsEnabled(_ site: Site) -> Bool { AgentToolsService.isEnabled(site: site) }
 
-    public func setAgentTools(_ site: Site, enabled: Bool) {
-        do {
-            if enabled { _ = try AgentToolsService.enable(site: site) }
-            else { try AgentToolsService.disable(site: site) }
-        } catch {
-            lastError = "\(error)"
+    /// Enable agent tools at a chosen placement root (default: the site folder;
+    /// or a wp-content repo root where the user opens their IDE — §2d rework).
+    public func enableAgentTools(_ site: Site, root: URL? = nil, docName: String? = nil) {
+        Task {
+            do {
+                let rootURL = root ?? site.path
+                let repoRel = repoRelPath(root: rootURL, site: site)
+                let result = try AgentToolsService.enable(site: site, root: rootURL, docName: docName, repoRelPath: repoRel)
+                var updated = site
+                updated.agentToolsRoot = result.root
+                updated.agentToolsDoc = result.docName
+                await store.upsertSite(updated)
+            } catch { lastError = "\(error)" }
         }
+    }
+
+    public func disableAgentTools(_ site: Site) {
+        Task {
+            do {
+                let rootURL = site.agentToolsRoot.map { URL(fileURLWithPath: $0) } ?? site.path
+                try AgentToolsService.disable(site: site, root: rootURL, docName: site.agentToolsDoc)
+                var updated = site
+                updated.agentToolsRoot = nil
+                updated.agentToolsDoc = nil
+                await store.upsertSite(updated)
+            } catch { lastError = "\(error)" }
+        }
+    }
+
+    /// Relative path of `root` under the site's `wordpress/`, or nil.
+    private func repoRelPath(root: URL, site: Site) -> String? {
+        let wp = site.wordpressFolder.resolvingSymlinksInPath().path
+        let r = root.resolvingSymlinksInPath().path
+        guard r != wp, r.hasPrefix(wp + "/") else { return nil }
+        return String(r.dropFirst(wp.count + 1))
+    }
+
+    /// Rewrite site `wp` shims (and the global router) whose format is stale, so
+    /// improvements ship automatically on the next launch (PLAN.md §2e).
+    private func refreshStaleShims() {
+        for site in store.sites where WPCLIShim.shimNeedsRefresh(siteRoot: site.path) {
+            _ = try? WPCLIShim.writeShim(slug: site.slug, siteRoot: site.path)
+        }
+        for site in store.sites {
+            guard let root = site.agentToolsRoot else { continue }
+            let url = URL(fileURLWithPath: root)
+            if WPCLIShim.shimNeedsRefresh(siteRoot: url) {
+                _ = try? WPCLIShim.writeShim(slug: site.slug, siteRoot: url, wordpressFolder: site.wordpressFolder)
+            }
+        }
+        if WPCLIShim.routerInstalled { _ = try? WPCLIShim.writeRouter() }
     }
 
     /// Open an interactive wp-cli shell for the site in Terminal.app (§2e).
@@ -201,7 +426,10 @@ public final class AppViewModel {
     // MARK: - Site actions
 
     @discardableResult
-    public func createSite(name: String, parentFolder: URL? = nil, imageTag: String = SiteRecipe.defaultWordPressImage, phpVersion: String? = nil, groupID: UUID? = nil) async -> Site? {
+    public func createSite(name: String, parentFolder: URL? = nil, imageTag: String = SiteRecipe.defaultWordPressImage,
+                           phpVersion: String? = nil, groupID: UUID? = nil,
+                           networkType: NetworkType = .none, customDomain: String? = nil,
+                           xdebugEnabled: Bool = false, elasticsearchEnabled: Bool = false) async -> Site? {
         let root = parentFolder ?? SiteFolders.defaultSitesRoot
         let slug = Slug.unique(name, existing: store.existingSlugs)
         guard let port = PortAllocator.firstFreePort(excluding: store.takenPorts) else {
@@ -210,7 +438,9 @@ public final class AppViewModel {
         }
         let site = Site(name: name, slug: slug,
                         path: root.appendingPathComponent(slug, isDirectory: true),
-                        port: port, imageTag: imageTag, phpVersion: phpVersion, groupID: groupID)
+                        port: port, imageTag: imageTag, phpVersion: phpVersion, groupID: groupID,
+                        xdebugEnabled: xdebugEnabled, elasticsearchEnabled: elasticsearchEnabled,
+                        customDomain: customDomain, networkType: networkType)
         await store.upsertSite(site)
         return site
     }
@@ -250,8 +480,13 @@ public final class AppViewModel {
     /// events. Selects the new site. Returns nil on failure (error surfaced via
     /// `lastError`).
     @discardableResult
-    public func createAndStartSite(name: String, parentFolder: URL? = nil, imageTag: String = SiteRecipe.defaultWordPressImage, phpVersion: String? = nil, groupID: UUID? = nil) async -> Site? {
-        guard let site = await createSite(name: name, parentFolder: parentFolder, imageTag: imageTag, phpVersion: phpVersion, groupID: groupID) else {
+    public func createAndStartSite(name: String, parentFolder: URL? = nil, imageTag: String = SiteRecipe.defaultWordPressImage,
+                                   phpVersion: String? = nil, groupID: UUID? = nil,
+                                   networkType: NetworkType = .none, customDomain: String? = nil,
+                                   xdebugEnabled: Bool = false, elasticsearchEnabled: Bool = false) async -> Site? {
+        guard let site = await createSite(name: name, parentFolder: parentFolder, imageTag: imageTag, phpVersion: phpVersion,
+                                          groupID: groupID, networkType: networkType, customDomain: customDomain,
+                                          xdebugEnabled: xdebugEnabled, elasticsearchEnabled: elasticsearchEnabled) else {
             return nil
         }
         selection = site.id
@@ -261,6 +496,12 @@ public final class AppViewModel {
                 var updated = site
                 updated.provisioned = provisioned
                 await store.upsertSite(updated)
+            }
+            // Custom domain: hosts + cert + proxy after the site is up (§2i).
+            if let customDomain, !customDomain.isEmpty {
+                let all = store.sites.compactMap(\.customDomain)
+                try? await DomainService(cli: cli, ca: ca).apply(site: site, allCustomDomains: all)
+                await refreshProxyRouting()
             }
         } catch {
             lastError = SiteLifecycleErrorText(error)

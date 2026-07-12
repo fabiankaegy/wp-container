@@ -10,13 +10,22 @@ struct OverviewCard: View {
     var body: some View {
         SectionCard(title: "Overview", systemImage: "info.circle") {
             Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 24, verticalSpacing: 12) {
-                InfoRow(label: "Local URL") {
+                InfoRow(label: "URL") {
                     HStack(spacing: 6) {
-                        Button(site.localURL.absoluteString) {
-                            SystemActions.openInBrowser(site.localURL)
+                        Button(site.url.absoluteString) {
+                            SystemActions.openInBrowser(site.url)
                         }
                         .buttonStyle(.link)
-                        CopyButton(value: site.localURL.absoluteString, help: "Copy URL")
+                        CopyButton(value: site.url.absoluteString, help: "Copy URL")
+                    }
+                }
+
+                if site.url != site.localURL {
+                    InfoRow(label: "Local port") {
+                        HStack(spacing: 6) {
+                            Text(site.localURL.absoluteString).foregroundStyle(.secondary).textSelection(.enabled)
+                            CopyButton(value: site.localURL.absoluteString, help: "Copy local URL")
+                        }
                     }
                 }
 
@@ -52,7 +61,7 @@ struct OverviewCard: View {
                         Text("/").foregroundStyle(.tertiary)
                         credential(SiteRecipe.adminPassword)
                         Button("Open WP Admin") {
-                            SystemActions.openInBrowser(site.adminURL)
+                            SystemActions.openInBrowser(site.wpAdminURL)
                         }
                         .buttonStyle(.link)
                         .padding(.leading, 4)

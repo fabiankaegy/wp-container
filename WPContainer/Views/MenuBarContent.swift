@@ -144,7 +144,7 @@ private struct SiteMenuRow: View {
             StatusDot(status: site.status, size: 8)
             VStack(alignment: .leading, spacing: 0) {
                 Text(site.name).font(.callout.weight(.medium)).lineLimit(1)
-                Text("localhost:\(String(site.port))")
+                Text(site.displayHost)
                     .font(.caption2).foregroundStyle(.secondary)
             }
             Spacer(minLength: 6)

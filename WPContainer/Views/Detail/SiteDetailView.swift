@@ -44,6 +44,9 @@ struct SiteDetailView: View {
         case .overview:
             VStack(alignment: .leading, spacing: 18) {
                 OverviewCard(site: site)
+                if site.networkType.isMultisite {
+                    SubsitesCard(site: site)
+                }
                 BranchesCard(site: site)
             }
         case .logs:
@@ -51,6 +54,9 @@ struct SiteDetailView: View {
         case .settings:
             VStack(alignment: .leading, spacing: 18) {
                 IntegrationsCard(site: site)
+                DevelopmentCard(site: site)
+                SoftwareCard(site: site)
+                DomainCard(site: site)
                 dangerZone
             }
         }
@@ -112,7 +118,7 @@ struct SiteDetailView: View {
             actionButton("WP Admin", "person.badge.key") { SystemActions.openInBrowser(site.wpAdminURL) }
                 .disabled(!site.status.isRunning)
             actionButton("Finder", "folder") { SystemActions.revealInFinder(site.path) }
-            actionButton("Terminal", "terminal") { SystemActions.openTerminal(at: site.path) }
+            actionButton("Terminal", "terminal") { SystemActions.openTerminal(at: site.path, pathPrepend: site.path) }
             actionButton("WP-CLI", "command") { vm.openWPCLI(site) }
                 .disabled(!site.status.isRunning)
             actionButton("Copy URL", "link") { SystemActions.copyToClipboard(site.url.absoluteString) }
