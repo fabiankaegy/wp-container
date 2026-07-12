@@ -28,7 +28,11 @@ build-cli: generate
 install-cli: build-cli
 	install -m 0755 "$(PRODUCTS)/wp-container" "$(PREFIX)/wp-container"
 	ln -sf "$(PREFIX)/wp-container" "$(PREFIX)/wpc"
+	@# Write the global `wp` router binary (no shell edits). Run
+	@# `wp-container setup wp` (or the app's toggle) to put it first on PATH.
+	"$(PREFIX)/wp-container" setup wp --install-binary
 	@echo "Installed wp-container (+ wpc symlink) to $(PREFIX)"
+	@echo "Global wp router staged; run 'wp-container setup wp' to enable plain 'wp' inside sites."
 
 clean:
 	rm -rf $(DERIVED) $(PROJECT)

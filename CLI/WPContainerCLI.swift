@@ -23,6 +23,11 @@ struct WPContainerCLI: AsyncParsableCommand {
             ShimCommand.self,
             HTTPSCommand.self,
             ProxyCommand.self,
+            XdebugCommand.self,
+            ElasticsearchCommand.self,
+            DomainCommand.self,
+            ResolveSiteCommand.self,
+            SetupCommand.self,
         ]
     )
 }
@@ -148,7 +153,11 @@ struct CreateCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "create", abstract: "Create a new site (does not start it).")
     @Argument(help: "Site name.") var name: String
     @Option(name: .long, help: "Parent folder (default: ~/WP Container Sites).") var path: String?
-    @Option(name: .long, help: "WordPress image tag (e.g. wordpress:php8.3-apache).") var php: String?
+    @Option(name: .long, help: "Full WordPress image tag override (e.g. wordpress:php8.3-apache).") var php: String?
+    @Option(name: .long, help: "WordPress version: latest, 6.8, 6.7, 6.6.") var wp: String?
+    @Option(name: .long, help: "PHP version: 8.4, 8.3, 8.2, 8.1.") var phpVersion: String?
+    @Option(name: .long, help: "Multisite network: subdirectory | subdomain.") var multisite: String?
+    @Option(name: .long, help: "Custom domain, e.g. mysite.local.") var domain: String?
     @Option(name: .long, help: "Sidebar group name (created if it doesn't exist).") var group: String?
     @OptionGroup var output: JSONOptions
 
@@ -161,10 +170,40 @@ struct CreateCommand: AsyncParsableCommand {
             guard let port = PortAllocator.firstFreePort(excluding: taken) else {
                 throw CLIErrorJSON("no_free_port")
             }
+            // Resolve the image tag: explicit --php override wins; else map the
+            // WP × PHP matrix (§2k); else default.
+            let imageTag: String
+            let phpLabel: String?
+            if let php {
+                imageTag = php; phpLabel = php
+            } else if wp != nil || phpVersion != nil {
+                let wpVer = wp ?? "latest"
+                let phpVer = phpVersion ?? WordPressImageCatalog.defaultPHP
+                imageTag = WordPressImageCatalog.imageTag(wordpress: wpVer, php: phpVer)
+                phpLabel = "PHP \(phpVer)"
+            } else {
+                imageTag = SiteRecipe.defaultWordPressImage; phpLabel = nil
+            }
+            // Network type.
+            var networkType: NetworkType = .none
+            if let multisite {
+                guard let t = NetworkType(rawValue: multisite.lowercased()), t.isMultisite else {
+                    throw CLIErrorJSON("bad_args", detail: "--multisite must be subdirectory|subdomain")
+                }
+                networkType = t
+            }
+            // Custom domain (validated).
+            var customDomain: String? = nil
+            if let domain {
+                guard let normalized = DomainService.normalize(domain) else { throw CLIErrorJSON("invalid_domain", detail: domain) }
+                if envelope.sites.contains(where: { $0.customDomain == normalized }) { throw CLIErrorJSON("domain_in_use", detail: normalized) }
+                customDomain = normalized
+            }
             let root = path.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) } ?? SiteFolders.defaultSitesRoot
             let site = Site(name: name, slug: slug,
                             path: root.appendingPathComponent(slug, isDirectory: true),
-                            port: port, imageTag: php ?? SiteRecipe.defaultWordPressImage, phpVersion: php)
+                            port: port, imageTag: imageTag, phpVersion: phpLabel,
+                            customDomain: customDomain, networkType: networkType)
             try SiteFolders.ensure(for: site)
             // Write the per-site wp-cli shim at <site>/wp (§2e).
             try? WPCLIShim.writeShim(slug: site.slug, siteRoot: site.path)
