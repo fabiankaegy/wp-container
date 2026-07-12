@@ -6,7 +6,7 @@ struct WPContainerApp: App {
     @State private var viewModel = AppViewModel()
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup(id: "main") {
             MainWindow()
                 .environment(viewModel)
                 .frame(minWidth: 880, minHeight: 560)
@@ -15,6 +15,17 @@ struct WPContainerApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
         .commands { AppCommands(vm: viewModel) }
+
+        // Menu bar extra (PLAN.md §2h): a compact list of all sites + running
+        // envs with inline start/stop. Keeps the app alive when the main window
+        // is closed; Dock presence stays normal.
+        MenuBarExtra {
+            MenuBarContent()
+                .environment(viewModel)
+        } label: {
+            Image(systemName: "cube.transparent.fill")
+        }
+        .menuBarExtraStyle(.window)
     }
 }
 
