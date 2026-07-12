@@ -20,6 +20,11 @@ public final class AppViewModel {
     public var systemStatus: SystemCheckResult?
     public var lastError: String?
 
+    /// UI-intent flags so menu commands (and buttons) can drive sheet
+    /// presentation from anywhere.
+    public var presentingAddSite = false
+    public var presentingNewEnv = false
+
     @ObservationIgnored private var reconcileTask: Task<Void, Never>?
     @ObservationIgnored private var statusTask: Task<Void, Never>?
 
@@ -126,6 +131,63 @@ public final class AppViewModel {
             let n = store.sites.count + 1
             _ = await createSite(name: "Demo Site \(n)")
         }
+    }
+
+    /// Create a site AND start it (seeding + provisioning), awaiting completion
+    /// so a creation sheet can drive inline progress off the emitted status
+    /// events. Selects the new site. Returns nil on failure (error surfaced via
+    /// `lastError`).
+    @discardableResult
+    public func createAndStartSite(name: String, parentFolder: URL? = nil, imageTag: String = SiteRecipe.defaultWordPressImage, phpVersion: String? = nil) async -> Site? {
+        guard let site = await createSite(name: name, parentFolder: parentFolder, imageTag: imageTag, phpVersion: phpVersion) else {
+            return nil
+        }
+        selection = site.id
+        do {
+            let provisioned = try await lifecycle.startSite(site)
+            if provisioned != site.provisioned {
+                var updated = site
+                updated.provisioned = provisioned
+                await store.upsertSite(updated)
+            }
+        } catch {
+            lastError = SiteLifecycleErrorText(error)
+        }
+        return site
+    }
+
+    /// Awaitable worktree-env creation for the "New Branch Environment" sheet:
+    /// returns the created (already-started) env so the sheet can show its URL,
+    /// or nil on failure (error surfaced via `lastError`).
+    public func createEnvAwaiting(parent: Site, repoRelPath: String, branch: String, from: String? = nil) async -> WorktreeEnv? {
+        guard let port = PortAllocator.firstFreePort(excluding: store.takenPorts) else {
+            lastError = "No free port available."
+            return nil
+        }
+        do {
+            let env = try await worktrees.create(parent: parent, parentIsRunning: parent.status.isRunning,
+                                                 repoRelPath: repoRelPath, branch: branch, from: from, port: port)
+            await store.upsertEnv(env)
+            return env
+        } catch {
+            lastError = SiteLifecycleErrorText(error)
+            return nil
+        }
+    }
+
+    /// Repos discovered under a site's `wp-content` (for the env sheet's picker).
+    public func repos(for site: Site) async -> [GitRepo] {
+        await git.repos(under: site.wordpressFolder)
+    }
+
+    /// Branch names in a repo (for the env sheet's autocomplete).
+    public func branches(inRepo repo: GitRepo) async -> [String] {
+        (try? await git.branches(repo: repo.absolutePath)) ?? []
+    }
+
+    public var selectedSite: Site? {
+        guard let selection else { return nil }
+        return store.site(id: selection)
     }
 
     public func startSite(_ site: Site) {
