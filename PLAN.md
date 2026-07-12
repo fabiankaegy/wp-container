@@ -173,6 +173,43 @@ adapted to our stack:
   file (site URL/port/paths/credentials, wp-content repo hints, worktree workflow
   how-to) and `.gitignore` entries for the generated files.
 
+## 2e. Full WP-CLI support (every site, every surface)
+
+wp-cli is a first-class citizen on all four surfaces (implementation: one-shot
+`wordpress:cli` containers sharing the site's mounts + DB env — already validated):
+1. `wp-container wp <site|env> -- <args…>` CLI proxy (done in kit).
+2. MCP `wp_cli` tool (§2d).
+3. UI: "WP-CLI" button per site → opens Terminal.app running an interactive
+   wp-cli shell container (`container run -it --rm … wordpress:cli bash`) cd'd to
+   /var/www/html, so `wp plugin list` etc. just work.
+4. A per-site executable shim written at `<site>/wp` (and into env dirs) so
+   `cd "~/WP Container Sites/my-blog" && ./wp plugin list` works from any shell
+   or agent without the app — the shim resolves its own site by location.
+
+## 2f. Trusted HTTPS for every site (mkcert-style, one click)
+
+- **Local CA:** `CertificateAuthority` service generates a "WP Container Local CA"
+  once (key + cert in `~/Library/Application Support/WPContainer/ca/`). One-time
+  "Trust HTTPS certificates…" button installs it as trusted root
+  (`security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain`
+  via an osascript admin-privileges prompt — exactly mkcert's mechanism).
+- **One wildcard leaf** signed by the CA: SANs `*.localhost`, `localhost`,
+  `127.0.0.1` — `*.localhost` is a valid single-level wildcard, and every
+  `<slug>.localhost` name resolves to 127.0.0.1 on macOS automatically (no
+  /etc/hosts edits ever).
+- **HTTPS termination on the host, not in containers:** the app runs a lightweight
+  TLS-terminating reverse proxy (Network.framework listener, port 443 — unprivileged
+  on modern macOS — with 8443 fallback) that routes by Host header:
+  `https://my-blog.localhost` → `127.0.0.1:8881`. Containers stay untouched.
+  The CLI gains `wp-container proxy serve` (daemonizable) so HTTPS works app-closed;
+  app and CLI negotiate who owns the listener via a pidfile.
+- **WordPress correctness:** enabling HTTPS for a site sets home/siteurl to
+  `https://<slug>.localhost` (wp-cli) and injects the standard
+  `HTTP_X_FORWARDED_PROTO` snippet into wp-config.php (backed up first).
+  Toggling off reverts. Worktree envs get `https://<envSlug>.localhost`.
+- UI: per-site HTTPS toggle + global "Trust CA" onboarding step; URL displays and
+  Open/WP Admin buttons use the https URL when enabled.
+
 ## 3. App architecture (MVVM, Swift 6 concurrency)
 
 ```
