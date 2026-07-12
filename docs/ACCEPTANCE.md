@@ -227,3 +227,95 @@ sites, containers, folders and store entries were deleted before finishing.
   running alongside them. The app's own HTTPS proxy (already running,
   port 443) was reused as-is for the HTTPS test rather than starting a second
   proxy process.
+
+---
+
+## Review findings (Phase R — adversarial code review)
+
+Full-codebase adversarial pass across the eight review dimensions. Build stayed
+green (`xcodegen && make build`, both schemes) after each fix.
+
+### CONFIRMED + fixed
+
+- **Process safety — no Task-cancellation propagation** (`ProcessRunner.run`).
+  The launcher blocked inside a continuation with no way to observe cancellation,
+  so a stalled `container image pull`/`run` (or any hung child) could never be
+  interrupted, and cancelling a SwiftUI `Task` mid-call leaked the child. This
+  also defeated the `Task.checkCancellation()` calls already present in
+  `SiteLifecycle`'s readiness loops while blocked in a `cli.run` pull/seed step.
+  Fixed by wrapping the launch in `withTaskCancellationHandler`; on cancel the
+  child is sent `SIGTERM`, closing its pipes, unblocking the drains, and resuming
+  the continuation. (commit `f0254b4`)
+- **Injection/robustness — unvalidated wp-config constant name**
+  (`WPConfigService.setConstant`). The name was interpolated into
+  `define( '<name>', … )` verbatim; the MCP `edit_wp_config` tool takes an
+  agent-controlled name, so a stray quote/paren/newline could inject PHP into or
+  corrupt `wp-config.php` and white-screen the site. Now rejected unless it is a
+  valid PHP identifier (`[A-Za-z_][A-Za-z0-9_]*`). (commit `00e62f4`)
+
+### CONFIRMED sound (investigated, no defect)
+
+- **"Trusted HTTPS toggle OFF after relaunch."** The `httpsRow` toggle binds
+  directly to the persisted `site.httpsEnabled` (no `@State` caching), and
+  `Site`'s decoder defaults a missing key correctly (`try? … ?? false`) — so the
+  displayed state survives relaunch. The residual real risk is the proxy not
+  *actually serving* (see stale-pidfile below), which is independent of what the
+  toggle shows. Matches the acceptance agent's binding conclusion.
+- **Large-output pipe drain** (`ProcessRunner`). stdout/stderr are drained on
+  separate threads; Foundation closes the parent write-end after spawn so the
+  drains hit EOF. Corroborated by the 13/13 acceptance run over large output.
+- **Slug / domain injection surfaces.** `Slug.make` restricts to `[a-z0-9-]`
+  and `DomainService.normalize` enforces strict DNS labels, so slug/domain values
+  flowing into container args, `/etc/hosts` lines, cert SANs and URLs cannot
+  carry spaces/newlines/quotes. `/etc/hosts` writes stay inside the
+  `# wp-container` marker block; osascript/`cp` args are shell-quoted.
+
+### PLAUSIBLE (documented, not fixed)
+
+- **Port-allocation TOCTOU (app ↔ CLI, and rapid in-app creation).**
+  `PortAllocator.firstFreePort` reads `takenPorts` then the store is written
+  later, so two concurrent creators can pick the same port. *Mitigated:* the
+  loser fails at `container run` bind time (not silent data loss). *Would prove
+  it:* create two sites near-simultaneously from app + CLI and start both — the
+  second errors on `-p 127.0.0.1:<port>:80`. *Proper fix:* allocate the port
+  inside the `persistence.mutate` closure.
+- **Stale pidfile with reused PID** (`ProxyControl.current`). The app never
+  `release()`s the proxy pidfile on quit; relaunch relies on the dead PID
+  failing `kill(pid,0)` (the normal case). If the OS reused that exact PID for a
+  live process, `current()` false-positives → the app skips starting its proxy →
+  HTTPS silently not served until the pidfile is cleared. Rare. *Would prove it:*
+  hand-write `proxy.pid` with a live unrelated PID and relaunch. *Proper fix:*
+  probe that the recorded port is actually accepting connections.
+- **Re-entrancy: double-start / rapid toggle spam.** Lifecycle actions spawn
+  undeduped detached `Task`s; a fast double Start (or add-on toggle) runs two
+  `startContainers`, the second failing on the `--name` collision. Self-heals via
+  the 5s reconcile; surfaces a transient error, no corruption. *Proper fix:* an
+  in-flight guard keyed by instance id.
+- **Proxy: routed-but-stopped site.** When a host maps to a known site whose
+  container is down, the upstream connect fails and both sockets are cancelled —
+  the client sees a connection reset rather than a friendly 502 (the 502 page is
+  only produced for wholly-unmapped hosts).
+- **`ContainerCLI.logs` pid-reuse on termination.** `onTermination` SIGTERMs the
+  recorded pid even after natural finish; a microsecond-window pid reuse could
+  signal an unrelated process. Extremely low probability.
+- **Worktree `repoRelPath` container-path traversal** (`SiteRecipe.shadowMount`).
+  Only leading/trailing `/` are trimmed, so a `..`-laden rel path would resolve
+  outside `/var/www/html` *inside the container*; the host side stays the user's
+  own worktree, and rel paths come from real on-disk repo directory names (which
+  cannot be literally `..`), so it is not realistically reachable.
+
+### Overall robustness verdict
+
+Solid. The architecture is disciplined: argument-array process invocations
+(no shell string interpolation), strict slug/domain sanitization, a
+cross-process `flock` + atomic-write store with sound migration defaults, and a
+proxy that is deliberately simple. Confirmed defects were narrow and are fixed;
+the remainder are low-frequency edge cases that self-heal or fail safe.
+
+### Top 3 to harden next
+
+1. Allocate ports inside the locked `persistence.mutate` (kill the TOCTOU).
+2. Make `ProxyControl` liveness a real listen-probe, not just `kill(pid,0)`, and
+   `release()` on app termination.
+3. Add an in-flight guard for per-instance lifecycle actions to make
+   double-start / rapid-toggle a no-op instead of a transient error.
