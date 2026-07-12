@@ -221,6 +221,15 @@ Sidebar organization: sites can be grouped (e.g. "Clients", "Personal", "Experim
 - AddSiteSheet gets an optional group picker; CLI: `wp-container create --group <name>`
   (creates the group if missing), `list --json` includes `group` per site.
 
+## 2h. Menu bar extra
+
+`MenuBarExtra` (window style) with the app glyph: one clear list of ALL sites (and
+running worktree envs) — status dot + name + port, with an inline start/stop
+toggle/button per row; clicking a row opens the main window focused on that site.
+Footer: "Open WP Container" + Quit. Transitional states show a small spinner on the
+row. The list mirrors sidebar grouping order but flat/compact. App keeps running
+(and menu bar item alive) when the main window closes.
+
 ## 3. App architecture (MVVM, Swift 6 concurrency)
 
 ```
