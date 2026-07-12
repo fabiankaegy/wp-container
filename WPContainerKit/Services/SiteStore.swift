@@ -13,6 +13,7 @@ import Observation
 public final class SiteStore {
     public private(set) var sites: [Site] = []
     public private(set) var envs: [WorktreeEnv] = []
+    public private(set) var groups: [SiteGroup] = []
 
     @ObservationIgnored private let persistence: StorePersistence
     @ObservationIgnored private var statusByID: [UUID: SiteStatus] = [:]
@@ -38,6 +39,7 @@ public final class SiteStore {
         guard let envelope = try? await persistence.load() else { return }
         sites = envelope.sites
         envs = envelope.envs
+        groups = envelope.groups
         applyStatuses()
     }
 
@@ -56,6 +58,22 @@ public final class SiteStore {
     public func site(id: UUID) -> Site? { sites.first { $0.id == id } }
     public func env(id: UUID) -> WorktreeEnv? { envs.first { $0.id == id } }
     public func envs(forSite siteID: UUID) -> [WorktreeEnv] { envs.filter { $0.parentSiteID == siteID } }
+
+    // MARK: - Groups (PLAN.md §2g)
+
+    /// Groups sorted by their `sortOrder` (then name) for stable display.
+    public var sortedGroups: [SiteGroup] {
+        groups.sorted { ($0.sortOrder, $0.name.lowercased()) < ($1.sortOrder, $1.name.lowercased()) }
+    }
+
+    public func group(id: UUID) -> SiteGroup? { groups.first { $0.id == id } }
+    public func group(named name: String) -> SiteGroup? {
+        groups.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+    }
+    /// Sites belonging to a group (nil = the ungrouped section), preserving store order.
+    public func sites(inGroup groupID: UUID?) -> [Site] {
+        sites.filter { $0.groupID == groupID }
+    }
 
     // MARK: - Mutations (write-through to disk under lock)
 
@@ -92,6 +110,51 @@ public final class SiteStore {
         await apply { env in env.envs.removeAll { $0.id == id } }
     }
 
+    // MARK: - Group mutations (write-through to disk under lock)
+
+    /// Create a group (appended after existing ones) and return its id.
+    @discardableResult
+    public func addGroup(name: String) async -> UUID {
+        let id = UUID()
+        await apply { env in
+            let nextOrder = (env.groups.map(\.sortOrder).max() ?? -1) + 1
+            env.groups.append(SiteGroup(id: id, name: name, sortOrder: nextOrder))
+        }
+        return id
+    }
+
+    public func renameGroup(id: UUID, to name: String) async {
+        await apply { env in
+            if let i = env.groups.firstIndex(where: { $0.id == id }) { env.groups[i].name = name }
+        }
+    }
+
+    /// Delete a group; its sites fall back to ungrouped (never deleted).
+    public func deleteGroup(id: UUID) async {
+        await apply { env in
+            env.groups.removeAll { $0.id == id }
+            for i in env.sites.indices where env.sites[i].groupID == id {
+                env.sites[i].groupID = nil
+            }
+        }
+    }
+
+    /// Move a site into a group (nil = ungrouped).
+    public func moveSite(_ siteID: UUID, toGroup groupID: UUID?) async {
+        await apply { env in
+            if let i = env.sites.firstIndex(where: { $0.id == siteID }) { env.sites[i].groupID = groupID }
+        }
+    }
+
+    /// Persist a new group ordering (assigns ascending `sortOrder` in the given order).
+    public func reorderGroups(_ orderedIDs: [UUID]) async {
+        await apply { env in
+            for (order, id) in orderedIDs.enumerated() {
+                if let i = env.groups.firstIndex(where: { $0.id == id }) { env.groups[i].sortOrder = order }
+            }
+        }
+    }
+
     /// Update runtime status (not persisted). Ignored for unknown ids.
     public func setStatus(_ status: SiteStatus, for id: UUID) {
         statusByID[id] = status
@@ -105,6 +168,7 @@ public final class SiteStore {
         guard let envelope = try? await persistence.mutate(body) else { return }
         sites = envelope.sites
         envs = envelope.envs
+        groups = envelope.groups
         applyStatuses()
     }
 

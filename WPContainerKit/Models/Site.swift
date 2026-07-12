@@ -15,12 +15,14 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     public var phpVersion: String?
     public var createdAt: Date
     public var provisioned: Bool
+    /// Sidebar group this site belongs to (nil = ungrouped). See PLAN.md §2g.
+    public var groupID: UUID?
 
     /// Runtime-derived; NOT persisted.
     public var status: SiteStatus = .stopped
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, slug, path, port, imageTag, phpVersion, createdAt, provisioned
+        case id, name, slug, path, port, imageTag, phpVersion, createdAt, provisioned, groupID
     }
 
     public init(
@@ -33,6 +35,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         phpVersion: String? = nil,
         createdAt: Date = Date(),
         provisioned: Bool = false,
+        groupID: UUID? = nil,
         status: SiteStatus = .stopped
     ) {
         self.id = id
@@ -44,6 +47,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.phpVersion = phpVersion
         self.createdAt = createdAt
         self.provisioned = provisioned
+        self.groupID = groupID
         self.status = status
     }
 
