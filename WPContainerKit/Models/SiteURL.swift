@@ -15,15 +15,20 @@ public enum SiteURL {
         URL(string: "https://\(host)")!
     }
 
-    /// The effective public URL: the secure host when HTTPS is enabled, else the
-    /// local port. `host` is the proxy hostname (today `<slug>.localhost`; a
-    /// custom domain later).
-    public static func effective(httpsEnabled: Bool, host: String, port: Int) -> URL {
-        httpsEnabled ? secure(host: host) : local(port: port)
+    /// The plain-HTTP URL for a proxy-served hostname (custom domains with HTTPS
+    /// off route through the plain HTTP listener, PLAN.md §2i).
+    public static func plain(host: String) -> URL {
+        URL(string: "http://\(host)")!
     }
 
-    /// The effective `/wp-admin` URL.
-    public static func admin(httpsEnabled: Bool, host: String, port: Int) -> URL {
-        effective(httpsEnabled: httpsEnabled, host: host, port: port).appendingPathComponent("wp-admin")
+    /// The effective public URL, accounting for HTTPS and custom domains (§2f/§2i):
+    /// - custom domain set → `http(s)://<domain>` (always via the host proxy),
+    /// - else HTTPS on → `https://<slug>.localhost`,
+    /// - else → `http://127.0.0.1:<port>` (direct container port).
+    public static func effective(httpsEnabled: Bool, customDomain: String?, slug: String, port: Int) -> URL {
+        if let domain = customDomain, !domain.isEmpty {
+            return httpsEnabled ? secure(host: domain) : plain(host: domain)
+        }
+        return httpsEnabled ? secure(host: "\(slug).localhost") : local(port: port)
     }
 }

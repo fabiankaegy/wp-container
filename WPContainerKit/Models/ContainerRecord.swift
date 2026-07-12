@@ -17,6 +17,10 @@ public struct ContainerRecord: Sendable, Equatable {
     public var labels: [String: String]
     public var image: String?
     public var ipAddress: String?
+    /// The container's network gateway (`status.networks[0].ipv4Gateway`) — the
+    /// host address as seen from inside the container, used for Xdebug's
+    /// `client_host` (PLAN.md §2c). Never hardcode; read fresh each start.
+    public var gatewayAddress: String?
     public var publishedPorts: [PublishedPort]
 
     public struct PublishedPort: Sendable, Equatable {
@@ -68,10 +72,23 @@ public struct ContainerRecord: Sendable, Equatable {
         let networks = networksValue(from: statusRaw)
             ?? raw["networks"] ?? config["networks"] ?? raw["network"] ?? config["network"]
         let ip = firstIP(from: networks)
+        let gateway = firstGateway(from: networks)
         let ports = parsePorts(config["publishedPorts"] ?? raw["publishedPorts"] ?? config["ports"] ?? raw["ports"])
 
         return ContainerRecord(id: id, name: name, status: status, labels: labels,
-                               image: image, ipAddress: ip, publishedPorts: ports)
+                               image: image, ipAddress: ip, gatewayAddress: gateway, publishedPorts: ports)
+    }
+
+    private static func firstGateway(from value: Any?) -> String? {
+        func extract(_ dict: [String: Any]) -> String? {
+            firstString(dict["ipv4Gateway"], dict["gateway"], dict["gatewayAddress"])?
+                .split(separator: "/").first.map(String.init)
+        }
+        if let arr = value as? [[String: Any]] {
+            for n in arr { if let gw = extract(n) { return gw } }
+        }
+        if let dict = value as? [String: Any] { return extract(dict) }
+        return nil
     }
 
     private static func firstString(_ values: Any?...) -> String? {

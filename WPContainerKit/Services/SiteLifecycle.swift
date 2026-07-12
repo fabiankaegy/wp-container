@@ -4,12 +4,16 @@ public enum LifecycleError: Error, Sendable, CustomStringConvertible {
     case databaseNotReady
     case databaseIPUnavailable
     case httpNotReady
+    case elasticsearchNotReady
+    case elasticsearchIPUnavailable
 
     public var description: String {
         switch self {
         case .databaseNotReady:    return "The database container did not become ready in time."
         case .databaseIPUnavailable: return "Could not resolve the database container's IP address."
         case .httpNotReady:        return "WordPress did not start responding over HTTP in time."
+        case .elasticsearchNotReady: return "The Elasticsearch container did not become ready in time."
+        case .elasticsearchIPUnavailable: return "Could not resolve the Elasticsearch container's IP address."
         }
     }
 }
@@ -24,6 +28,7 @@ public actor SiteLifecycle {
     }
 
     private let cli: ContainerCLI
+    private let xdebug: XdebugImageService
 
     /// Immutable Sendable stream — readable from any context without `await`.
     public nonisolated let events: AsyncStream<StatusEvent>
@@ -31,6 +36,7 @@ public actor SiteLifecycle {
 
     public init(cli: ContainerCLI) {
         self.cli = cli
+        self.xdebug = XdebugImageService(cli: cli)
         var cont: AsyncStream<StatusEvent>.Continuation!
         self.events = AsyncStream(bufferingPolicy: .bufferingNewest(64)) { cont = $0 }
         self.continuation = cont
@@ -65,13 +71,42 @@ public actor SiteLifecycle {
             try await waitForDatabase(inst)
             // The DB IP changes on every restart — re-inspect each start, never cache.
             let dbHost = try await resolveDatabaseHost(inst)
-            try await cli.run(SiteRecipe.runWordPressArgs(inst, dbHost: dbHost))
+
+            // Elasticsearch sidecar (§2c): db → es → wp start order.
+            var elasticsearchURL: String? = nil
+            if inst.elasticsearchEnabled {
+                elasticsearchURL = try await startElasticsearch(inst)
+            }
+
+            // Xdebug (§2c): swap in the derived image + pass the host gateway.
+            var imageOverride: String? = nil
+            var xdebugClientHost: String? = nil
+            if inst.xdebugEnabled {
+                imageOverride = try await xdebug.ensureImage(forBaseTag: inst.imageTag)
+                // Gateway is the same across containers on the network; read it
+                // fresh from the already-running DB container (never hardcode).
+                xdebugClientHost = try await cli.gatewayAddress(of: inst.dbContainerName)
+            }
+
+            try await cli.run(SiteRecipe.runWordPressArgs(
+                inst, dbHost: dbHost, imageOverride: imageOverride,
+                xdebugClientHost: xdebugClientHost, elasticsearchURL: elasticsearchURL))
             try await waitForHTTP(inst)
             return dbHost
         } catch {
             emit(inst.instanceID, .error(Self.message(for: error)))
             throw error
         }
+    }
+
+    /// Start the Elasticsearch sidecar, wait for it to go green/yellow, and
+    /// return the `http://<es-ip>:9200` URL WordPress should point at (§2c).
+    private func startElasticsearch(_ inst: any RunnableInstance) async throws -> String {
+        try FileManager.default.createDirectory(at: inst.elasticsearchFolder, withIntermediateDirectories: true)
+        try await cli.run(SiteRecipe.runElasticsearchArgs(inst))
+        let esIP = try await resolveElasticsearchHost(inst)
+        try await waitForElasticsearch(esIP)
+        return "http://\(esIP):9200"
     }
 
     /// Start a site, provisioning WordPress on first run. Returns the (possibly
@@ -81,7 +116,11 @@ public actor SiteLifecycle {
         var provisioned = site.provisioned
         if !provisioned {
             do {
-                try await cli.run(SiteRecipe.wpCoreInstallArgs(site, dbHost: dbHost))
+                if site.networkType.isMultisite {
+                    try await MultisiteService(cli: cli).provision(site, dbHost: dbHost, installURL: site.url)
+                } else {
+                    try await cli.run(SiteRecipe.wpCoreInstallArgs(site, dbHost: dbHost))
+                }
                 provisioned = true
             } catch {
                 emit(site.id, .error(Self.message(for: error)))
@@ -96,17 +135,22 @@ public actor SiteLifecycle {
 
     public func stop(_ inst: any RunnableInstance) async {
         emit(inst.instanceID, .stopping)
-        // Containers run with --rm, so `stop` makes them vanish.
+        // Containers run with --rm, so `stop` makes them vanish. The es sidecar
+        // is stopped best-effort whether or not the flag is currently set (it
+        // may have been toggled off since start).
         _ = try? await cli.run(SiteRecipe.stopArgs(inst.wpContainerName))
+        _ = try? await cli.run(SiteRecipe.stopArgs(inst.esContainerName))
         _ = try? await cli.run(SiteRecipe.stopArgs(inst.dbContainerName))
         emit(inst.instanceID, .stopped)
     }
 
     public func deleteContainers(_ inst: any RunnableInstance) async {
         _ = try? await cli.run(SiteRecipe.stopArgs(inst.wpContainerName))
+        _ = try? await cli.run(SiteRecipe.stopArgs(inst.esContainerName))
         _ = try? await cli.run(SiteRecipe.stopArgs(inst.dbContainerName))
         // Best-effort delete in case anything lingers (non --rm, prior crash, …).
         _ = try? await cli.run(SiteRecipe.deleteArgs(inst.wpContainerName))
+        _ = try? await cli.run(SiteRecipe.deleteArgs(inst.esContainerName))
         _ = try? await cli.run(SiteRecipe.deleteArgs(inst.dbContainerName))
         emit(inst.instanceID, .stopped)
     }
@@ -133,6 +177,39 @@ public actor SiteLifecycle {
             try await Task.sleep(for: .milliseconds(500))
         }
         throw LifecycleError.databaseIPUnavailable
+    }
+
+    private func resolveElasticsearchHost(_ inst: any RunnableInstance) async throws -> String {
+        for _ in 0..<20 {
+            try Task.checkCancellation()
+            if let ip = try await cli.ipAddress(of: inst.esContainerName), !ip.isEmpty {
+                return ip
+            }
+            try await Task.sleep(for: .milliseconds(500))
+        }
+        throw LifecycleError.elasticsearchIPUnavailable
+    }
+
+    /// Poll ES cluster health from the host (container IPs are host-reachable on
+    /// Apple `container`). green/yellow ⇒ ready.
+    private func waitForElasticsearch(_ esIP: String, timeout: Duration = .seconds(90)) async throws {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        guard let url = URL(string: SiteRecipe.elasticsearchHealthURL(esHost: esIP)) else {
+            throw LifecycleError.elasticsearchNotReady
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 3
+        while ContinuousClock.now < deadline {
+            try Task.checkCancellation()
+            if let (data, response) = try? await URLSession.shared.data(for: request),
+               let http = response as? HTTPURLResponse, http.statusCode == 200,
+               let body = String(data: data, encoding: .utf8),
+               body.contains("\"status\":\"green\"") || body.contains("\"status\":\"yellow\"") {
+                return
+            }
+            try await Task.sleep(for: .seconds(2))
+        }
+        throw LifecycleError.elasticsearchNotReady
     }
 
     private func waitForHTTP(_ inst: any RunnableInstance, timeout: Duration = .seconds(120)) async throws {

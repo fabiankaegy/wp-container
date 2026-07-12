@@ -21,13 +21,18 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
     public var imageTag: String
     public var createdAt: Date
     public var provisioned: Bool
+    /// Inherited from the parent site at creation (PLAN.md §2c): the env runs its
+    /// own Xdebug image / Elasticsearch sidecar when the parent has them enabled.
+    public var xdebugEnabled: Bool
+    public var elasticsearchEnabled: Bool
 
     /// Runtime-derived; NOT persisted.
     public var status: SiteStatus = .stopped
 
     private enum CodingKeys: String, CodingKey {
         case id, parentSiteID, parentSlug, envSlug, repoRelPath, branch,
-             worktreePath, envPath, port, imageTag, createdAt, provisioned
+             worktreePath, envPath, port, imageTag, createdAt, provisioned,
+             xdebugEnabled, elasticsearchEnabled
     }
 
     public init(
@@ -43,6 +48,8 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         imageTag: String,
         createdAt: Date = Date(),
         provisioned: Bool = false,
+        xdebugEnabled: Bool = false,
+        elasticsearchEnabled: Bool = false,
         status: SiteStatus = .stopped
     ) {
         self.id = id
@@ -57,7 +64,28 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         self.imageTag = imageTag
         self.createdAt = createdAt
         self.provisioned = provisioned
+        self.xdebugEnabled = xdebugEnabled
+        self.elasticsearchEnabled = elasticsearchEnabled
         self.status = status
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(UUID.self, forKey: .id)
+        self.parentSiteID = try c.decode(UUID.self, forKey: .parentSiteID)
+        self.parentSlug = try c.decode(String.self, forKey: .parentSlug)
+        self.envSlug = try c.decode(String.self, forKey: .envSlug)
+        self.repoRelPath = try c.decode(String.self, forKey: .repoRelPath)
+        self.branch = try c.decode(String.self, forKey: .branch)
+        self.worktreePath = try c.decode(URL.self, forKey: .worktreePath)
+        self.envPath = try c.decode(URL.self, forKey: .envPath)
+        self.port = try c.decode(Int.self, forKey: .port)
+        self.imageTag = try c.decode(String.self, forKey: .imageTag)
+        self.createdAt = try c.decode(Date.self, forKey: .createdAt)
+        self.provisioned = (try? c.decode(Bool.self, forKey: .provisioned)) ?? false
+        // Absent in envs written before §2c.
+        self.xdebugEnabled = (try? c.decode(Bool.self, forKey: .xdebugEnabled)) ?? false
+        self.elasticsearchEnabled = (try? c.decode(Bool.self, forKey: .elasticsearchEnabled)) ?? false
     }
 
     public var wordpressFolder: URL { envPath.appendingPathComponent("wordpress", isDirectory: true) }

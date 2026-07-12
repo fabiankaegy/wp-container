@@ -20,12 +20,22 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     /// Whether trusted HTTPS is enabled for this site (PLAN.md §2f). When true the
     /// site's public URL is `https://<slug>.localhost` served by the host proxy.
     public var httpsEnabled: Bool
+    /// Whether the Xdebug-enabled derived image is used for this site (PLAN.md §2c).
+    public var xdebugEnabled: Bool
+    /// Whether a per-site Elasticsearch sidecar container runs for this site (§2c).
+    public var elasticsearchEnabled: Bool
+    /// Optional custom domain (e.g. `mysite.local`), routed via /etc/hosts + the
+    /// host proxy (PLAN.md §2i). nil = the zero-config `<slug>.localhost` name.
+    public var customDomain: String?
+    /// WordPress network type — single site or a multisite network (PLAN.md §2j).
+    public var networkType: NetworkType
 
     /// Runtime-derived; NOT persisted.
     public var status: SiteStatus = .stopped
 
     private enum CodingKeys: String, CodingKey {
         case id, name, slug, path, port, imageTag, phpVersion, createdAt, provisioned, groupID, httpsEnabled
+        case xdebugEnabled, elasticsearchEnabled, customDomain, networkType
     }
 
     public init(
@@ -40,6 +50,10 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         provisioned: Bool = false,
         groupID: UUID? = nil,
         httpsEnabled: Bool = false,
+        xdebugEnabled: Bool = false,
+        elasticsearchEnabled: Bool = false,
+        customDomain: String? = nil,
+        networkType: NetworkType = .none,
         status: SiteStatus = .stopped
     ) {
         self.id = id
@@ -53,6 +67,10 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.provisioned = provisioned
         self.groupID = groupID
         self.httpsEnabled = httpsEnabled
+        self.xdebugEnabled = xdebugEnabled
+        self.elasticsearchEnabled = elasticsearchEnabled
+        self.customDomain = customDomain
+        self.networkType = networkType
         self.status = status
     }
 
@@ -70,6 +88,11 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.groupID = try c.decodeIfPresent(UUID.self, forKey: .groupID)
         // `httpsEnabled` absent in stores written before §2f.
         self.httpsEnabled = (try? c.decode(Bool.self, forKey: .httpsEnabled)) ?? false
+        // The following are absent in stores written before §2c/§2i/§2j.
+        self.xdebugEnabled = (try? c.decode(Bool.self, forKey: .xdebugEnabled)) ?? false
+        self.elasticsearchEnabled = (try? c.decode(Bool.self, forKey: .elasticsearchEnabled)) ?? false
+        self.customDomain = try? c.decodeIfPresent(String.self, forKey: .customDomain)
+        self.networkType = (try? c.decodeIfPresent(NetworkType.self, forKey: .networkType)) ?? .none
     }
 
     // MARK: Derived paths
@@ -84,15 +107,33 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         wordpressFolder.appendingPathComponent(rel, isDirectory: true)
     }
 
-    // MARK: HTTPS (URL logic delegated to `SiteURL` — see §2f/§2i)
+    // MARK: HTTPS / domains (URL logic delegated to `SiteURL` — see §2f/§2i)
     /// The `<slug>.localhost` hostname served by the host HTTPS proxy.
-    public var httpsHost: String { "\(slug).localhost" }
-    /// `https://<slug>.localhost` — valid only while HTTPS is enabled and the proxy runs.
-    public var secureURL: URL { SiteURL.secure(host: httpsHost) }
-    /// The site's effective public URL: HTTPS host name when enabled, else the local port.
-    public var url: URL { SiteURL.effective(httpsEnabled: httpsEnabled, host: httpsHost, port: port) }
-    /// The effective WP Admin URL, honoring HTTPS.
-    public var wpAdminURL: URL { SiteURL.admin(httpsEnabled: httpsEnabled, host: httpsHost, port: port) }
+    public var localhostHost: String { "\(slug).localhost" }
+    /// Legacy alias retained for callers written before custom domains.
+    public var httpsHost: String { primaryHost }
+    /// The site's canonical hostname: a custom domain when set, else `<slug>.localhost`.
+    public var primaryHost: String { (customDomain?.isEmpty == false ? customDomain! : localhostHost) }
+    /// All hostnames the proxy/cert must cover for this site (§2i/§2j):
+    /// `<slug>.localhost`, any custom domain, and a subdomain-multisite wildcard.
+    public var proxyHosts: [String] {
+        var hosts = [localhostHost]
+        if let d = customDomain, !d.isEmpty { hosts.append(d) }
+        if networkType.isSubdomain {
+            hosts.append("*.\(localhostHost)")
+            if let d = customDomain, !d.isEmpty { hosts.append("*.\(d)") }
+        }
+        return hosts
+    }
+    /// `https://<primary host>` — valid only while HTTPS is enabled and the proxy runs.
+    public var secureURL: URL { SiteURL.secure(host: primaryHost) }
+    /// The site's effective public URL: proxy host name when HTTPS or a custom
+    /// domain is in play, else the local port.
+    public var url: URL {
+        SiteURL.effective(httpsEnabled: httpsEnabled, customDomain: customDomain, slug: slug, port: port)
+    }
+    /// The effective WP Admin URL, honoring HTTPS + custom domains.
+    public var wpAdminURL: URL { url.appendingPathComponent("wp-admin") }
 }
 
 extension Site: RunnableInstance {

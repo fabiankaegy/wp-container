@@ -80,7 +80,11 @@ public actor WorktreeEnvService {
             envPath: envPath,
             port: port,
             imageTag: parent.imageTag,
-            provisioned: false
+            provisioned: false,
+            // Inherit the parent's add-ons (§2c): the env gets its own es
+            // container; a fresh ES index is fine (data is not cloned).
+            xdebugEnabled: parent.xdebugEnabled,
+            elasticsearchEnabled: parent.elasticsearchEnabled
         )
 
         // Pre-create the shadow mountpoint intentionally. VALIDATED gotcha: if

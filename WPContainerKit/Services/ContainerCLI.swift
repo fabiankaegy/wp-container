@@ -63,6 +63,30 @@ public actor ContainerCLI {
         try await inspect(name).first?.ipAddress
     }
 
+    /// The network gateway (host address as seen from the container) — used for
+    /// Xdebug's `client_host` (PLAN.md §2c). Read fresh each start, never cached.
+    public func gatewayAddress(of name: String) async throws -> String? {
+        try await inspect(name).first?.gatewayAddress
+    }
+
+    // MARK: - Image availability
+
+    /// Whether an image tag can be pulled/resolved. Used to pre-check a chosen
+    /// WP×PHP tag before creating a site (PLAN.md §2k). Best-effort: a zero exit
+    /// from `image pull` means the tag exists.
+    public func imageExists(_ tag: String) async -> Bool {
+        // A locally-present image resolves instantly; otherwise this pulls it.
+        let result = try? await runCapturing(["image", "pull", tag])
+        return result?.exitCode == 0
+    }
+
+    /// Whether an image tag is already present in the local image store (no pull).
+    /// Used to gate the lazy Xdebug derived-image build (PLAN.md §2c).
+    public func localImageExists(_ tag: String) async -> Bool {
+        let result = try? await runCapturing(["image", "inspect", tag])
+        return result?.exitCode == 0
+    }
+
     // MARK: - Streaming logs
 
     /// Streaming variant of `container logs [--follow] <name>` yielding one line
