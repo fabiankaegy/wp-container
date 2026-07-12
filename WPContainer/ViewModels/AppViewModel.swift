@@ -90,6 +90,7 @@ public final class AppViewModel {
                     await refreshProxyRouting()
                 } else {
                     try await httpsIntegration.disable(site)
+                    try? await ca.removeLeafCoverage(site.proxyHosts)
                 }
                 var updated = site
                 updated.httpsEnabled = enabled
@@ -564,7 +565,8 @@ public final class AppViewModel {
 
     public func deleteSite(_ site: Site, trashFolder: Bool) {
         Task {
-            for env in store.envs(forSite: site.id) {
+            let childEnvs = store.envs(forSite: site.id)
+            for env in childEnvs {
                 await worktrees.delete(env, parent: site, keepBranch: true, keepWorktree: false)
                 await store.removeEnv(id: env.id)
             }
@@ -573,6 +575,10 @@ public final class AppViewModel {
                 try? FileManager.default.trashItem(at: site.path, resultingItemURL: nil)
             }
             await store.removeSite(id: site.id)
+            // Drop this site's (and its envs') hostnames from the trusted
+            // leaf's SAN set now that they're gone.
+            let staleHosts = site.proxyHosts + childEnvs.map { "\($0.envSlug).localhost" }
+            try? await ca.removeLeafCoverage(staleHosts)
         }
     }
 
@@ -611,6 +617,7 @@ public final class AppViewModel {
             let parent = store.site(id: env.parentSiteID)
             await worktrees.delete(env, parent: parent, keepBranch: true, keepWorktree: false)
             await store.removeEnv(id: env.id)
+            try? await ca.removeLeafCoverage(["\(env.envSlug).localhost"])
         }
     }
 }

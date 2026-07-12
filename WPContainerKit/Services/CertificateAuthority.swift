@@ -112,6 +112,21 @@ public actor CertificateAuthority {
         return true
     }
 
+    /// Remove `hosts` from the leaf's SAN set (e.g. when a site is deleted or
+    /// its HTTPS is disabled), re-issuing only if the set actually shrinks.
+    /// Never drops below `Self.defaultSANs` — `*.localhost`/`localhost`/`127.0.0.1`
+    /// always remain covered since other sites rely on the shared wildcard.
+    /// Returns true if the leaf was re-issued.
+    @discardableResult
+    public func removeLeafCoverage(_ hosts: [String]) async throws -> Bool {
+        guard FileManager.default.fileExists(atPath: leafCertURL.path) else { return false }
+        let current = currentSANs()
+        let desired = Set(current).subtracting(hosts).union(Self.defaultSANs)
+        guard desired != Set(current) else { return false }
+        try await issueLeaf(sans: desired.sorted())
+        return true
+    }
+
     /// (Re)issue the wildcard leaf for an explicit SAN set, persisting it so
     /// later phases can append custom domains and re-issue cheaply. The CA is
     /// generated first if needed; the trusted root is untouched.

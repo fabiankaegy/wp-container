@@ -138,6 +138,9 @@ struct HTTPSDisable: AsyncParsableCommand {
             _ = try await ctx.persistence.mutate { env in
                 if let i = env.sites.firstIndex(where: { $0.id == site.id }) { env.sites[i].httpsEnabled = false }
             }
+            // Drop this site's hostname(s) from the trusted leaf's SAN set now
+            // that HTTPS is off — otherwise sans.json only ever grows.
+            try? await CertificateAuthority().removeLeafCoverage(site.proxyHosts)
             if output.json { emitLine(MCPJSON.string(["ok": true, "url": site.localURL.absoluteString])) }
             else { emitLine("Disabled HTTPS for \(slug).") }
         } catch { throw failCommand(error, json: output.json) }
