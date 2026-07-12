@@ -18,6 +18,11 @@ struct WPContainerCLI: AsyncParsableCommand {
             DeleteCommand.self,
             WorktreeCommand.self,
             WPCommand.self,
+            MCPCommand.self,
+            AgentToolsCommand.self,
+            ShimCommand.self,
+            HTTPSCommand.self,
+            ProxyCommand.self,
         ]
     )
 }
@@ -161,6 +166,8 @@ struct CreateCommand: AsyncParsableCommand {
                             path: root.appendingPathComponent(slug, isDirectory: true),
                             port: port, imageTag: php ?? SiteRecipe.defaultWordPressImage, phpVersion: php)
             try SiteFolders.ensure(for: site)
+            // Write the per-site wp-cli shim at <site>/wp (§2e).
+            try? WPCLIShim.writeShim(slug: site.slug, siteRoot: site.path)
             // Resolve/create the group (if requested) and persist atomically.
             let groupName = group
             let updated = try await ctx.persistence.mutate { env in
