@@ -52,14 +52,22 @@ public struct ContainerRecord: Sendable, Equatable {
         // Some shapes nest most fields under "configuration".
         let config = (raw["configuration"] as? [String: Any]) ?? raw
 
+        // VALIDATED shape (container 1.1.0): `.[].id` is the name,
+        // `.[].configuration.labels` is a dict, `.[].status.state` is the state,
+        // `.[].status.networks[0].ipv4Address` is the IP ("x.x.x.x/24"),
+        // `.[].configuration.publishedPorts[]` = {hostAddress, hostPort, containerPort, proto}.
         let id = firstString(config["id"], raw["id"], config["name"], raw["name"])
         guard let id, !id.isEmpty else { return nil }
         let name = firstString(config["name"], raw["name"], config["hostname"]) ?? id
 
-        let status = statusString(raw["status"] ?? config["status"] ?? raw["state"] ?? config["state"]) ?? "unknown"
+        // `status` may be a string or an object `{ state, networks }`.
+        let statusRaw = raw["status"] ?? config["status"] ?? raw["state"] ?? config["state"]
+        let status = statusString(statusRaw) ?? "unknown"
         let labels = labelsDict(config["labels"] ?? raw["labels"])
         let image = imageString(config["image"] ?? raw["image"])
-        let ip = firstIP(from: raw["networks"] ?? config["networks"] ?? raw["network"] ?? config["network"])
+        let networks = networksValue(from: statusRaw)
+            ?? raw["networks"] ?? config["networks"] ?? raw["network"] ?? config["network"]
+        let ip = firstIP(from: networks)
         let ports = parsePorts(config["publishedPorts"] ?? raw["publishedPorts"] ?? config["ports"] ?? raw["ports"])
 
         return ContainerRecord(id: id, name: name, status: status, labels: labels,
@@ -114,10 +122,15 @@ public struct ContainerRecord: Sendable, Equatable {
         return nil
     }
 
+    /// Pull the `networks` array out of a `status` object when present.
+    private static func networksValue(from statusRaw: Any?) -> Any? {
+        (statusRaw as? [String: Any])?["networks"]
+    }
+
     private static func firstIP(from value: Any?) -> String? {
         func extract(_ dict: [String: Any]) -> String? {
-            // Prefer explicit address fields; strip any CIDR suffix.
-            if let s = firstString(dict["address"], dict["ipAddress"], dict["ip"], dict["gateway"] as? String) {
+            // Prefer explicit address fields; strip any CIDR suffix ("x.x.x.x/24").
+            if let s = firstString(dict["ipv4Address"], dict["address"], dict["ipAddress"], dict["ip"]) {
                 return s.split(separator: "/").first.map(String.init)
             }
             return nil

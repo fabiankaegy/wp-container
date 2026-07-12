@@ -64,7 +64,7 @@ extension Site: RunnableInstance {
     public var instanceID: UUID { id }
     public var containerSlug: String { slug }
     public var siteSlug: String { slug }
-    public var envSlug: String? { nil }
+    public var envLabel: String? { nil }
     public var displayName: String { name }
     public var isProvisioned: Bool { provisioned }
     public var extraMounts: [Mount] { [] }

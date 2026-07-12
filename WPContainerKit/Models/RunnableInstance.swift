@@ -21,7 +21,7 @@ public protocol RunnableInstance: Sendable {
     /// Value for the `dev.wpcontainer.site` label (parent site slug).
     var siteSlug: String { get }
     /// Value for the `dev.wpcontainer.env` label, or nil for a plain site.
-    var envSlug: String? { get }
+    var envLabel: String? { get }
     /// Name used in provisioning (site title / display).
     var displayName: String { get }
     var port: Int { get }

@@ -83,6 +83,14 @@ public actor WorktreeEnvService {
             provisioned: false
         )
 
+        // Pre-create the shadow mountpoint intentionally. VALIDATED gotcha: if
+        // the subpath doesn't exist in the outer mount the runtime auto-creates
+        // an empty dir on the HOST as a side effect; creating it ourselves keeps
+        // it tidy (and it is removed with `.envs/<b>` on deletion). The CoW clone
+        // usually already contains this path, but a bare repo layout may not.
+        let mountpoint = env.wordpressFolder.appendingPathComponent(repoRelPath, isDirectory: true)
+        try? fm.createDirectory(at: mountpoint, withIntermediateDirectories: true)
+
         // 4. Start env containers (shared recipe + shadow mount).
         let dbHost = try await lifecycle.startContainers(env)
 

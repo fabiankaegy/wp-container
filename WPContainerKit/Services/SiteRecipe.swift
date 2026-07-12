@@ -40,7 +40,7 @@ public enum SiteRecipe {
     /// `["--label", "dev.wpcontainer.site=<slug>", ("--label", "dev.wpcontainer.env=<envSlug>")]`
     static func labelArgs(for inst: any RunnableInstance) -> [String] {
         var args = ["--label", "\(siteLabelKey)=\(inst.siteSlug)"]
-        if let env = inst.envSlug {
+        if let env = inst.envLabel {
             args += ["--label", "\(envLabelKey)=\(env)"]
         }
         return args
@@ -51,9 +51,28 @@ public enum SiteRecipe {
         ["image", "pull", image]
     }
 
+    // MARK: - Pre-seed (VALIDATED, Phase V)
+    /// The `wordpress` image's auto-populate-into-empty-mount does NOT work on
+    /// Apple `container`: virtiofs mounts appear as root:root in-guest and reject
+    /// chown, so the entrypoint dies. Before a site's FIRST ever start we seed
+    /// the mount by copying WordPress core in ourselves. MUST be plain `cp -r`
+    /// (NOT `cp -a`). ~2s; after this, normal starts work with no workarounds.
+    /// Gate on absence of `<wordpress>/index.php`.
+    public static func seedWordPressArgs(_ inst: any RunnableInstance) -> [String] {
+        [
+            "run", "--rm", "--entrypoint", "/bin/sh",
+            "-v", "\(inst.wordpressFolder.path):/var/www/html",
+            inst.imageTag,
+            "-c", "cp -r /usr/src/wordpress/. /var/www/html/",
+        ]
+    }
+
     // MARK: - Database container
     public static func runDatabaseArgs(_ inst: any RunnableInstance) -> [String] {
-        var args = ["run", "-d", "--rm", "--name", inst.dbContainerName]
+        // VALIDATED: mariadb must run as 999:999 when bind-mounting database/,
+        // otherwise the same virtiofs chown restriction kills its entrypoint
+        // (holds for both fresh init and restarts).
+        var args = ["run", "-d", "--rm", "--name", inst.dbContainerName, "--user", "999:999"]
         args += labelArgs(for: inst)
         args += [
             "-v", "\(inst.databaseFolder.path):/var/lib/mysql",

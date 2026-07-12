@@ -55,8 +55,15 @@ public actor SiteLifecycle {
             try SiteFolders.ensure(for: inst)
             try await cli.run(SiteRecipe.pullImageArgs(SiteRecipe.databaseImage))
             try await cli.run(SiteRecipe.pullImageArgs(inst.imageTag))
+            // First-ever start: pre-seed WordPress core into the mount (see
+            // SiteRecipe.seedWordPressArgs). Gate on the absence of index.php.
+            let indexPHP = inst.wordpressFolder.appendingPathComponent("index.php")
+            if !FileManager.default.fileExists(atPath: indexPHP.path) {
+                try await cli.run(SiteRecipe.seedWordPressArgs(inst))
+            }
             try await cli.run(SiteRecipe.runDatabaseArgs(inst))
             try await waitForDatabase(inst)
+            // The DB IP changes on every restart — re-inspect each start, never cache.
             let dbHost = try await resolveDatabaseHost(inst)
             try await cli.run(SiteRecipe.runWordPressArgs(inst, dbHost: dbHost))
             try await waitForHTTP(inst)

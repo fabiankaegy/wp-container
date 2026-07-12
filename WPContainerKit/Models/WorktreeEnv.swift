@@ -73,6 +73,7 @@ extension WorktreeEnv: RunnableInstance {
     public var instanceID: UUID { id }
     public var containerSlug: String { envSlug }
     public var siteSlug: String { parentSlug }
+    public var envLabel: String? { envSlug }
     public var displayName: String { branch }
     public var isProvisioned: Bool { provisioned }
     /// The worktree checkout shadows the primary checkout inside the env container.
