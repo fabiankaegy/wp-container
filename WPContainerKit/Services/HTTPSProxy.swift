@@ -29,6 +29,8 @@ public final class HTTPSProxy: @unchecked Sendable {
     }
 
     public static let preferredPorts: [UInt16] = [443, 8443]
+    /// Plain-HTTP listener ports for custom domains without HTTPS (PLAN.md §2i).
+    public static let preferredHTTPPorts: [UInt16] = [80, 8080]
 
     private let ca: CertificateAuthority
     private let persistence: StorePersistence
@@ -36,9 +38,13 @@ public final class HTTPSProxy: @unchecked Sendable {
     private let stateLock = NSLock()
 
     private var listener: NWListener?
+    private var httpListener: NWListener?
     private var hostMap: [String: Int] = [:]
     private var refreshTask: Task<Void, Never>?
     private var _boundPort: UInt16?
+    private var _boundHTTPPort: UInt16?
+    /// SAN hosts the leaf currently covers, to detect when a reload is needed.
+    private var coveredHosts: Set<String> = []
 
     public init(ca: CertificateAuthority = CertificateAuthority(),
                 persistence: StorePersistence = StorePersistence()) {
@@ -51,6 +57,11 @@ public final class HTTPSProxy: @unchecked Sendable {
         stateLock.withLock { _boundPort }
     }
 
+    /// The plain-HTTP listener port, once started.
+    public var boundHTTPPort: UInt16? {
+        stateLock.withLock { _boundHTTPPort }
+    }
+
     // MARK: - Host map
 
     /// Replace the `<host> → port` routing table.
@@ -58,24 +69,45 @@ public final class HTTPSProxy: @unchecked Sendable {
         stateLock.withLock { hostMap = map }
     }
 
-    /// Route strictly by an exact Host-header lookup in the table — no suffix
-    /// assumptions (custom domains like `mysite.local` join the table later, §2i).
+    /// Route by an exact Host-header lookup, then fall back to stripping the
+    /// leftmost label so subdomain-multisite subsites (`sub.<slug>.localhost`,
+    /// `sub.mysite.local`) route to their network's port (PLAN.md §2i/§2j).
     private func port(forHost host: String) -> Int? {
         // Strip any :port suffix and lowercase.
-        let name = host.split(separator: ":").first.map { $0.lowercased() } ?? host.lowercased()
-        return stateLock.withLock { hostMap[name] }
+        var name = host.split(separator: ":").first.map { $0.lowercased() } ?? host.lowercased()
+        return stateLock.withLock {
+            while true {
+                if let port = hostMap[name] { return port }
+                guard let dot = name.firstIndex(of: ".") else { return nil }
+                let rest = String(name[name.index(after: dot)...])
+                if rest.isEmpty || !rest.contains(".") { return nil }
+                name = rest
+            }
+        }
     }
 
     /// Build a routing table from a store envelope: every site and env is
-    /// reachable at `<slug>.localhost` regardless of its `httpsEnabled` flag
-    /// (the flag only governs WordPress URL rewriting, not proxy reachability).
-    /// This builder is the only place that knows the naming convention; a later
-    /// phase adds custom-domain keys here without touching routing.
+    /// reachable at `<slug>.localhost`, and custom-domain sites also at their
+    /// domain, regardless of `httpsEnabled` (the flag governs WordPress URL
+    /// rewriting, not proxy reachability). Subdomain-multisite wildcards are
+    /// handled by the leftmost-label fallback in `port(forHost:)`.
     public static func hostMap(from envelope: StoreEnvelope) -> [String: Int] {
         var map: [String: Int] = [:]
-        for site in envelope.sites { map["\(site.slug).localhost"] = site.port }
+        for site in envelope.sites {
+            map["\(site.slug).localhost"] = site.port
+            if let domain = site.customDomain, !domain.isEmpty { map[domain.lowercased()] = site.port }
+        }
         for env in envelope.envs { map["\(env.envSlug).localhost"] = env.port }
         return map
+    }
+
+    /// The full set of leaf SAN hostnames the cert must cover for an envelope
+    /// (includes custom domains and subdomain-multisite wildcards, §2i/§2j).
+    public static func sanHosts(from envelope: StoreEnvelope) -> [String] {
+        var hosts = Set<String>()
+        for site in envelope.sites { site.proxyHosts.forEach { hosts.insert($0) } }
+        for env in envelope.envs { hosts.insert("\(env.envSlug).localhost") }
+        return Array(hosts)
     }
 
     // MARK: - Lifecycle
@@ -90,11 +122,11 @@ public final class HTTPSProxy: @unchecked Sendable {
         // OpenSSL/curl) BEFORE importing the identity.
         var hosts: [String] = []
         if let env = try? await persistence.load() {
-            let map = Self.hostMap(from: env)
-            updateHostMap(map)
-            hosts = Array(map.keys)
+            updateHostMap(Self.hostMap(from: env))
+            hosts = Self.sanHosts(from: env)
         }
         try await ca.ensureLeafCovers(hosts)
+        stateLock.withLock { coveredHosts = Set(hosts) }
         let identity = try await loadSecIdentity()
 
         let tlsOptions = NWProtocolTLS.Options()
@@ -104,21 +136,38 @@ public final class HTTPSProxy: @unchecked Sendable {
         sec_protocol_options_set_local_identity(tlsOptions.securityProtocolOptions, secIdentity)
 
         var lastError: Error?
+        var bound: UInt16?
         for candidate in Self.preferredPorts {
             do {
                 let params = NWParameters(tls: tlsOptions)
                 params.allowLocalEndpointReuse = true
                 let listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: candidate)!)
-                try await startListener(listener, port: candidate)
+                try await startListener(listener, port: candidate, forwardedProto: "https")
                 stateLock.withLock { _boundPort = candidate; self.listener = listener }
-                startRefreshLoop()
-                return candidate
+                bound = candidate
+                break
             } catch {
                 lastError = error
                 continue
             }
         }
-        throw lastError ?? ProxyError.noPortAvailable
+        guard let boundPort = bound else { throw lastError ?? ProxyError.noPortAvailable }
+
+        // Plain-HTTP listener for custom domains with HTTPS off (§2i). Best
+        // effort: HTTPS is the primary path, so a failure here is non-fatal.
+        for candidate in Self.preferredHTTPPorts {
+            do {
+                let params = NWParameters.tcp
+                params.allowLocalEndpointReuse = true
+                let listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: candidate)!)
+                try await startListener(listener, port: candidate, forwardedProto: "http")
+                stateLock.withLock { _boundHTTPPort = candidate; self.httpListener = listener }
+                break
+            } catch { continue }
+        }
+
+        startRefreshLoop()
+        return boundPort
     }
 
     public func stop() {
@@ -127,6 +176,9 @@ public final class HTTPSProxy: @unchecked Sendable {
             listener?.cancel()
             listener = nil
             _boundPort = nil
+            httpListener?.cancel()
+            httpListener = nil
+            _boundHTTPPort = nil
         }
     }
 
@@ -139,7 +191,7 @@ public final class HTTPSProxy: @unchecked Sendable {
         return try await start()
     }
 
-    private func startListener(_ listener: NWListener, port: UInt16) async throws {
+    private func startListener(_ listener: NWListener, port: UInt16, forwardedProto: String) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             let resumed = ResumeOnce()
             listener.stateUpdateHandler = { state in
@@ -155,19 +207,30 @@ public final class HTTPSProxy: @unchecked Sendable {
                 }
             }
             listener.newConnectionHandler = { [weak self] connection in
-                self?.handle(inbound: connection)
+                self?.handle(inbound: connection, forwardedProto: forwardedProto)
             }
             listener.start(queue: queue)
         }
     }
 
+    /// Refresh the host map from the store every few seconds, and re-issue +
+    /// reload the leaf when the SAN set changes (so CLI-side domain edits are
+    /// picked up by a headless proxy without a manual restart, §2i).
     private func startRefreshLoop() {
         refreshTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
                 guard let self else { return }
-                if let env = try? await self.persistence.load() {
-                    self.updateHostMap(Self.hostMap(from: env))
+                guard let env = try? await self.persistence.load() else { continue }
+                self.updateHostMap(Self.hostMap(from: env))
+                let wanted = Set(Self.sanHosts(from: env))
+                let known = self.stateLock.withLock { self.coveredHosts }
+                if !wanted.isSubset(of: known) {
+                    self.stateLock.withLock { self.coveredHosts = wanted }
+                    if (try? await self.ca.ensureLeafCovers(Array(wanted))) == true {
+                        try? await self.reload()
+                        return // reload() spins a fresh loop
+                    }
                 }
             }
         }
@@ -175,13 +238,13 @@ public final class HTTPSProxy: @unchecked Sendable {
 
     // MARK: - Connection handling
 
-    private func handle(inbound: NWConnection) {
+    private func handle(inbound: NWConnection, forwardedProto: String) {
         inbound.start(queue: queue)
-        readRequestHeader(from: inbound, accumulated: Data())
+        readRequestHeader(from: inbound, accumulated: Data(), forwardedProto: forwardedProto)
     }
 
     /// Accumulate inbound bytes until the end of the HTTP header block (CRLFCRLF).
-    private func readRequestHeader(from inbound: NWConnection, accumulated: Data) {
+    private func readRequestHeader(from inbound: NWConnection, accumulated: Data, forwardedProto: String) {
         inbound.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, isComplete, error in
             guard let self else { return }
             var buffer = accumulated
@@ -190,7 +253,7 @@ public final class HTTPSProxy: @unchecked Sendable {
             if let range = Self.headerTerminator(in: buffer) {
                 let headerData = buffer.subdata(in: buffer.startIndex..<range.lowerBound)
                 let bodyStart = buffer.subdata(in: range.upperBound..<buffer.endIndex)
-                self.route(inbound: inbound, rawHeader: headerData, bufferedBody: bodyStart)
+                self.route(inbound: inbound, rawHeader: headerData, bufferedBody: bodyStart, forwardedProto: forwardedProto)
                 return
             }
             if error != nil || isComplete {
@@ -201,11 +264,11 @@ public final class HTTPSProxy: @unchecked Sendable {
                 inbound.cancel()
                 return
             }
-            self.readRequestHeader(from: inbound, accumulated: buffer)
+            self.readRequestHeader(from: inbound, accumulated: buffer, forwardedProto: forwardedProto)
         }
     }
 
-    private func route(inbound: NWConnection, rawHeader: Data, bufferedBody: Data) {
+    private func route(inbound: NWConnection, rawHeader: Data, bufferedBody: Data, forwardedProto: String) {
         guard let header = String(data: rawHeader, encoding: .utf8) else { inbound.cancel(); return }
         let lines = header.components(separatedBy: "\r\n")
         guard let requestLine = lines.first, !requestLine.isEmpty else { inbound.cancel(); return }
@@ -217,7 +280,7 @@ public final class HTTPSProxy: @unchecked Sendable {
             return
         }
 
-        let rewritten = Self.rewriteHeaders(requestLine: requestLine, lines: Array(lines.dropFirst()), host: host)
+        let rewritten = Self.rewriteHeaders(requestLine: requestLine, lines: Array(lines.dropFirst()), host: host, proto: forwardedProto)
         var upstreamBytes = Data(rewritten.utf8)
         upstreamBytes.append(bufferedBody)
 
@@ -272,7 +335,7 @@ public final class HTTPSProxy: @unchecked Sendable {
 
     /// Rebuild the header block: drop hop-by-hop/forwarding headers we own,
     /// force `Connection: close`, and inject the X-Forwarded-* pair.
-    private static func rewriteHeaders(requestLine: String, lines: [String], host: String) -> String {
+    private static func rewriteHeaders(requestLine: String, lines: [String], host: String, proto: String) -> String {
         var kept: [String] = []
         for line in lines {
             if line.isEmpty { continue }
@@ -285,7 +348,7 @@ public final class HTTPSProxy: @unchecked Sendable {
                 kept.append(line)
             }
         }
-        kept.append("X-Forwarded-Proto: https")
+        kept.append("X-Forwarded-Proto: \(proto)")
         kept.append("X-Forwarded-Host: \(host)")
         kept.append("Connection: close")
         return requestLine + "\r\n" + kept.joined(separator: "\r\n") + "\r\n\r\n"
