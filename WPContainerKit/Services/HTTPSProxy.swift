@@ -85,13 +85,17 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// CLI/app changes are picked up without a restart.
     @discardableResult
     public func start() async throws -> UInt16 {
-        try await ca.ensureGenerated()
-        let identity = try await loadSecIdentity()
-
-        // Seed the host map immediately.
+        // Seed the host map and ensure the leaf covers every current hostname
+        // (explicit SANs — the *.localhost wildcard alone isn't honored by
+        // OpenSSL/curl) BEFORE importing the identity.
+        var hosts: [String] = []
         if let env = try? await persistence.load() {
-            updateHostMap(Self.hostMap(from: env))
+            let map = Self.hostMap(from: env)
+            updateHostMap(map)
+            hosts = Array(map.keys)
         }
+        try await ca.ensureLeafCovers(hosts)
+        let identity = try await loadSecIdentity()
 
         let tlsOptions = NWProtocolTLS.Options()
         guard let secIdentity = sec_identity_create(identity) else {

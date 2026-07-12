@@ -86,6 +86,23 @@ public actor CertificateAuthority {
         }
     }
 
+    /// Ensure the leaf's SANs cover `hosts` (union with the current set + the
+    /// defaults), re-issuing only when something new is added. Returns true if
+    /// the leaf was re-issued (callers may then reload the proxy).
+    ///
+    /// This is how per-site names like `demo.localhost` get explicit SANs:
+    /// OpenSSL/curl reject the `*.localhost` wildcard (it requires 2+ labels
+    /// after the wildcard), so a single wildcard is not enough on its own.
+    @discardableResult
+    public func ensureLeafCovers(_ hosts: [String]) async throws -> Bool {
+        try await ensureGenerated()
+        let current = currentSANs()
+        let desired = Set(current).union(Self.defaultSANs).union(hosts.filter { !$0.isEmpty })
+        guard desired != Set(current) else { return false }
+        try await issueLeaf(sans: desired.sorted())
+        return true
+    }
+
     /// (Re)issue the wildcard leaf for an explicit SAN set, persisting it so
     /// later phases can append custom domains and re-issue cheaply. The CA is
     /// generated first if needed; the trusted root is untouched.
