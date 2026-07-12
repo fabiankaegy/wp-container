@@ -191,7 +191,20 @@ public final class SiteStore {
             FileManager.default.createFile(atPath: path, contents: nil)
         }
         let fd = open(path, O_EVTONLY)
-        guard fd >= 0 else { return }
+        guard fd >= 0 else {
+            // `open()` failing here (e.g. a transient race with an external
+            // atomic-replace write) used to leave the watcher permanently dead —
+            // nothing ever retried, so external edits (like a deleted group)
+            // would silently stop reaching the UI until the app relaunched.
+            // Retry shortly instead of giving up forever; `AppViewModel`'s 5s
+            // reconcile loop also now reloads the store directly as a second,
+            // independent backstop against this whole class of watcher misses.
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(500))
+                self?.startWatching()
+            }
+            return
+        }
         watchedFD = fd
         let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd, eventMask: [.write, .rename, .delete, .extend], queue: .main

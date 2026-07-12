@@ -9,8 +9,18 @@ struct IntegrationsCard: View {
     @Environment(AppViewModel.self) private var vm
     let site: Site
 
-    @State private var agentToolsOn = false
     @State private var choosingRoot = false
+
+    /// Derived fresh on every render (never cached in `@State`) — the parent
+    /// `SiteDetailView` is mounted with `.id(site.id)` (MainWindow.swift), so a
+    /// view identity persists for as long as the same site stays selected. An
+    /// `@State` seeded only once via `.onAppear` would freeze at whatever was
+    /// true at first mount and never re-sync — e.g. after a fresh app launch
+    /// races the store's async disk load, after an external CLI mutation
+    /// reloads the store while this card stays mounted, or after the
+    /// reconcile loop runs. Computing this the same way `httpsRow` derives
+    /// `site.httpsEnabled` avoids that whole class of staleness.
+    private var agentToolsOn: Bool { vm.agentToolsEnabled(site) }
 
     var body: some View {
         SectionCard(title: "Integrations", systemImage: "puzzlepiece.extension") {
@@ -23,11 +33,9 @@ struct IntegrationsCard: View {
                 globalWPRow
             }
         }
-        .onAppear { agentToolsOn = vm.agentToolsEnabled(site) }
         .fileImporter(isPresented: $choosingRoot, allowedContentTypes: [.folder]) { result in
             if case .success(let url) = result {
                 vm.enableAgentTools(site, root: url)
-                agentToolsOn = true
             }
         }
     }
@@ -90,7 +98,6 @@ struct IntegrationsCard: View {
                 Toggle("", isOn: Binding(
                     get: { agentToolsOn },
                     set: { newValue in
-                        agentToolsOn = newValue
                         if newValue { vm.enableAgentTools(site) } else { vm.disableAgentTools(site) }
                     }))
                     .labelsHidden().toggleStyle(.switch)

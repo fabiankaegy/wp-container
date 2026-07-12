@@ -410,7 +410,20 @@ public final class AppViewModel {
 
     /// Map live containers by label and update statuses, without clobbering
     /// in-flight transitional states.
+    ///
+    /// Also re-reads `sites.json` from disk first: `SiteStore`'s `DispatchSource`
+    /// watcher re-establishes itself on every external atomic-replace write (the
+    /// CLI's `StorePersistence.save` always writes temp-file + rename), which is
+    /// usually instant, but a burst of rapid successive external writes (e.g. two
+    /// concurrent CLI mutations) can race the cancel-then-reopen sequence and
+    /// leave the watcher silently not observing further changes until the app
+    /// relaunches. Piggybacking a `reload()` on this already-running 5s loop is a
+    /// cheap, self-healing backstop so external edits (including group deletes,
+    /// which have no other status-polling path) always surface within 5s even if
+    /// that race is ever hit — matching the "poll as a backstop" reconciliation
+    /// PLAN.md already specifies for container status.
     public func reconcile() async {
+        await store.reload()
         guard let records = try? await cli.list(all: true) else { return }
         let running = Set(records.filter { $0.isRunning }.map { $0.name })
 
