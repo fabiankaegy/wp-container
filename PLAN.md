@@ -145,6 +145,19 @@ toggling while running offers "Restart now".
   UI shows the ES endpoint + a "works with ElasticPress" hint. Worktree envs
   inherit the parent's toggles (their own es container).
 
+## 2c-bis. Development constants & debug controls
+
+- Every site provisioned by the tool automatically gets `WP_DEVELOPMENT_MODE`
+  set to `"all"` and `WP_ENVIRONMENT_TYPE` set to `"local"` in wp-config.php
+  (injected during provisioning via WPConfigService; existing sites get them
+  on next start if absent).
+- Settings → Development card exposes switches for the debug constants:
+  `WP_DEBUG`, `WP_DEBUG_LOG`, `WP_DEBUG_DISPLAY`, `SCRIPT_DEBUG`,
+  `SAVEQUERIES` — read live from wp-config, toggled via WPConfigService
+  (immediate effect, no restart needed for constants), plus a
+  `WP_DEVELOPMENT_MODE` picker (all/core/plugin/theme/off). "Open debug.log"
+  button when WP_DEBUG_LOG is on.
+
 ## 2d. Agent tools — MCP server (replicating 10up/localwp-agent-tools)
 
 Reference: https://github.com/10up/localwp-agent-tools (LocalWP add-on exposing an
