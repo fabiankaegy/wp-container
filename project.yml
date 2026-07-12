@@ -1,0 +1,106 @@
+name: WPContainer
+
+options:
+  bundleIdPrefix: com.fabiankaegy
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+packages:
+  swift-argument-parser:
+    url: https://github.com/apple/swift-argument-parser
+    from: "1.3.0"
+
+settings:
+  base:
+    # Swift 6 language mode + full strict concurrency checking.
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    # Ad-hoc signing for local development; App Sandbox intentionally OFF
+    # (no .entitlements file is attached, so the app is unsandboxed and may
+    # shell out to /usr/local/bin/container and manage arbitrary site folders).
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGNING_ALLOWED: "YES"
+    CODE_SIGNING_REQUIRED: "NO"
+    ENABLE_HARDENED_RUNTIME: "NO"
+    DEVELOPMENT_TEAM: ""
+
+targets:
+  # Shared core: all models + services. Static library so the CLI binary is
+  # self-contained (no runtime framework dependency when installed to /usr/local/bin).
+  WPContainerKit:
+    type: library.static
+    platform: macOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: WPContainerKit
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        PRODUCT_NAME: WPContainerKit
+        SKIP_INSTALL: "YES"
+
+  # SwiftUI application.
+  WPContainer:
+    type: application
+    platform: macOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: WPContainer
+    dependencies:
+      - target: WPContainerKit
+    settings:
+      base:
+        PRODUCT_NAME: WPContainer
+        PRODUCT_BUNDLE_IDENTIFIER: com.fabiankaegy.wpcontainer
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        GENERATE_INFOPLIST_FILE: "YES"
+        INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.developer-tools"
+        INFOPLIST_KEY_LSMinimumSystemVersion: "15.0"
+        INFOPLIST_KEY_CFBundleDisplayName: "WP Container"
+        INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Fabian Kaegy. All rights reserved."
+        COMBINE_HIDPI_IMAGES: "YES"
+
+  # Scriptable command-line surface for agents: binary `wp-container` (+ `wpc` symlink).
+  wp-container:
+    type: tool
+    platform: macOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: CLI
+    dependencies:
+      - target: WPContainerKit
+      - package: swift-argument-parser
+        product: ArgumentParser
+    settings:
+      base:
+        PRODUCT_NAME: wp-container
+        PRODUCT_BUNDLE_IDENTIFIER: com.fabiankaegy.wpcontainer.cli
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+
+schemes:
+  WPContainer:
+    build:
+      targets:
+        WPContainer: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+  wp-container:
+    build:
+      targets:
+        wp-container: all
+    run:
+      config: Debug
+    archive:
+      config: Release
