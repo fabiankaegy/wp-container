@@ -18,7 +18,7 @@ struct SiteRow: View {
                     .foregroundStyle(Theme.onFrame)
                     .lineLimit(1)
                 HStack(spacing: 5) {
-                    Text("localhost:\(String(site.port))")
+                    Text(site.displayHost)
                     if envCount > 0 {
                         Text("·")
                         Label("\(envCount)", systemImage: "arrow.triangle.branch")
