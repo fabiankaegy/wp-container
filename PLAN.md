@@ -230,6 +230,50 @@ Footer: "Open WP Container" + Quit. Transitional states show a small spinner on 
 row. The list mirrors sidebar grouping order but flat/compact. App keeps running
 (and menu bar item alive) when the main window closes.
 
+## 2i. Custom domains
+
+- Default remains `http(s)://<slug>.localhost` (zero-config resolution). Optionally,
+  a site can set a **custom domain** (e.g. `mysite.local`, `client.test`) in
+  Settings or at creation.
+- Resolution: custom domains get a `127.0.0.1 <domain>` line in `/etc/hosts`,
+  managed inside clearly-delimited `# wp-container begin/end` markers (added/removed
+  via one osascript admin prompt; batch edits). LocalWP-style.
+- Routing: the HTTPS/HTTP reverse proxy routes custom domains by Host header just
+  like `.localhost` names. HTTP-only sites with custom domains route through a
+  plain HTTP listener (port 80, fallback 8080) the same way.
+- Certs: the single wildcard `*.localhost` leaf is replaced by ONE combined leaf
+  whose SANs include `*.localhost`, `localhost`, `127.0.0.1` plus every custom
+  domain (and multisite wildcards `*.<domain>`); the leaf is re-issued and the
+  proxy listener reloaded whenever domains change (cheap, CA unchanged, no re-trust).
+- wp-cli updates home/siteurl on domain change; wp-config gets the proxy-header
+  snippet (shared with §2f).
+
+## 2j. Multisite support
+
+- Add Site setup offers Network type: **Single site** (default) / **Multisite —
+  subdirectories** / **Multisite — subdomains**. Provisioning uses
+  `wp core multisite-install` (+ MULTISITE constants via wp-config injection and
+  the standard htaccess rules written into the mounted folder).
+- Subdomain networks work zero-config on `.localhost` base domains
+  (`site2.my-net.localhost` auto-resolves; cert SAN `*.<slug>.localhost` added).
+  On custom domains, subdomain mode requires a hosts entry per subsite — the UI
+  offers "Register subsite domain…" (batched into the managed hosts block);
+  subdirectory mode recommended for custom domains.
+- Site detail shows network subsites (wp-cli `wp site list`) with open buttons.
+
+## 2k. Granular PHP & WordPress versions
+
+- The Add Site sheet becomes a small **setup guide**: name + group → versions →
+  options (multisite, domain, add-ons). Version step: WordPress picker (latest,
+  6.8, 6.7, 6.6, …) × PHP picker (8.4, 8.3, 8.2, 8.1) → maps to official image tag
+  `wordpress:<wp>-php<php>-apache` (curated known-good matrix in code, "custom
+  image tag" escape hatch, availability pre-checked via `container image pull`
+  dry attempt with clear error).
+- Site Settings shows current WP/PHP (live via wp-cli/php -v when running) and
+  allows changing PHP later = image tag swap + restart (files/db untouched).
+  WP core updates happen inside WP or via wp-cli (button: "Update WordPress core").
+- Xdebug derived images (§2c) are built per base tag automatically.
+
 ## 3. App architecture (MVVM, Swift 6 concurrency)
 
 ```
