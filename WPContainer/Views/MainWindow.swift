@@ -1,19 +1,27 @@
 import SwiftUI
 import WPContainerKit
 
-/// Root window: a `NavigationSplitView` with the site sidebar and the detail
-/// pane. Surfaces the onboarding screen when the container tooling isn't ready,
-/// and shows `lastError` as a dismissible banner over the detail pane.
+/// Root window, Studio-style: a DARK FRAME (near-black shell spanning the whole
+/// window, including the sidebar and the hidden-title-bar band) with the detail
+/// content floating inside it as a light, rounded, inset panel. The top band is
+/// left free of controls so the window stays draggable there.
 struct MainWindow: View {
     @Environment(AppViewModel.self) private var vm
 
     var body: some View {
         @Bindable var vm = vm
-        NavigationSplitView {
-            SidebarView()
-                .navigationSplitViewColumnWidth(min: 240, ideal: 260, max: 300)
-        } detail: {
-            detail
+        ZStack(alignment: .topLeading) {
+            Theme.frame.ignoresSafeArea()
+
+            HStack(spacing: 0) {
+                SidebarView()
+                    .frame(width: 272)
+
+                panel
+                    .padding(.top, 10)
+                    .padding(.trailing, 10)
+                    .padding(.bottom, 10)
+            }
         }
         .sheet(isPresented: $vm.presentingAddSite) {
             AddSiteSheet()
@@ -25,6 +33,21 @@ struct MainWindow: View {
         }
     }
 
+    // MARK: Floating light panel
+
+    private var panel: some View {
+        detail
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(Theme.panel, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Theme.panelBorder, lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(alignment: .top) { errorBanner }
+            .shadow(color: .black.opacity(0.28), radius: 12, y: 3)
+    }
+
     @ViewBuilder
     private var detail: some View {
         if let status = vm.systemStatus, !status.isReady {
@@ -32,7 +55,6 @@ struct MainWindow: View {
         } else if let site = vm.selectedSite {
             SiteDetailView(site: site)
                 .id(site.id)
-                .overlay(alignment: .top) { errorBanner }
         } else {
             ContentUnavailableView {
                 Label("No Site Selected", systemImage: "square.stack.3d.up")
@@ -42,7 +64,6 @@ struct MainWindow: View {
                 Button("Add Site") { vm.presentingAddSite = true }
                     .buttonStyle(.borderedProminent)
             }
-            .overlay(alignment: .top) { errorBanner }
         }
     }
 

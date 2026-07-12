@@ -9,11 +9,11 @@ struct WPContainerApp: App {
         WindowGroup {
             MainWindow()
                 .environment(viewModel)
-                .frame(minWidth: 900, minHeight: 600)
+                .frame(minWidth: 880, minHeight: 560)
                 .task { await viewModel.onAppear() }
         }
-        .windowStyle(.titleBar)
-        .windowToolbarStyle(.unified)
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentMinSize)
         .commands { AppCommands(vm: viewModel) }
     }
 }
