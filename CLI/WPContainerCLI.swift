@@ -296,7 +296,8 @@ struct DeleteCommand: AsyncParsableCommand {
             guard let resolved = resolveTarget(target, in: envelope) else { throw CLIErrorJSON("not_found", detail: target) }
             switch resolved {
             case .site(let site):
-                for env in envelope.envs.filter({ $0.parentSiteID == site.id }) {
+                let childEnvs = envelope.envs.filter { $0.parentSiteID == site.id }
+                for env in childEnvs {
                     await ctx.worktrees.delete(env, parent: site, keepBranch: true, keepWorktree: false)
                 }
                 await ctx.lifecycle.deleteContainers(site)
@@ -305,10 +306,16 @@ struct DeleteCommand: AsyncParsableCommand {
                     env.sites.removeAll { $0.id == site.id }
                     env.envs.removeAll { $0.parentSiteID == site.id }
                 }
+                // Drop this site's (and its envs') hostnames from the trusted
+                // leaf's SAN set now that they're gone — otherwise sans.json
+                // only ever grows (never wired up anywhere previously).
+                let staleHosts = site.proxyHosts + childEnvs.map { "\($0.envSlug).localhost" }
+                try? await CertificateAuthority().removeLeafCoverage(staleHosts)
             case .env(let env):
                 let parent = envelope.sites.first { $0.id == env.parentSiteID }
                 await ctx.worktrees.delete(env, parent: parent, keepBranch: true, keepWorktree: false)
                 _ = try await ctx.persistence.mutate { store in store.envs.removeAll { $0.id == env.id } }
+                try? await CertificateAuthority().removeLeafCoverage(["\(env.envSlug).localhost"])
             }
             if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(target) deleted"))) }
             else { emitLine("Deleted \(target).") }
@@ -399,6 +406,7 @@ struct WorktreeDelete: AsyncParsableCommand {
             let parent = envelope.sites.first { $0.id == env.parentSiteID }
             await ctx.worktrees.delete(env, parent: parent, keepBranch: keepBranch, keepWorktree: keepWorktree)
             _ = try await ctx.persistence.mutate { store in store.envs.removeAll { $0.id == env.id } }
+            try? await CertificateAuthority().removeLeafCoverage(["\(env.envSlug).localhost"])
             if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(envSlug) deleted"))) }
             else { emitLine("Deleted env \(envSlug).") }
         } catch {
@@ -412,7 +420,12 @@ struct WorktreeDelete: AsyncParsableCommand {
 struct WPCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "wp",
-        abstract: "Run a one-shot wp-cli command against a site or env: wp-container wp <target> -- <wp args>"
+        abstract: "Run a one-shot wp-cli command against a site or env: wp-container wp <target> -- <wp args>",
+        discussion: """
+        Note: --json is captured as part of <wp args> (passthrough) if it appears \
+        after <target>, so place it BEFORE <target> if you want JSON output for the \
+        wp-container invocation itself: `wp-container wp --json <target> -- <wp args>`.
+        """
     )
     @Argument(help: "Site slug or env slug.") var target: String
     @Argument(parsing: .captureForPassthrough, help: "wp-cli arguments (after --).") var wpArgs: [String] = []
@@ -427,7 +440,13 @@ struct WPCommand: AsyncParsableCommand {
             guard let dbHost = try await ctx.cli.ipAddress(of: inst.dbContainerName) else {
                 throw CLIErrorJSON("not_running", detail: "start \(target) first")
             }
-            let result = try await ctx.cli.runCapturing(SiteRecipe.wpProxyArgs(inst, dbHost: dbHost, wpArgs: wpArgs))
+            // `.captureForPassthrough` retains a literal "--" separator when the
+            // caller uses the documented `wp-container wp <target> -- <wp args>`
+            // form (e.g. `wp itest-alpha -- core version`); wp-cli itself treats
+            // "--" as an unknown command, so strip a single leading occurrence.
+            var passthroughArgs = wpArgs
+            if passthroughArgs.first == "--" { passthroughArgs.removeFirst() }
+            let result = try await ctx.cli.runCapturing(SiteRecipe.wpProxyArgs(inst, dbHost: dbHost, wpArgs: passthroughArgs))
             if output.json {
                 struct WPResult: Codable { let stdout: String; let stderr: String; let exitCode: Int32 }
                 emitLine(CLIJSON.string(WPResult(stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode)))
