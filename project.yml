@@ -3,7 +3,7 @@ name: WPContainer
 options:
   bundleIdPrefix: com.fabiankaegy
   deploymentTarget:
-    macOS: "15.0"
+    macOS: "27.0"
   createIntermediateGroups: true
   groupSortPosition: top
 
@@ -33,7 +33,7 @@ targets:
   WPContainerKit:
     type: library.static
     platform: macOS
-    deploymentTarget: "15.0"
+    deploymentTarget: "27.0"
     sources:
       - path: WPContainerKit
     settings:
@@ -47,7 +47,7 @@ targets:
   WPContainer:
     type: application
     platform: macOS
-    deploymentTarget: "15.0"
+    deploymentTarget: "27.0"
     sources:
       - path: WPContainer
     dependencies:
@@ -64,7 +64,7 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         GENERATE_INFOPLIST_FILE: "YES"
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.developer-tools"
-        INFOPLIST_KEY_LSMinimumSystemVersion: "15.0"
+        INFOPLIST_KEY_LSMinimumSystemVersion: "27.0"
         INFOPLIST_KEY_CFBundleDisplayName: "WP Container"
         INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Fabian Kaegy. All rights reserved."
         COMBINE_HIDPI_IMAGES: "YES"
@@ -73,7 +73,7 @@ targets:
   wp-container:
     type: tool
     platform: macOS
-    deploymentTarget: "15.0"
+    deploymentTarget: "27.0"
     sources:
       - path: CLI
     dependencies:
