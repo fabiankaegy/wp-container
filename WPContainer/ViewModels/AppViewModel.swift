@@ -15,10 +15,17 @@ public final class AppViewModel {
     @ObservationIgnored let lifecycle: SiteLifecycle
     @ObservationIgnored let worktrees: WorktreeEnvService
     @ObservationIgnored let systemCheck: SystemCheck
+    @ObservationIgnored let ca: CertificateAuthority
+    @ObservationIgnored let httpsIntegration: HTTPSIntegration
+    @ObservationIgnored let proxy: HTTPSProxy
 
     public var selection: UUID?
     public var systemStatus: SystemCheckResult?
     public var lastError: String?
+    /// Whether the local CA is trusted as a root (drives the "Trust CA" prompt).
+    public var caTrusted = false
+    /// The port the in-app HTTPS proxy bound, once started.
+    public var proxyPort: UInt16?
 
     /// UI-intent flags so menu commands (and buttons) can drive sheet
     /// presentation from anywhere.
@@ -37,6 +44,10 @@ public final class AppViewModel {
         self.lifecycle = lifecycle
         self.worktrees = WorktreeEnvService(cli: cli, git: git, lifecycle: lifecycle)
         self.systemCheck = SystemCheck(cli: cli)
+        let ca = CertificateAuthority()
+        self.ca = ca
+        self.httpsIntegration = HTTPSIntegration(cli: cli, ca: ca)
+        self.proxy = HTTPSProxy(ca: ca)
         self.store = SiteStore()
     }
 
@@ -48,8 +59,81 @@ public final class AppViewModel {
     public func onAppear() async {
         await store.start()
         await refreshSystemStatus()
+        await refreshCATrusted()
         observeStatusEvents()
         startReconcileLoop()
+        // Adopt an already-running headless proxy, if any.
+        proxyPort = ProxyControl.current()?.port
+    }
+
+    // MARK: - HTTPS / CA / agent tools (§2d/§2f)
+
+    public func refreshCATrusted() async {
+        caTrusted = await ca.isCATrusted()
+    }
+
+    /// Whether the site's HTTPS flag is on (mirrors the persisted store value).
+    public func isHTTPSEnabled(_ site: Site) -> Bool { site.httpsEnabled }
+
+    public func setHTTPS(_ site: Site, enabled: Bool) {
+        Task {
+            do {
+                if enabled {
+                    try await httpsIntegration.enable(site)
+                    await ensureProxyRunning()
+                } else {
+                    try await httpsIntegration.disable(site)
+                }
+                var updated = site
+                updated.httpsEnabled = enabled
+                await store.upsertSite(updated)
+            } catch {
+                lastError = SiteLifecycleErrorText(error)
+            }
+        }
+    }
+
+    /// Start the in-app HTTPS proxy unless an external `proxy serve` already owns
+    /// the listener.
+    public func ensureProxyRunning() async {
+        if let status = ProxyControl.current() { proxyPort = status.port; return }
+        if proxy.boundPort != nil { proxyPort = proxy.boundPort; return }
+        do {
+            let port = try await proxy.start()
+            try? ProxyControl.claim(port: port)
+            proxyPort = port
+        } catch {
+            lastError = "HTTPS proxy: \(error)"
+        }
+    }
+
+    /// Install the local CA as a trusted root (prompts for admin), then refresh.
+    public func trustCA() {
+        Task {
+            do {
+                try await ca.trustCA()
+                await refreshCATrusted()
+            } catch {
+                lastError = "\(error)"
+            }
+        }
+    }
+
+    public func agentToolsEnabled(_ site: Site) -> Bool { AgentToolsService.isEnabled(site: site) }
+
+    public func setAgentTools(_ site: Site, enabled: Bool) {
+        do {
+            if enabled { _ = try AgentToolsService.enable(site: site) }
+            else { try AgentToolsService.disable(site: site) }
+        } catch {
+            lastError = "\(error)"
+        }
+    }
+
+    /// Open an interactive wp-cli shell for the site in Terminal.app (§2e).
+    public func openWPCLI(_ site: Site) {
+        let command = WPCLIShim.interactiveTerminalCommand(slug: site.slug, wordpressFolder: site.wordpressFolder)
+        SystemActions.openTerminalRunning(command)
     }
 
     public func refreshSystemStatus() async {

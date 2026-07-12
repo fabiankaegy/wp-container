@@ -50,6 +50,7 @@ struct SiteDetailView: View {
             LogsView(site: site)
         case .settings:
             VStack(alignment: .leading, spacing: 18) {
+                IntegrationsCard(site: site)
                 dangerZone
             }
         }
@@ -106,13 +107,15 @@ struct SiteDetailView: View {
 
     private var actionBar: some View {
         HStack(spacing: 8) {
-            actionButton("Open Site", "safari") { SystemActions.openInBrowser(site.localURL) }
+            actionButton("Open Site", "safari") { SystemActions.openInBrowser(site.url) }
                 .disabled(!site.status.isRunning)
-            actionButton("WP Admin", "person.badge.key") { SystemActions.openInBrowser(site.adminURL) }
+            actionButton("WP Admin", "person.badge.key") { SystemActions.openInBrowser(site.wpAdminURL) }
                 .disabled(!site.status.isRunning)
             actionButton("Finder", "folder") { SystemActions.revealInFinder(site.path) }
             actionButton("Terminal", "terminal") { SystemActions.openTerminal(at: site.path) }
-            actionButton("Copy URL", "link") { SystemActions.copyToClipboard(site.localURL.absoluteString) }
+            actionButton("WP-CLI", "command") { vm.openWPCLI(site) }
+                .disabled(!site.status.isRunning)
+            actionButton("Copy URL", "link") { SystemActions.copyToClipboard(site.url.absoluteString) }
             Spacer()
         }
     }

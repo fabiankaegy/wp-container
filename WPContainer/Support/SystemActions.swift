@@ -22,6 +22,24 @@ enum SystemActions {
         NSWorkspace.shared.open([directory], withApplicationAt: terminal, configuration: config)
     }
 
+    /// Open a new Terminal.app window running `command` (used for the interactive
+    /// wp-cli container). The command is escaped for AppleScript.
+    static func openTerminalRunning(_ command: String) {
+        let escaped = command
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let script = """
+        tell application "Terminal"
+            activate
+            do script "\(escaped)"
+        end tell
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+        try? process.run()
+    }
+
     /// Copy a string to the general pasteboard.
     static func copyToClipboard(_ string: String) {
         let pb = NSPasteboard.general
