@@ -28,7 +28,7 @@ site folder.
 
 ## 2. Product decisions
 
-- **App name:** WP Container. Repo/folder name: `wp-container`. Bundle id `com.fabiankaegy.wpcontainer`. Deployment target macOS 15.
+- **App name:** WP Container. Repo/folder name: `wp-container`. Bundle id `com.fabiankaegy.wpcontainer`. Deployment target **macOS 27 only** — free to use the newest SwiftUI/Liquid Glass APIs, no availability checks for anything ≤ 27.
 - **App Sandbox OFF** (the app shells out to `/usr/local/bin/container` and manages
   arbitrary site folders). Ad-hoc code signing (`CODE_SIGN_IDENTITY=-`) for local use.
 - **Per-site layout on disk** (default root `~/WP Container Sites/<slug>/`, user-overridable
