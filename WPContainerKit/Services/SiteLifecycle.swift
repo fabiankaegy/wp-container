@@ -3,7 +3,10 @@ import Foundation
 public enum LifecycleError: Error, Sendable, CustomStringConvertible {
     case databaseNotReady
     case databaseIPUnavailable
-    case httpNotReady
+    /// The HTTP readiness probe timed out. `observed` says what the probe saw
+    /// the whole time (e.g. "the port never accepted a connection" vs "kept
+    /// failing with …") so the failure is self-diagnosing.
+    case httpNotReady(observed: String)
     case elasticsearchNotReady
     case elasticsearchIPUnavailable
 
@@ -11,7 +14,8 @@ public enum LifecycleError: Error, Sendable, CustomStringConvertible {
         switch self {
         case .databaseNotReady:    return "The database container did not become ready in time."
         case .databaseIPUnavailable: return "Could not resolve the database container's IP address."
-        case .httpNotReady:        return "WordPress did not start responding over HTTP in time."
+        case .httpNotReady(let observed):
+            return "WordPress did not start responding over HTTP in time (\(observed))."
         case .elasticsearchNotReady: return "The Elasticsearch container did not become ready in time."
         case .elasticsearchIPUnavailable: return "Could not resolve the Elasticsearch container's IP address."
         }
@@ -271,22 +275,67 @@ public actor SiteLifecycle {
         throw LifecycleError.elasticsearchNotReady
     }
 
+    /// Wait until the container's web server answers on 127.0.0.1:<port>.
+    ///
+    /// The probe's ONLY job is detecting that apache/php is up, so ANY HTTP
+    /// response counts — 200, 3xx, even 500. Crucially it must NOT follow
+    /// redirects: an HTTPS + custom-domain site answers the very first probe
+    /// with a canonical 301 to e.g. `https://democrats.local`, and following it
+    /// (URLSession's default) dead-ends when the reverse proxy isn't listening
+    /// or the /etc/hosts entry is absent — misreading a perfectly healthy site
+    /// as unresponsive until timeout (user-reported bug). Readiness must never
+    /// depend on proxy or hosts resolution.
     private func waitForHTTP(_ inst: any RunnableInstance, timeout: Duration = .seconds(120)) async throws {
         let deadline = ContinuousClock.now.advanced(by: timeout)
         var request = URLRequest(url: inst.localURL)
         request.timeoutInterval = 5
         request.httpMethod = "HEAD"
+        // What the probe saw, for a self-diagnosing timeout message. Heavy
+        // codebases can take many seconds for the FIRST request (cold opcache,
+        // plugin warmup) — that shows up as "accepted the connection but hasn't
+        // answered", distinct from "port never accepted a connection".
+        var observed = "the port never accepted a connection"
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
             do {
-                let (_, response) = try await URLSession.shared.data(for: request)
-                if let http = response as? HTTPURLResponse, http.statusCode > 0 { return }
+                let (_, response) = try await Self.probeSession.data(for: request)
+                if response is HTTPURLResponse {
+                    // Any status — including the canonical 301 — proves the
+                    // web server is responding. Done.
+                    return
+                }
+                observed = "got a non-HTTP response"
+            } catch let error as URLError {
+                switch error.code {
+                case .cannotConnectToHost, .networkConnectionLost:
+                    observed = "the port never accepted a connection"
+                case .timedOut:
+                    observed = "the connection was accepted but no response arrived within 5s (site may be warming up)"
+                default:
+                    observed = "kept failing with: \(error.localizedDescription)"
+                }
             } catch {
-                // Not up yet.
+                observed = "kept failing with: \(error.localizedDescription)"
             }
             try await Task.sleep(for: .seconds(2))
         }
-        throw LifecycleError.httpNotReady
+        throw LifecycleError.httpNotReady(observed: observed)
+    }
+
+    /// URLSession that REFUSES to follow redirects (see `waitForHTTP`), with
+    /// its own cookie/cache-free configuration.
+    private static let probeSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 5
+        return URLSession(configuration: config, delegate: NoRedirectDelegate(), delegateQueue: nil)
+    }()
+
+    private final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate {
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest) async -> URLRequest? {
+            nil // Surface the 3xx itself instead of chasing it.
+        }
     }
 
     static func message(for error: Error) -> String {
