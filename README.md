@@ -70,8 +70,10 @@ Sites are provisioned automatically (no install wizard) and log in with
   avatar; sidebar rows get right-click quick actions and a clickable
   start/stop status dot.
 - **Menu-bar-first option** — app settings (⌘,) cover hiding the Dock icon,
-  launch at login, default sites folder and WP×PHP versions, and HTTPS-proxy
-  autostart.
+  launch at login, default sites folder and WP×PHP versions, HTTPS-proxy
+  autostart, and notifications. Native macOS notifications fire for background
+  start/stops, site creation, branch environments coming up (click to open),
+  core updates, and proxy failures.
 
 - **Xdebug & Elasticsearch** — per-site one-click toggles in Settings → Development.
   Xdebug builds a derived image once per base tag and points `client_host` at the
