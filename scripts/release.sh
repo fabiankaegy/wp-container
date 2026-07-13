@@ -108,13 +108,23 @@ is_adhoc && TS=(--timestamp=none)
 log "Signing CLI binary"
 codesign --force --options runtime "${TS[@]}" --sign "$SIGN_IDENTITY" "$CLI"
 
+# Sign the embedded privileged helper BEFORE the app so the app's seal records
+# the helper's cdhash (codesign does not recursively sign nested Mach-O in
+# Contents/MacOS). Same identity + hardened runtime — required for the app to
+# register it as an SMAppService.daemon (§2f-bis, issue #2).
+HELPER="$APP/Contents/MacOS/wpc-hosts-helper"
+[ -x "$HELPER" ] || die "embedded helper not found at $HELPER (build did not embed it)"
+log "Signing embedded privileged helper (wpc-hosts-helper)"
+codesign --force --options runtime "${TS[@]}" --sign "$SIGN_IDENTITY" "$HELPER"
+
 log "Signing WPContainer.app"
 codesign --force --options runtime "${TS[@]}" --sign "$SIGN_IDENTITY" "$APP"
 
 # ---- verify ------------------------------------------------------------------
 log "Verifying signatures"
-codesign --verify --deep --strict --verbose=2 "$APP"  || die "app failed codesign --verify"
-codesign --verify --strict --verbose=2         "$CLI" || die "cli failed codesign --verify"
+codesign --verify --deep --strict --verbose=2 "$APP"    || die "app failed codesign --verify"
+codesign --verify --strict --verbose=2         "$HELPER" || die "embedded helper failed codesign --verify"
+codesign --verify --strict --verbose=2         "$CLI"   || die "cli failed codesign --verify"
 
 log "Gatekeeper assessment (spctl)"
 if spctl --assess --type execute --verbose=4 "$APP" 2>&1; then
@@ -233,4 +243,6 @@ FLAGS="$(codesign -d --verbose=2 "$APP" 2>&1 | sed -n 's/^CodeDirectory .*\(flag
 echo "Signed with: ${SIGN_IDENTITY}"
 [ -n "$FLAGS" ] && echo "$FLAGS"
 if [ -n "$IDLINE" ]; then echo "$IDLINE"; else echo "  (ad-hoc: no certificate authority chain)"; fi
+HELPER_TEAM="$(codesign -d --verbose=2 "$APP/Contents/MacOS/wpc-hosts-helper" 2>&1 | sed -n 's/^TeamIdentifier=/  helper team: /p')"
+[ -n "$HELPER_TEAM" ] && echo "$HELPER_TEAM" || echo "  embedded helper: signed (ad-hoc)"
 exit 0
