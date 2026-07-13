@@ -35,6 +35,14 @@ public enum LifecycleError: Error, Sendable, CustomStringConvertible {
 /// up are one-shot wp-cli invocations (first-run provisioning, multisite
 /// install, worktree URL fixes/DB import), which gate explicitly via
 /// `waitForDatabaseReady`.
+///
+/// Re-entrancy (issue #5): an actor-held `Set<UUID>` deduplicates lifecycle
+/// actions per instance. While a start/stop for an instance is in flight, any
+/// conflicting action for the same instance is IGNORED (the UI already
+/// disables controls in transitional states; this closes the click-before-
+/// state-flips race and CLI/menu-bar spam). The guard is claimed and released
+/// inside the same actor-isolated call, and every release sits in a `defer`,
+/// so cancellation (ProcessRunner propagates it) always clears the guard.
 public actor SiteLifecycle {
     public struct StatusEvent: Sendable {
         public let instanceID: UUID
@@ -43,6 +51,9 @@ public actor SiteLifecycle {
 
     private let cli: ContainerCLI
     private let xdebug: XdebugImageService
+
+    /// Instances with a lifecycle action currently in flight (issue #5).
+    private var inFlight: Set<UUID> = []
 
     /// Immutable Sendable stream — readable from any context without `await`.
     public nonisolated let events: AsyncStream<StatusEvent>
@@ -62,6 +73,18 @@ public actor SiteLifecycle {
 
     public func markRunning(_ id: UUID) { emit(id, .running) }
 
+    // MARK: - In-flight guard (issue #5)
+
+    /// Claim the instance for a lifecycle action. False ⇒ another action is
+    /// already in flight and the caller must no-op. Synchronous on the actor,
+    /// so two racing calls can never both claim.
+    private func claim(_ id: UUID) -> Bool { inFlight.insert(id).inserted }
+
+    private func release(_ id: UUID) { inFlight.remove(id) }
+
+    /// Whether a lifecycle action for the instance is currently in flight.
+    public func isBusy(_ id: UUID) -> Bool { inFlight.contains(id) }
+
     // MARK: - Shared start path
 
     /// Ensure folders, pull images, launch db (+ es / xdebug prep) in parallel,
@@ -69,6 +92,11 @@ public actor SiteLifecycle {
     /// resolved DB host IP. Emits `.starting` up front and `.error` on failure
     /// (then rethrows). Does NOT emit `.running` — callers do that after any
     /// post-start provisioning.
+    ///
+    /// UNGUARDED primitive: `WorktreeEnvService.create` drives it directly for
+    /// a brand-new env (fresh UUID, nothing to dedupe against, and markRunning
+    /// must wait for the URL fixes). UI/CLI actions go through the guarded
+    /// wrappers (`startSite`, `startInstance`, `startSiteWithEnvs`).
     @discardableResult
     public func startContainers(_ inst: any RunnableInstance) async throws -> String {
         let timer = PhaseTimer(inst.containerSlug)
@@ -173,9 +201,30 @@ public actor SiteLifecycle {
         return try await xdebug.ensureImage(forBaseTag: inst.imageTag)
     }
 
+    /// Guarded start for a single instance (worktree envs, §2b): containers up,
+    /// then flip to `.running`. Returns false when another action for the
+    /// instance was already in flight (the start was ignored, issue #5).
+    @discardableResult
+    public func startInstance(_ inst: any RunnableInstance) async throws -> Bool {
+        guard claim(inst.instanceID) else { return false }
+        defer { release(inst.instanceID) }
+        _ = try await startContainers(inst)
+        markRunning(inst.instanceID)
+        return true
+    }
+
     /// Start a site, provisioning WordPress on first run. Returns the (possibly
-    /// updated) `provisioned` flag so the caller can persist it.
+    /// updated) `provisioned` flag so the caller can persist it. If another
+    /// action for the site is already in flight the start is ignored (issue #5)
+    /// and the flag is returned unchanged.
     public func startSite(_ site: Site) async throws -> Bool {
+        guard claim(site.id) else { return site.provisioned }
+        defer { release(site.id) }
+        return try await startSiteCore(site)
+    }
+
+    /// Unguarded body of `startSite` — called with the guard already held.
+    private func startSiteCore(_ site: Site) async throws -> Bool {
         let dbHost = try await startContainers(site)
         var provisioned = site.provisioned
         if !provisioned {
@@ -228,20 +277,30 @@ public actor SiteLifecycle {
     /// `wordpress/` + `database/` folders (see `WorktreeEnvService.create`), so
     /// there is no ordering dependency at all. A parent failure does NOT abort
     /// the env starts; every failure is surfaced individually (status events +
-    /// the returned messages). Never throws: callers read `errorSummary`.
+    /// the returned messages). Instances with an action already in flight are
+    /// skipped (issue #5). Never throws: callers read `errorSummary`.
     public func startSiteWithEnvs(_ site: Site, envs: [WorktreeEnv]) async -> CoupledStartOutcome {
         var outcome = CoupledStartOutcome(provisioned: site.provisioned, envErrorMessages: [])
+        // Claim everything up front, synchronously on the actor (issue #5).
+        let startParent = claim(site.id)
+        let claimedEnvs = envs.filter { claim($0.id) }
+        defer {
+            if startParent { release(site.id) }
+            for env in claimedEnvs { release(env.id) }
+        }
 
         enum Part: Sendable {
             case parent(provisioned: Bool?, error: String?)
             case env(slug: String, error: String?)
         }
         await withTaskGroup(of: Part.self) { group in
-            group.addTask {
-                do { return .parent(provisioned: try await self.startSite(site), error: nil) }
-                catch { return .parent(provisioned: nil, error: Self.message(for: error)) }
+            if startParent {
+                group.addTask {
+                    do { return .parent(provisioned: try await self.startSiteCore(site), error: nil) }
+                    catch { return .parent(provisioned: nil, error: Self.message(for: error)) }
+                }
             }
-            for env in envs {
+            for env in claimedEnvs {
                 group.addTask {
                     do {
                         _ = try await self.startContainers(env)
@@ -266,19 +325,35 @@ public actor SiteLifecycle {
     }
 
     /// Stop a site AND all of its worktree envs (coupled lifecycle, §2b),
-    /// concurrently.
+    /// concurrently. Instances with an action in flight are skipped (issue #5).
     public func stopSiteWithEnvs(_ site: Site, envs: [WorktreeEnv]) async {
+        let stopParent = claim(site.id)
+        let claimedEnvs = envs.filter { claim($0.id) }
+        defer {
+            if stopParent { release(site.id) }
+            for env in claimedEnvs { release(env.id) }
+        }
         await withTaskGroup(of: Void.self) { group in
-            group.addTask { await self.stop(site) }
-            for env in envs {
-                group.addTask { await self.stop(env) }
+            if stopParent {
+                group.addTask { await self.stopCore(site) }
+            }
+            for env in claimedEnvs {
+                group.addTask { await self.stopCore(env) }
             }
         }
     }
 
     // MARK: - Stop / delete
 
+    /// Guarded stop: ignored when another action for the instance is already
+    /// in flight (issue #5).
     public func stop(_ inst: any RunnableInstance) async {
+        guard claim(inst.instanceID) else { return }
+        defer { release(inst.instanceID) }
+        await stopCore(inst)
+    }
+
+    private func stopCore(_ inst: any RunnableInstance) async {
         emit(inst.instanceID, .stopping)
         // Containers run with --rm, so `stop` makes them vanish. The three
         // containers are independent — stop them concurrently (issue #9). The
@@ -293,6 +368,9 @@ public actor SiteLifecycle {
     }
 
     /// Stop + best-effort delete (non --rm leftovers, prior crash, …).
+    /// Deliberately UNGUARDED: deletion is a cleanup/rollback surface and must
+    /// always proceed (an in-flight start racing a delete fails and surfaces
+    /// its own error, exactly as before issue #5).
     public func deleteContainers(_ inst: any RunnableInstance) async {
         await withTaskGroup(of: Void.self) { group in
             for name in [inst.wpContainerName, inst.esContainerName, inst.dbContainerName] {
