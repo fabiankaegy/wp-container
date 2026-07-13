@@ -164,6 +164,11 @@ public actor WorktreeEnvService {
             // 4. Start env containers (shared recipe + shadow mount).
             let dbHost = try await lifecycle.startContainers(env)
 
+            // The wp-cli work below (live DB import, URL fixes) genuinely
+            // needs the DB accepting connections — the shared start path no
+            // longer gates on DB readiness (issue #9), so gate explicitly here.
+            try await lifecycle.waitForDatabaseReady(env, dbHost: dbHost)
+
             // 3b. Live DB transfer if the parent was running.
             if parentIsRunning {
                 try await liveDatabaseTransfer(parent: parent, env: env, envDBHost: dbHost)
