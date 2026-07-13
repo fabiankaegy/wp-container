@@ -30,6 +30,8 @@ enum AppSettings {
     /// can background the app, so callers that toggle live should re-activate.
     @MainActor
     static func applyActivationPolicy() {
-        NSApp.setActivationPolicy(showDockIcon ? .regular : .accessory)
+        // Use `NSApplication.shared` (lazily creates/returns the singleton), not
+        // the `NSApp` global, which is nil until the app object exists.
+        NSApplication.shared.setActivationPolicy(showDockIcon ? .regular : .accessory)
     }
 }
