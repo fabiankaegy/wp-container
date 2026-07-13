@@ -503,16 +503,24 @@ public final class AppViewModel {
                            xdebugEnabled: Bool = false, elasticsearchEnabled: Bool = false) async -> Site? {
         let root = parentFolder ?? SiteFolders.defaultSitesRoot
         let slug = Slug.unique(name, existing: store.existingSlugs)
-        guard let port = PortAllocator.firstFreePort(excluding: store.takenPorts) else {
+        let sitePath = root.appendingPathComponent(slug, isDirectory: true)
+        // Allocate the port INSIDE the cross-process-locked store mutation (#3
+        // follow-up): the port is picked from the store's current taken set AND
+        // the new site is appended in the same critical section, so a concurrent
+        // creator (the app again, or the CLI) can never observe the same port as
+        // free. Mirrors `wp-container create`.
+        let result = await store.allocatePort { port, envelope in
+            let site = Site(name: name, slug: slug, path: sitePath,
+                            port: port, imageTag: imageTag, phpVersion: phpVersion, groupID: groupID,
+                            xdebugEnabled: xdebugEnabled, elasticsearchEnabled: elasticsearchEnabled,
+                            customDomain: customDomain, networkType: networkType)
+            envelope.sites.append(site)
+            return site
+        }
+        guard let (_, site) = result else {
             lastError = "No free port available."
             return nil
         }
-        let site = Site(name: name, slug: slug,
-                        path: root.appendingPathComponent(slug, isDirectory: true),
-                        port: port, imageTag: imageTag, phpVersion: phpVersion, groupID: groupID,
-                        xdebugEnabled: xdebugEnabled, elasticsearchEnabled: elasticsearchEnabled,
-                        customDomain: customDomain, networkType: networkType)
-        await store.upsertSite(site)
         return site
     }
 
@@ -617,16 +625,26 @@ public final class AppViewModel {
     /// returns the created (already-started) env so the sheet can show its URL,
     /// or nil on failure (error surfaced via `lastError`).
     public func createEnvAwaiting(parent: Site, repoRelPath: String, branch: String, from: String? = nil) async -> WorktreeEnv? {
-        guard let port = PortAllocator.firstFreePort(excluding: store.takenPorts) else {
+        // Allocate the port AND reserve the env descriptor in ONE locked store
+        // mutation (#3 follow-up) — same pattern the CLI/MCP worktree-create use.
+        // The reserved record keeps the final env's UUID so `upsertEnv` (success)
+        // or `removeEnv` (rollback) is a simple by-id swap.
+        guard let (_, reserved) = await store.allocatePort(reserve: { port, envelope in
+            let d = WorktreeEnvService.descriptor(parent: parent, repoRelPath: repoRelPath, branch: branch, port: port)
+            envelope.envs.append(d)
+            return d
+        }) else {
             lastError = "No free port available."
             return nil
         }
         do {
             let env = try await worktrees.create(parent: parent, parentIsRunning: parent.status.isRunning,
-                                                 repoRelPath: repoRelPath, branch: branch, from: from, port: port)
+                                                 repoRelPath: repoRelPath, branch: branch, from: from,
+                                                 port: reserved.port, reserved: reserved)
             await store.upsertEnv(env)
             return env
         } catch {
+            await store.removeEnv(id: reserved.id)
             lastError = SiteLifecycleErrorText(error)
             lastErrorDetail = (error as? WorktreeError)?.fullDetail
             return nil
@@ -705,16 +723,23 @@ public final class AppViewModel {
 
     public func createEnv(parent: Site, repoRelPath: String, branch: String, from: String? = nil) {
         Task {
-            guard let port = PortAllocator.firstFreePort(excluding: store.takenPorts) else {
+            // Port + env reservation in one locked mutation (#3 follow-up).
+            guard let (_, reserved) = await store.allocatePort(reserve: { port, envelope in
+                let d = WorktreeEnvService.descriptor(parent: parent, repoRelPath: repoRelPath, branch: branch, port: port)
+                envelope.envs.append(d)
+                return d
+            }) else {
                 lastError = "No free port available."
                 return
             }
             let parentRunning = parent.status.isRunning
             do {
                 let env = try await worktrees.create(parent: parent, parentIsRunning: parentRunning,
-                                                     repoRelPath: repoRelPath, branch: branch, from: from, port: port)
+                                                     repoRelPath: repoRelPath, branch: branch, from: from,
+                                                     port: reserved.port, reserved: reserved)
                 await store.upsertEnv(env)
             } catch {
+                await store.removeEnv(id: reserved.id)
                 lastError = SiteLifecycleErrorText(error)
                 lastErrorDetail = (error as? WorktreeError)?.fullDetail
             }
