@@ -8,13 +8,15 @@ struct WPContainerApp: App {
     init() {
         let vm = AppViewModel()
         _viewModel = State(initialValue: vm)
-        // Apply the persisted Dock-icon preference (menu-bar-first mode) before
-        // the app finishes launching so there is no visible Dock flicker.
-        AppSettings.applyActivationPolicy()
         // Bootstrap at APP level, not window level: the menu bar extra must have
         // a loaded store + running reconcile loop even if the popover is opened
         // before the main window appears (or after it has been closed).
         Task { @MainActor in
+            // Apply the persisted Dock-icon preference (menu-bar-first mode) as
+            // early as possible — but NOT from `init`, where the shared
+            // application object does not yet exist. This main-actor task runs
+            // once the run loop is up, so `NSApplication.shared` is valid.
+            AppSettings.applyActivationPolicy()
             await vm.onAppear()
             // Optionally spin up the HTTPS proxy at launch (PLAN.md §2l).
             if AppSettings.autoStartProxy { await vm.ensureProxyRunning() }
@@ -47,15 +49,31 @@ struct WPContainerApp: App {
                 .environment(viewModel)
         } label: {
             // The real app icon artwork (PLAN.md §2h) rather than a monochrome
-            // template glyph — the user wants the colored mark. Rendered at
-            // menu-bar size with high interpolation so it stays crisp.
-            Image(nsImage: NSApp.applicationIconImage)
-                .resizable()
-                .interpolation(.high)
-                .frame(width: 18, height: 18)
+            // template glyph — the user wants the colored mark. SwiftUI frame
+            // modifiers on a MenuBarExtra label are ignored (the status item
+            // sizes from the NSImage's intrinsic size, which is huge here), so
+            // hand it a pre-drawn 18pt rounded copy instead.
+            Image(nsImage: Self.menuBarIcon)
         }
         .menuBarExtraStyle(.window)
     }
+
+    /// A menu-bar-sized (18pt), rounded, colored copy of the app icon. The
+    /// source artwork is a full-bleed square, so we clip a squircle to match the
+    /// icon's appearance everywhere else and leave a point of breathing room.
+    private static let menuBarIcon: NSImage = {
+        let side: CGFloat = 18
+        let size = NSSize(width: side, height: side)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        NSGraphicsContext.current?.imageInterpolation = .high
+        let rect = NSRect(origin: .zero, size: size)
+        NSBezierPath(roundedRect: rect, xRadius: side * 0.28, yRadius: side * 0.28).addClip()
+        NSApp.applicationIconImage?.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+        image.unlockFocus()
+        image.isTemplate = false // keep the colored mark, not a template
+        return image
+    }()
 }
 
 /// Menu-bar commands. Kept in the app scene where the shared view model is in
