@@ -157,4 +157,39 @@ cat > "$APPICONSET/Contents.json" <<'JSON'
 JSON
 
 echo "==> wrote $APPICONSET/Contents.json"
+
+# --- Menu bar template icon (PLAN.md §2h) ---------------------------------
+# Extract the white W-in-circle mark from the canonical icon into a black +
+# alpha TEMPLATE image (Render As: Template) at 18pt and 36pt (@2x) so the menu
+# bar status item renders monochrome and adapts to light/dark menu bars and
+# accent tints like every other status item.
+echo "==> Generating menu bar template icon"
+MBSET="$ROOT_DIR/WPContainer/Assets.xcassets/MenuBarIcon.imageset"
+mkdir -p "$MBSET"
+# 1. Near-white mark region on the icon flattened against its blue squircle.
+magick "$CANON" -alpha off -colorspace Gray -threshold 72% "$WORK/mb_bright.png"
+# 2. Opacity mask (inside the squircle only).
+magick "$CANON" -alpha extract "$WORK/mb_opaque.png"
+# 3. Mark = bright AND opaque (drops the blue field between ring and W).
+magick "$WORK/mb_bright.png" "$WORK/mb_opaque.png" -compose Multiply -composite "$WORK/mb_markmask.png"
+# 4. Keep only the central mark, dropping the artwork's faint corner grid marks
+#    (a centered disc of radius ~340/1024 contains the mark, excludes corners).
+magick -size 1024x1024 xc:black -fill white -draw "circle 512,512 512,172" "$WORK/mb_region.png"
+magick "$WORK/mb_markmask.png" "$WORK/mb_region.png" -compose Multiply -composite -threshold 50% "$WORK/mb_mask.png"
+# 5. Black shape with alpha = mark mask, trimmed to the mark's bounds.
+magick -size 1024x1024 xc:black "$WORK/mb_mask.png" -alpha off -compose CopyOpacity -composite -trim +repage "$WORK/mb_mark.png"
+# 6. 18pt (@1x) and 36pt (@2x): the circle mark fills ~16/32 px, centered.
+magick "$WORK/mb_mark.png" -filter Lanczos -resize 16x16 -background none -gravity center -extent 18x18 "$MBSET/MenuBarIcon.png"
+magick "$WORK/mb_mark.png" -filter Lanczos -resize 32x32 -background none -gravity center -extent 36x36 "$MBSET/MenuBarIcon@2x.png"
+cat > "$MBSET/Contents.json" <<'JSON'
+{
+  "images" : [
+    { "idiom" : "universal", "filename" : "MenuBarIcon.png", "scale" : "1x" },
+    { "idiom" : "universal", "filename" : "MenuBarIcon@2x.png", "scale" : "2x" }
+  ],
+  "info" : { "author" : "xcode", "version" : 1 },
+  "properties" : { "template-rendering-intent" : "template" }
+}
+JSON
+echo "==> wrote $MBSET"
 echo "==> done."

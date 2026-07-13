@@ -48,32 +48,17 @@ struct WPContainerApp: App {
             MenuBarContent()
                 .environment(viewModel)
         } label: {
-            // The real app icon artwork (PLAN.md §2h) rather than a monochrome
-            // template glyph — the user wants the colored mark. SwiftUI frame
-            // modifiers on a MenuBarExtra label are ignored (the status item
-            // sizes from the NSImage's intrinsic size, which is huge here), so
-            // hand it a pre-drawn 18pt rounded copy instead.
-            Image(nsImage: Self.menuBarIcon)
+            // A MONOCHROME TEMPLATE of the WordPress W-in-circle mark (PLAN.md
+            // §2h, updated): the "MenuBarIcon" asset is marked Render As Template
+            // (template-rendering-intent), so macOS tints it to match light/dark
+            // menu bars and accent colors exactly like every other status item.
+            // The asset is pre-sized to 18pt (36pt @2x) — MenuBarExtra ignores
+            // SwiftUI frame modifiers on its label and sizes from the image's
+            // intrinsic size.
+            Image("MenuBarIcon")
         }
         .menuBarExtraStyle(.window)
     }
-
-    /// A menu-bar-sized (18pt), rounded, colored copy of the app icon. The
-    /// source artwork is a full-bleed square, so we clip a squircle to match the
-    /// icon's appearance everywhere else and leave a point of breathing room.
-    private static let menuBarIcon: NSImage = {
-        let side: CGFloat = 18
-        let size = NSSize(width: side, height: side)
-        let image = NSImage(size: size)
-        image.lockFocus()
-        NSGraphicsContext.current?.imageInterpolation = .high
-        let rect = NSRect(origin: .zero, size: size)
-        NSBezierPath(roundedRect: rect, xRadius: side * 0.28, yRadius: side * 0.28).addClip()
-        NSApp.applicationIconImage?.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
-        image.unlockFocus()
-        image.isTemplate = false // keep the colored mark, not a template
-        return image
-    }()
 }
 
 /// Menu-bar commands. Kept in the app scene where the shared view model is in
