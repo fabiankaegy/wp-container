@@ -211,8 +211,9 @@ struct ProxyServe: AsyncParsableCommand {
         do {
             let port = try await proxy.start()
             try ProxyControl.claim(port: port)
-            // Release the pidfile on termination.
-            let cleanup: @convention(c) (Int32) -> Void = { _ in ProxyControl.release(); Darwin.exit(0) }
+            // Release the pidfile on termination (#4). Ownership-checked so a
+            // racing claimer's record is never deleted by mistake.
+            let cleanup: @convention(c) (Int32) -> Void = { _ in ProxyControl.releaseIfOwned(); Darwin.exit(0) }
             signal(SIGINT, cleanup)
             signal(SIGTERM, cleanup)
             if output.json { emitLine(MCPJSON.string(["ok": true, "port": Int(port)])) }
@@ -220,7 +221,10 @@ struct ProxyServe: AsyncParsableCommand {
             // Stay alive.
             while true { try await Task.sleep(for: .seconds(3600)) }
         } catch {
-            ProxyControl.release()
+            // Only tear down a record THIS process wrote — between the
+            // stale-check above and a failed claim, another owner may have
+            // legitimately claimed the proxy.
+            ProxyControl.releaseIfOwned()
             throw failCommand(error, json: output.json)
         }
     }

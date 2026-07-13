@@ -18,6 +18,15 @@ struct WPContainerApp: App {
             // application object does not yet exist. This main-actor task runs
             // once the run loop is up, so `NSApplication.shared` is valid.
             AppSettings.applyActivationPolicy()
+            // Release the proxy pidfile on quit (#4) so a relaunch never
+            // depends on stale-PID detection. Ownership-checked: quitting an
+            // instance that doesn't own the proxy (e.g. `proxy serve` does)
+            // must not delete the real owner's record.
+            NotificationCenter.default.addObserver(
+                forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+            ) { _ in
+                ProxyControl.releaseIfOwned()
+            }
             await vm.onAppear()
             // HTTPS proxy at launch (PLAN.md §2f): the opt-out setting
             // (registered default: on) starts it unconditionally; even when
