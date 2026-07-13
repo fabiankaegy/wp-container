@@ -254,7 +254,8 @@ private struct NewGroupButton: View {
 }
 
 /// A selectable, hover-highlighted site row wired to the app selection, with a
-/// context menu to move it between groups and a drag payload (its site id).
+/// clickable status dot (start/stop), right-click quick actions (PLAN.md §2l),
+/// a Move-to-Group submenu, and a drag payload (its site id).
 struct SidebarSiteRow: View {
     @Environment(AppViewModel.self) private var vm
     let site: Site
@@ -262,11 +263,15 @@ struct SidebarSiteRow: View {
     let onMove: (UUID?) -> Void
 
     @State private var hovering = false
+    @State private var confirmingDelete = false
 
     private var isSelected: Bool { vm.selection == site.id }
 
     var body: some View {
-        SiteRow(site: site, envCount: vm.store.envs(forSite: site.id).count)
+        // The trailing status dot is a start/stop control; its clicks are
+        // consumed by its own Button so they never change row selection.
+        SiteRow(site: site, envCount: vm.store.envs(forSite: site.id).count,
+                onToggleRun: toggleRun)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(isSelected ? Theme.sidebarSelection
@@ -281,16 +286,69 @@ struct SidebarSiteRow: View {
                     .frame(width: 220)
                     .background(Theme.sidebar, in: RoundedRectangle(cornerRadius: 8))
             }
-            .contextMenu {
-                Menu("Move to Group") {
-                    Button("Ungrouped") { onMove(nil) }
-                        .disabled(site.groupID == nil)
-                    if !groups.isEmpty { Divider() }
-                    ForEach(groups) { group in
-                        Button(group.name) { onMove(group.id) }
-                            .disabled(site.groupID == group.id)
-                    }
-                }
+            .contextMenu { contextMenu }
+            .confirmationDialog("Delete \"\(site.name)\"?", isPresented: $confirmingDelete, titleVisibility: .visible) {
+                Button("Delete Site & Move Folder to Trash", role: .destructive) { delete(trashFolder: true) }
+                Button("Delete Site (Keep Folder)", role: .destructive) { delete(trashFolder: false) }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Removes the site's containers. Choose whether to also move \(site.path.lastPathComponent) to the Trash.")
             }
+    }
+
+    // MARK: Context menu (reuses AppViewModel actions / SystemActions — §2l)
+
+    @ViewBuilder
+    private var contextMenu: some View {
+        if site.status.isRunning {
+            Button("Stop", systemImage: "stop.fill") { vm.stopSite(site) }
+        } else {
+            Button("Start", systemImage: "play.fill") { vm.startSite(site) }
+                .disabled(site.status.isTransitional)
+        }
+
+        Divider()
+
+        Button("Open Site", systemImage: "safari") { SystemActions.openInBrowser(site.url) }
+            .disabled(!site.status.isRunning)
+        Button("WP Admin", systemImage: "person.badge.key") { SystemActions.openInBrowser(site.wpAdminURL) }
+            .disabled(!site.status.isRunning)
+        Button("Reveal in Finder", systemImage: "folder") { SystemActions.revealInFinder(site.path) }
+        Button("Open in Terminal", systemImage: "terminal") { SystemActions.openTerminal(at: site.path, pathPrepend: site.path) }
+        Button("Copy URL", systemImage: "link") { SystemActions.copyToClipboard(site.url.absoluteString) }
+
+        Divider()
+
+        Button("New Branch Environment…", systemImage: "arrow.triangle.branch") {
+            vm.selection = site.id
+            vm.presentingNewEnv = true
+        }
+
+        Divider()
+
+        Menu("Move to Group") {
+            Button("Ungrouped") { onMove(nil) }
+                .disabled(site.groupID == nil)
+            if !groups.isEmpty { Divider() }
+            ForEach(groups) { group in
+                Button(group.name) { onMove(group.id) }
+                    .disabled(site.groupID == group.id)
+            }
+        }
+
+        Divider()
+
+        Button("Delete Site…", systemImage: "trash", role: .destructive) { confirmingDelete = true }
+    }
+
+    /// Start when stopped, stop when running; no-op while transitional.
+    private func toggleRun() {
+        if site.status.isRunning { vm.stopSite(site) }
+        else if !site.status.isTransitional { vm.startSite(site) }
+    }
+
+    private func delete(trashFolder: Bool) {
+        vm.deleteSite(site, trashFolder: trashFolder)
+        if vm.selection == site.id { vm.selection = nil }
     }
 }
