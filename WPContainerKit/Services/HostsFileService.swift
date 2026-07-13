@@ -17,11 +17,16 @@ public enum HostsFileService {
     public enum HostsError: Error, Sendable, CustomStringConvertible {
         case adminFailed(String)
         case readFailed(String)
+        /// The user dismissed the admin/Touch-ID dialog (osascript error -128),
+        /// or we terminated the prompt (skip / timeout). Callers treat this as a
+        /// skip rather than a hard failure.
+        case cancelled
 
         public var description: String {
             switch self {
             case .adminFailed(let s): return "updating /etc/hosts failed: \(s)"
             case .readFailed(let s):  return "reading /etc/hosts failed: \(s)"
+            case .cancelled:          return "domain registration was cancelled"
             }
         }
     }
@@ -78,6 +83,15 @@ public enum HostsFileService {
 
     // MARK: - Apply (admin prompt)
 
+    /// Whether a single custom domain currently has a managed `/etc/hosts` entry
+    /// (used to flag a site whose domain was configured but not yet registered).
+    public static func isRegistered(_ domain: String) -> Bool {
+        let want = domain.trimmingCharacters(in: .whitespaces)
+        guard !want.isEmpty,
+              let current = try? String(contentsOfFile: hostsPath, encoding: .utf8) else { return false }
+        return managedDomains(in: current).contains(want)
+    }
+
     /// True if the managed block already exactly matches `domains` (no admin
     /// prompt needed).
     public static func isUpToDate(domains: [String]) -> Bool {
@@ -105,8 +119,21 @@ public enum HostsFileService {
         let script = "do shell script \"\(appleScriptEscape(inner))\" with administrator privileges"
         let result = try await ProcessRunner.run(executable: "/usr/bin/osascript", args: ["-e", script])
         if result.exitCode != 0 {
-            throw HostsError.adminFailed(result.stderr.isEmpty ? result.stdout : result.stderr)
+            let detail = result.stderr.isEmpty ? result.stdout : result.stderr
+            // A dismissed auth dialog reports AppleScript error -128 ("User
+            // canceled"); a SIGTERM'd osascript (our skip/timeout) exits without
+            // writing. Either way there is no partial write — surface as a skip.
+            if isCancellation(detail) || result.exitCode == 15 /* SIGTERM */ {
+                throw HostsError.cancelled
+            }
+            throw HostsError.adminFailed(detail)
         }
+    }
+
+    /// Whether an osascript failure represents a user-dismissed dialog.
+    private static func isCancellation(_ detail: String) -> Bool {
+        let d = detail.lowercased()
+        return d.contains("-128") || d.contains("user canceled") || d.contains("user cancelled")
     }
 
     // MARK: - Helpers

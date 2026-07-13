@@ -1,6 +1,18 @@
+import AppKit
 import Foundation
 import Observation
 import WPContainerKit
+
+/// Outcome of registering a site's custom domain in `/etc/hosts` (PLAN.md §2l).
+public enum DomainRegistrationOutcome: Sendable {
+    /// The managed hosts block was written (or already correct).
+    case registered
+    /// The user dismissed the auth dialog, or we skipped / timed out — the site
+    /// is fully created, the domain stays configured but unregistered.
+    case skipped
+    /// A genuine failure (not a cancellation); surfaced but non-fatal to creation.
+    case failed(String)
+}
 
 /// App-level view model: owns the shared services, drives lifecycle actions as
 /// `Task`s, observes lifecycle status events, and runs a periodic reconcile loop
@@ -159,10 +171,17 @@ public final class AppViewModel {
             var updated = site
             updated.customDomain = normalized
             await store.upsertSite(updated)
+            // Bring the app frontmost so the /etc/hosts admin dialog is visible.
+            NSApp.activate(ignoringOtherApps: true)
             do {
                 let all = store.sites.compactMap(\.customDomain)
                 try await DomainService(cli: cli, ca: ca).apply(site: updated, allCustomDomains: all)
                 await refreshProxyRouting()
+            } catch let error as HostsFileService.HostsError {
+                // A dismissed dialog leaves the domain configured but
+                // unregistered (the Domain card offers "Register now"); other
+                // hosts errors surface.
+                if case .cancelled = error {} else { lastError = error.description }
             } catch { lastError = SiteLifecycleErrorText(error) }
         }
     }
@@ -511,16 +530,49 @@ public final class AppViewModel {
                 updated.provisioned = provisioned
                 await store.upsertSite(updated)
             }
-            // Custom domain: hosts + cert + proxy after the site is up (§2i).
-            if let customDomain, !customDomain.isEmpty {
-                let all = store.sites.compactMap(\.customDomain)
-                try? await DomainService(cli: cli, ca: ca).apply(site: site, allCustomDomains: all)
-                await refreshProxyRouting()
-            }
         } catch {
             lastError = SiteLifecycleErrorText(error)
         }
+        // NOTE: custom-domain registration (the blocking /etc/hosts admin prompt)
+        // is intentionally NOT done here. The Add Site sheet drives it as a
+        // separate, honestly-labelled, skippable step via `registerCustomDomain`
+        // (PLAN.md §2l) so an unnoticed auth dialog never appears to hang.
         return site
+    }
+
+    /// Register `site`'s custom domain in `/etc/hosts` (+ cert SANs + proxy +
+    /// WordPress URLs). Brings the app frontmost first so the admin/Touch-ID
+    /// dialog appears above our windows, and honors `Task` cancellation — a
+    /// cancelled Task SIGTERMs the pending `osascript`, dismissing the dialog.
+    /// A user-dismissed dialog (or a skip/timeout cancellation) resolves to
+    /// `.skipped`, never a failure: the site is already created and running.
+    public func registerCustomDomain(_ site: Site) async -> DomainRegistrationOutcome {
+        guard let domain = site.customDomain, !domain.isEmpty else { return .registered }
+        // Encourage the auth dialog to attach above our sheet.
+        NSApp.activate(ignoringOtherApps: true)
+        do {
+            let all = store.sites.compactMap(\.customDomain)
+            try await DomainService(cli: cli, ca: ca).apply(site: site, allCustomDomains: all)
+            await refreshProxyRouting()
+            return .registered
+        } catch {
+            // Any error under a cancelled Task is a deliberate skip/timeout (the
+            // osascript child was SIGTERM'd) — never a failure to surface.
+            if Task.isCancelled { return .skipped }
+            if let hostsError = error as? HostsFileService.HostsError,
+               case .cancelled = hostsError { return .skipped }
+            let text = SiteLifecycleErrorText(error)
+            lastError = text
+            return .failed(text)
+        }
+    }
+
+    /// Whether a site's configured custom domain currently has a `/etc/hosts`
+    /// entry. False (unregistered) is the state the Domain card flags with a
+    /// "Register now" affordance.
+    public func isDomainRegistered(_ site: Site) -> Bool {
+        guard let domain = site.customDomain, !domain.isEmpty else { return true }
+        return HostsFileService.isRegistered(domain)
     }
 
     /// Awaitable worktree-env creation for the "New Branch Environment" sheet:

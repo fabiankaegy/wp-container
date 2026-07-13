@@ -30,7 +30,12 @@ struct AddSiteSheet: View {
     @State private var hintIndex = 0
     @State private var errorText: String?
 
-    private enum Phase { case idle, working, failed }
+    // Custom-domain registration step (§2l): honest label + skippable prompt.
+    @State private var domainStatus = ""
+    @State private var showSkip = false
+    @State private var domainRegTask: Task<DomainRegistrationOutcome, Never>?
+
+    private enum Phase { case idle, working, registeringDomain, failed }
     private let hints = ["Seeding WordPress core…", "Starting database…", "Installing WordPress…", "Finishing up…"]
     private let steps = ["Site", "Versions", "Options"]
 
@@ -48,6 +53,7 @@ struct AddSiteSheet: View {
                 }
             }
             if phase == .working { progressBar }
+            if phase == .registeringDomain { domainRegistrationBar }
             if phase == .failed, let errorText { errorBanner(errorText) }
             Divider()
             footer
@@ -162,6 +168,22 @@ struct AddSiteSheet: View {
         .padding(.horizontal, 16).padding(.vertical, 10)
     }
 
+    /// Honest, skippable status for the /etc/hosts admin-prompt step (§2l).
+    private var domainRegistrationBar: some View {
+        HStack(spacing: 10) {
+            ProgressView().controlSize(.small)
+            Text(domainStatus)
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            if showSkip {
+                Button("Skip domain setup") { domainRegTask?.cancel() }
+                    .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+    }
+
     private func errorBanner(_ text: String) -> some View {
         Text(text).font(.caption).foregroundStyle(.red)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -174,7 +196,7 @@ struct AddSiteSheet: View {
                 if step == 0 { dismiss() } else { step -= 1 }
             }
             .keyboardShortcut(.cancelAction)
-            .disabled(phase == .working)
+            .disabled(phase == .working || phase == .registeringDomain)
             Spacer()
             if step < steps.count - 1 {
                 Button("Next") { step += 1 }
@@ -183,7 +205,8 @@ struct AddSiteSheet: View {
             } else {
                 Button("Create Site") { Task { await create() } }
                     .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
-                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || phase == .working)
+                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty
+                              || phase == .working || phase == .registeringDomain)
             }
         }
         .padding(16)
@@ -210,11 +233,49 @@ struct AddSiteSheet: View {
             customDomain: domain.isEmpty ? nil : domain,
             xdebugEnabled: xdebug, elasticsearchEnabled: elasticsearch)
 
-        if let site, vm.store.site(id: site.id)?.status.isRunning == true {
-            dismiss()
-        } else {
+        guard let site, vm.store.site(id: site.id)?.status.isRunning == true else {
             errorText = vm.lastError ?? "Could not create the site."
             phase = .failed
+            return
+        }
+
+        // Register the custom domain as a separate, honest, skippable step so the
+        // blocking /etc/hosts admin prompt never looks like a hung "Finishing up…".
+        if let configured = vm.store.site(id: site.id)?.customDomain, !configured.isEmpty {
+            await registerDomainStep(site: site, domain: configured)
+        }
+        dismiss()
+    }
+
+    /// Drive the domain-registration step with an honest label, a Skip button
+    /// after 10s, and a hard 2-minute timeout — all resolving to a successful
+    /// (domain-unregistered) site rather than an indefinite spinner (§2l).
+    private func registerDomainStep(site: Site, domain: String) async {
+        phase = .registeringDomain
+        domainStatus = "Waiting for admin approval to register \(domain)…"
+        showSkip = false
+
+        let task = Task { await vm.registerCustomDomain(site) }
+        domainRegTask = task
+
+        let reveal = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(10))
+            if !task.isCancelled { showSkip = true }
+        }
+        let timeout = Task {
+            try? await Task.sleep(for: .seconds(120))
+            task.cancel()
+        }
+
+        let outcome = await task.value
+        reveal.cancel()
+        timeout.cancel()
+        showSkip = false
+
+        if case .registered = outcome {} else {
+            // Skipped, timed out, or a soft failure — the site still exists.
+            domainStatus = "Domain not registered. Register it later from the site's Domain settings."
+            try? await Task.sleep(for: .seconds(1.2))
         }
     }
 
