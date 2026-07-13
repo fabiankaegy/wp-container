@@ -20,8 +20,22 @@ enum AppSettings {
         UserDefaults.standard.object(forKey: showDockIconKey) as? Bool ?? true
     }
 
+    /// Defaults TRUE via `registerDefaults()`: HTTPS/custom-domain sites are
+    /// dead without a 443 listener, so an app relaunch must bring the proxy
+    /// back without user action (user-reported bug: "Safari Can't Connect" —
+    /// nothing listening on 443 after relaunch). The Settings toggle is now an
+    /// opt-OUT override; correctness additionally never depends on it (see
+    /// AppViewModel.ensureProxyIfNeeded).
     static var autoStartProxy: Bool {
         UserDefaults.standard.bool(forKey: autoStartProxyKey)
+    }
+
+    /// Register defaults for keys whose ABSENT value must not read as false.
+    /// Call once, as early as possible.
+    static func registerDefaults() {
+        UserDefaults.standard.register(defaults: [
+            autoStartProxyKey: true,
+        ])
     }
 
     /// Apply the Dock-icon preference to the running app. `.accessory` hides the

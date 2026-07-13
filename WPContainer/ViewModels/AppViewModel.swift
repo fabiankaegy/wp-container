@@ -330,6 +330,25 @@ public final class AppViewModel {
         }
     }
 
+    /// Whether any site depends on the reverse proxy for its URL to work at
+    /// all (HTTPS or a custom domain — both route through the proxy, §2f/§2i).
+    private var anySiteNeedsProxy: Bool {
+        store.sites.contains { $0.httpsEnabled || $0.customDomain != nil }
+    }
+
+    /// Start the proxy whenever anything needs it — correctness must never
+    /// depend on the opt-out launch setting (user-reported: after a relaunch
+    /// nothing listened on 443 and every https/custom-domain site was dead).
+    public func ensureProxyIfNeeded() async {
+        if anySiteNeedsProxy { await ensureProxyRunning() }
+    }
+
+    /// Cheap liveness refresh for proxy status lines: adopt an externally-owned
+    /// listener (e.g. `wp-container proxy serve`) if one has appeared.
+    public func refreshProxyLiveness() {
+        if proxyPort == nil { proxyPort = ProxyControl.current()?.port }
+    }
+
     /// Install the local CA as a trusted root (prompts for admin), then refresh.
     public func trustCA() {
         Task {
@@ -639,6 +658,12 @@ public final class AppViewModel {
     /// envs (parent first, then envs; individual failures surfaced together).
     public func startSite(_ site: Site) {
         Task {
+            // An HTTPS/custom-domain site is unreachable without the reverse
+            // proxy — ensure it's listening whenever such a site starts (covers
+            // proxy crashed/killed/never-started cases, §2f fix).
+            if site.httpsEnabled || site.customDomain != nil {
+                await ensureProxyRunning()
+            }
             let envs = store.envs(forSite: site.id)
             let outcome = await lifecycle.startSiteWithEnvs(site, envs: envs)
             if outcome.provisioned != site.provisioned {

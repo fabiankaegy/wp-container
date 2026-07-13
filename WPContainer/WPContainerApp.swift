@@ -6,6 +6,7 @@ struct WPContainerApp: App {
     @State private var viewModel: AppViewModel
 
     init() {
+        AppSettings.registerDefaults()
         let vm = AppViewModel()
         _viewModel = State(initialValue: vm)
         // Bootstrap at APP level, not window level: the menu bar extra must have
@@ -18,8 +19,15 @@ struct WPContainerApp: App {
             // once the run loop is up, so `NSApplication.shared` is valid.
             AppSettings.applyActivationPolicy()
             await vm.onAppear()
-            // Optionally spin up the HTTPS proxy at launch (PLAN.md §2l).
-            if AppSettings.autoStartProxy { await vm.ensureProxyRunning() }
+            // HTTPS proxy at launch (PLAN.md §2f): the opt-out setting
+            // (registered default: on) starts it unconditionally; even when
+            // opted out, correctness wins — any HTTPS/custom-domain site needs
+            // a 443 listener, so ensure one exists whenever such a site does.
+            if AppSettings.autoStartProxy {
+                await vm.ensureProxyRunning()
+            } else {
+                await vm.ensureProxyIfNeeded()
+            }
         }
     }
 

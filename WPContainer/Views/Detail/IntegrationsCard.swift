@@ -46,16 +46,31 @@ struct IntegrationsCard: View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Trusted HTTPS").font(.callout.weight(.medium))
-                Text(site.httpsEnabled ? "Serving \(site.url.absoluteString)"
-                                       : "Serve this site over https://\(site.primaryHost)")
-                    .font(.caption).foregroundStyle(.secondary)
+                // Honest status (§2f fix): "Serving …" only when the proxy is
+                // actually listening; otherwise say so instead of implying the
+                // https URL works.
+                Text(httpsSubtitle)
+                    .font(.caption)
+                    .foregroundStyle(site.httpsEnabled && vm.proxyPort == nil ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
                     .textSelection(.enabled)
             }
             Spacer()
+            if site.httpsEnabled && vm.proxyPort == nil {
+                Button("Start Proxy") { Task { await vm.ensureProxyRunning() } }
+                    .controlSize(.small)
+            }
             Toggle("", isOn: Binding(get: { site.httpsEnabled },
                                      set: { vm.setHTTPS(site, enabled: $0) }))
                 .labelsHidden().toggleStyle(.switch)
         }
+        .task(id: site.id) { vm.refreshProxyLiveness() }
+    }
+
+    private var httpsSubtitle: String {
+        guard site.httpsEnabled else { return "Serve this site over https://\(site.primaryHost)" }
+        return vm.proxyPort != nil
+            ? "Serving \(site.url.absoluteString)"
+            : "Enabled, but the HTTPS proxy is not running — \(site.url.absoluteString) won't load."
     }
 
     private var caTrustRow: some View {

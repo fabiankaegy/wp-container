@@ -235,6 +235,13 @@ wp-cli is a first-class citizen on all four surfaces (implementation: one-shot
   `https://my-blog.localhost` → `127.0.0.1:8881`. Containers stay untouched.
   The CLI gains `wp-container proxy serve` (daemonizable) so HTTPS works app-closed;
   app and CLI negotiate who owns the listener via a pidfile.
+- **Proxy liveness is a correctness concern, not an option** (user-reported bug:
+  after an app relaunch nothing listened on 443 → every HTTPS/custom-domain site
+  showed "Safari Can't Connect"). The "start proxy at launch" setting is opt-OUT
+  (registered default true), and regardless of it the app starts the proxy at
+  launch whenever any site has HTTPS/custom domain AND on every start of such a
+  site. The per-site Integrations card only claims "Serving https://…" when the
+  proxy is actually listening (else it flags it and offers "Start Proxy").
 - **WordPress correctness:** enabling HTTPS for a site sets home/siteurl to
   `https://<slug>.localhost` (wp-cli) and injects the standard
   `HTTP_X_FORWARDED_PROTO` snippet into wp-config.php (backed up first).
