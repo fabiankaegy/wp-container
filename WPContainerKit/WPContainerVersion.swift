@@ -7,7 +7,7 @@ import Foundation
 /// `verify-version` target checks that they match; `make release` runs it.
 public enum WPContainerVersion {
     /// Human-facing marketing version, e.g. `0.1.0`.
-    public static let marketing = "0.1.0"
+    public static let marketing = "0.1.1"
 
     /// Convenience alias used where a bare version string is expected.
     public static var current: String { marketing }
