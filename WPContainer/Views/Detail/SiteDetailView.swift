@@ -55,6 +55,7 @@ struct SiteDetailView: View {
             VStack(alignment: .leading, spacing: 18) {
                 IntegrationsCard(site: site)
                 DevelopmentCard(site: site)
+                ResourcesCard(site: site)
                 SoftwareCard(site: site)
                 DomainCard(site: site)
                 dangerZone

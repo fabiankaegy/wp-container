@@ -10,6 +10,7 @@ public enum LifecycleError: Error, Sendable, CustomStringConvertible {
     case httpNotReady(observed: String)
     case elasticsearchNotReady
     case elasticsearchIPUnavailable
+    case mailpitIPUnavailable
 
     public var description: String {
         switch self {
@@ -19,6 +20,7 @@ public enum LifecycleError: Error, Sendable, CustomStringConvertible {
             return "WordPress did not start responding over HTTP in time (\(observed))."
         case .elasticsearchNotReady: return "The Elasticsearch container did not become ready in time."
         case .elasticsearchIPUnavailable: return "Could not resolve the Elasticsearch container's IP address."
+        case .mailpitIPUnavailable: return "Could not resolve the Mailpit container's IP address."
         }
     }
 }
@@ -111,6 +113,7 @@ public actor SiteLifecycle {
             // same progress path as the base images.
             var images = [SiteRecipe.databaseImage, inst.imageTag, SiteRecipe.cliImage(for: inst)]
             if inst.elasticsearchEnabled { images.append(SiteRecipe.elasticsearchImage) }
+            if inst.mailpitEnabled { images.append(SiteRecipe.mailpitImage) }
             try await withThrowingTaskGroup(of: Void.self) { group in
                 for image in images {
                     group.addTask { [cli] in try await cli.run(SiteRecipe.pullImageArgs(image)) }
@@ -132,10 +135,12 @@ public actor SiteLifecycle {
             // WP needs only the IP VALUES at `container run` time.
             async let dbAddresses = launchDatabase(inst)
             async let esURL = launchElasticsearch(inst)
+            async let mailHost = launchMailpit(inst)
             async let xdebugImage = ensureXdebugImage(inst)
 
             let (dbHost, gateway) = try await dbAddresses
             let elasticsearchURL = try await esURL
+            let mailpitHost = try await mailHost
             let imageOverride = try await xdebugImage
             // Gateway (host address as seen from containers) comes from the
             // same inspect that resolved the DB IP — never hardcoded.
@@ -144,7 +149,8 @@ public actor SiteLifecycle {
 
             try await cli.run(SiteRecipe.runWordPressArgs(
                 inst, dbHost: dbHost, imageOverride: imageOverride,
-                xdebugClientHost: xdebugClientHost, elasticsearchURL: elasticsearchURL))
+                xdebugClientHost: xdebugClientHost, elasticsearchURL: elasticsearchURL,
+                mailpitHost: mailpitHost))
             timer.mark("wp-run")
             try await waitForHTTP(inst)
             timer.mark("http-ready")
@@ -193,6 +199,29 @@ public actor SiteLifecycle {
             delay = min(delay * 2, .milliseconds(500))
         }
         throw LifecycleError.elasticsearchIPUnavailable
+    }
+
+    /// Start the Mailpit container (when enabled) and return its IP as soon as
+    /// assigned, for `WPC_MAILPIT_HOST` injection into WordPress (issue #10). No
+    /// readiness gate (matches ES, issue #9): PHPMailer connects only when mail
+    /// is actually sent, long after boot; a mail container that fails surfaces
+    /// via logs, not by holding the whole site start hostage. The web UI is
+    /// published on the instance's assigned `mailpitPort`.
+    private func launchMailpit(_ inst: any RunnableInstance) async throws -> String? {
+        guard inst.mailpitEnabled, let webPort = inst.mailpitPort else { return nil }
+        try FileManager.default.createDirectory(at: inst.mailpitFolder, withIntermediateDirectories: true)
+        try await cli.run(SiteRecipe.runMailpitArgs(inst, webPort: webPort))
+        var delay = Duration.milliseconds(100)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(15))
+        while ContinuousClock.now < deadline {
+            try Task.checkCancellation()
+            if let ip = try await cli.ipAddress(of: inst.mailContainerName), !ip.isEmpty {
+                return ip
+            }
+            try await Task.sleep(for: delay)
+            delay = min(delay * 2, .milliseconds(500))
+        }
+        throw LifecycleError.mailpitIPUnavailable
     }
 
     /// Ensure the Xdebug derived image exists (when enabled). Cached ⇒ ~50ms.
@@ -360,7 +389,7 @@ public actor SiteLifecycle {
         // es sidecar is stopped best-effort whether or not the flag is
         // currently set (it may have been toggled off since start).
         await withTaskGroup(of: Void.self) { group in
-            for name in [inst.wpContainerName, inst.esContainerName, inst.dbContainerName] {
+            for name in [inst.wpContainerName, inst.esContainerName, inst.mailContainerName, inst.dbContainerName] {
                 group.addTask { [cli] in _ = try? await cli.run(SiteRecipe.stopArgs(name)) }
             }
         }
@@ -373,7 +402,7 @@ public actor SiteLifecycle {
     /// its own error, exactly as before issue #5).
     public func deleteContainers(_ inst: any RunnableInstance) async {
         await withTaskGroup(of: Void.self) { group in
-            for name in [inst.wpContainerName, inst.esContainerName, inst.dbContainerName] {
+            for name in [inst.wpContainerName, inst.esContainerName, inst.mailContainerName, inst.dbContainerName] {
                 group.addTask { [cli] in
                     _ = try? await cli.run(SiteRecipe.stopArgs(name))
                     _ = try? await cli.run(SiteRecipe.deleteArgs(name))

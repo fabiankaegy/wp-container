@@ -24,6 +24,20 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     public var xdebugEnabled: Bool
     /// Whether a per-site Elasticsearch sidecar container runs for this site (§2c).
     public var elasticsearchEnabled: Bool
+    /// Whether a per-site Mailpit email-catcher container runs for this site
+    /// (issue #10). When on, outgoing WordPress mail is routed to Mailpit's SMTP
+    /// and browsable in its web UI.
+    public var mailpitEnabled: Bool
+    /// Auto-allocated localhost port the Mailpit web UI is published on (issue
+    /// #10). Assigned on first enable and kept (stable mailbox URL, reserved
+    /// against other sites); nil until Mailpit has ever been enabled.
+    public var mailpitPort: Int?
+    /// Optional per-site CPU cap passed to `container run --cpus` (issue #11).
+    /// nil = the `container` default (4).
+    public var cpuLimit: Int?
+    /// Optional per-site memory cap in MB passed to `container run --memory`
+    /// (issue #11). nil = the `container` default (1024 MB).
+    public var memoryLimitMB: Int?
     /// Optional custom domain (e.g. `mysite.local`), routed via /etc/hosts + the
     /// host proxy (PLAN.md §2i). nil = the zero-config `<slug>.localhost` name.
     public var customDomain: String?
@@ -44,6 +58,8 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         case id, name, slug, path, port, imageTag, phpVersion, createdAt, provisioned, groupID, httpsEnabled
         case xdebugEnabled, elasticsearchEnabled, customDomain, networkType
         case agentToolsRoot, agentToolsDoc
+        case cpuLimit, memoryLimitMB
+        case mailpitEnabled, mailpitPort
     }
 
     public init(
@@ -60,6 +76,10 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         httpsEnabled: Bool = false,
         xdebugEnabled: Bool = false,
         elasticsearchEnabled: Bool = false,
+        mailpitEnabled: Bool = false,
+        mailpitPort: Int? = nil,
+        cpuLimit: Int? = nil,
+        memoryLimitMB: Int? = nil,
         customDomain: String? = nil,
         networkType: NetworkType = .none,
         agentToolsRoot: String? = nil,
@@ -79,6 +99,10 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.httpsEnabled = httpsEnabled
         self.xdebugEnabled = xdebugEnabled
         self.elasticsearchEnabled = elasticsearchEnabled
+        self.mailpitEnabled = mailpitEnabled
+        self.mailpitPort = mailpitPort
+        self.cpuLimit = cpuLimit
+        self.memoryLimitMB = memoryLimitMB
         self.customDomain = customDomain
         self.networkType = networkType
         self.agentToolsRoot = agentToolsRoot
@@ -103,6 +127,12 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         // The following are absent in stores written before §2c/§2i/§2j.
         self.xdebugEnabled = (try? c.decode(Bool.self, forKey: .xdebugEnabled)) ?? false
         self.elasticsearchEnabled = (try? c.decode(Bool.self, forKey: .elasticsearchEnabled)) ?? false
+        // Absent in stores written before issue #10.
+        self.mailpitEnabled = (try? c.decode(Bool.self, forKey: .mailpitEnabled)) ?? false
+        self.mailpitPort = try? c.decodeIfPresent(Int.self, forKey: .mailpitPort)
+        // Absent in stores written before issue #11.
+        self.cpuLimit = try? c.decodeIfPresent(Int.self, forKey: .cpuLimit)
+        self.memoryLimitMB = try? c.decodeIfPresent(Int.self, forKey: .memoryLimitMB)
         self.customDomain = try? c.decodeIfPresent(String.self, forKey: .customDomain)
         self.networkType = (try? c.decodeIfPresent(NetworkType.self, forKey: .networkType)) ?? .none
         self.agentToolsRoot = try? c.decodeIfPresent(String.self, forKey: .agentToolsRoot)

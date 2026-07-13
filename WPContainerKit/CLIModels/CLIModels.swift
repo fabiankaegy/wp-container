@@ -30,6 +30,8 @@ public struct SiteJSON: Codable, Sendable {
     public let provisioned: Bool
     /// Sidebar group name, or nil when ungrouped (PLAN.md §2g).
     public let group: String?
+    /// Mailbox (Mailpit web UI) URL when enabled, else nil (issue #10).
+    public let mailboxUrl: String?
 
     public init(from site: Site, group: String? = nil) {
         self.id = site.id.uuidString
@@ -42,6 +44,7 @@ public struct SiteJSON: Codable, Sendable {
         self.image = site.imageTag
         self.provisioned = site.provisioned
         self.group = group
+        self.mailboxUrl = site.mailboxURL?.absoluteString
     }
 }
 

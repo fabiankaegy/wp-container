@@ -28,6 +28,7 @@ enum MCPToolDispatch {
             case "worktree_delete":   return try await worktreeDelete(args, ctx: ctx)
             case "xdebug_toggle":     return try await addonToggle(args, ctx: ctx, slug: scopedSlug, kind: .xdebug)
             case "elasticsearch_toggle": return try await addonToggle(args, ctx: ctx, slug: scopedSlug, kind: .elasticsearch)
+            case "mailpit_toggle":    return try await mailpitToggle(args, ctx: ctx, slug: scopedSlug)
             default:
                 return MCPResult.failure("Unknown tool: \(params.name)")
             }
@@ -70,7 +71,10 @@ enum MCPToolDispatch {
         let host = try await dbHost(for: site, ctx: ctx)
         let wp = wpArgs(from: args)
         guard !wp.isEmpty else { throw ToolError("bad_args", "Provide `args` (array) or `command` (string).") }
-        let result = try await ctx.cli.runCapturing(SiteRecipe.wpProxyArgs(site, dbHost: host, wpArgs: wp))
+        // Inject the Mailpit host so wp_mail from wp-cli is caught too (issue #10).
+        var mailHost: String? = nil
+        if site.mailpitEnabled { mailHost = (try? await ctx.cli.ipAddress(of: site.mailContainerName)) ?? nil }
+        let result = try await ctx.cli.runCapturing(SiteRecipe.wpProxyArgs(site, dbHost: host, wpArgs: wp, mailpitHost: mailHost))
         return MCPResult.json([
             "stdout": result.stdout,
             "stderr": result.stderr,
@@ -167,6 +171,8 @@ enum MCPToolDispatch {
             "databasePath": site.databaseFolder.path,
             "image": site.imageTag,
             "provisioned": site.provisioned,
+            "mailpitEnabled": site.mailpitEnabled,
+            "mailboxUrl": site.mailboxURL?.absoluteString as Any? ?? NSNull(),
             "db": ["name": SiteRecipe.dbName, "user": SiteRecipe.dbUser, "password": SiteRecipe.dbPassword],
             "admin": ["user": SiteRecipe.adminUser, "password": SiteRecipe.adminPassword],
         ]
@@ -293,9 +299,7 @@ enum MCPToolDispatch {
         // Port allocation + env reservation happen in ONE locked store mutation
         // (#3) so a concurrent creator can't observe the same port as free.
         guard let (_, reserved, _) = try await ctx.persistence.allocatePort(reserve: { port, store in
-            let d = WorktreeEnvService.descriptor(parent: parent, repoRelPath: repo, branch: branch, port: port)
-            store.envs.append(d)
-            return d
+            WorktreeEnvService.reservedDescriptor(parent: parent, repoRelPath: repo, branch: branch, port: port, into: &store)
         }) else {
             throw ToolError("no_free_port", "No free port available.")
         }
@@ -374,6 +378,51 @@ enum MCPToolDispatch {
             "addon": kind == .xdebug ? "xdebug" : "elasticsearch",
             "enabled": enabled,
             "restarted": restarted,
+        ])
+    }
+
+    // MARK: - Mailpit toggle (issue #10)
+
+    private static func mailpitToggle(_ args: [String: Value], ctx: CLIContext, slug: String) async throws -> CallTool.Result {
+        guard let enabled = args["enabled"]?.boolValue else { throw ToolError("bad_args", "`enabled` is required.") }
+        let site = try await resolveSite(slug, ctx: ctx)
+        let updated: Site
+        if enabled {
+            try MailpitService.writeMuPlugin(wordpressFolder: site.wordpressFolder)
+            if site.mailpitPort == nil {
+                guard let (_, reservedSite, _) = try await ctx.persistence.allocatePort(reserve: { port, env -> Site? in
+                    guard let i = env.sites.firstIndex(where: { $0.id == site.id }) else { return nil }
+                    env.sites[i].mailpitPort = port
+                    env.sites[i].mailpitEnabled = true
+                    return env.sites[i]
+                }), let s = reservedSite else { throw ToolError("no_free_port", "No free port available for the mailbox.") }
+                updated = s
+            } else {
+                let env = try await ctx.persistence.mutate { e in
+                    if let i = e.sites.firstIndex(where: { $0.id == site.id }) { e.sites[i].mailpitEnabled = true }
+                }
+                updated = env.sites.first { $0.id == site.id } ?? site
+            }
+        } else {
+            try? MailpitService.removeMuPlugin(wordpressFolder: site.wordpressFolder)
+            let env = try await ctx.persistence.mutate { e in
+                if let i = e.sites.firstIndex(where: { $0.id == site.id }) { e.sites[i].mailpitEnabled = false }
+            }
+            updated = env.sites.first { $0.id == site.id } ?? site
+        }
+        let running = await ctx.runningContainerNames()
+        var restarted = false
+        if running.contains(site.wpContainerName) {
+            await ctx.lifecycle.stop(updated)
+            _ = try await ctx.lifecycle.startSite(updated)
+            await ctx.lifecycle.markRunning(updated.id)
+            restarted = true
+        }
+        return MCPResult.json([
+            "ok": true,
+            "enabled": enabled,
+            "restarted": restarted,
+            "mailboxUrl": updated.mailboxURL?.absoluteString as Any? ?? NSNull(),
         ])
     }
 

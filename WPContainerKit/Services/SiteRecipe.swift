@@ -15,6 +15,14 @@ public enum SiteRecipe {
     public static let defaultWordPressImage = "wordpress:latest"
     /// Elasticsearch image (validated in `scripts/validate-addons.sh`, §2c).
     public static let elasticsearchImage = "elasticsearch:8.15.0"
+    /// Mailpit email-catcher image (issue #10). Multi-arch, tiny (~40 MB). Runs
+    /// as root under Apple `container`, so its `/data` bind mount on virtiofs
+    /// works without the mariadb-style uid workaround (validated empirically).
+    public static let mailpitImage = "docker.io/axllent/mailpit"
+    /// Mailpit's in-container SMTP port; WordPress connects here (issue #10).
+    public static let mailpitSMTPPort = 1025
+    /// Mailpit's in-container web-UI/REST port, published to a localhost port.
+    public static let mailpitWebPort = 8025
 
     /// PHP-version image options offered in the Add Site sheet.
     public static let wordPressImageOptions: [(label: String, tag: String)] = [
@@ -38,6 +46,18 @@ public enum SiteRecipe {
     // MARK: Labels
     public static let siteLabelKey = "dev.wpcontainer.site"
     public static let envLabelKey = "dev.wpcontainer.env"
+
+    // MARK: Resource limits (issue #11)
+    /// `--cpus`/`--memory` flags for a long-lived container run, from the
+    /// instance's optional per-site caps. nil fields emit nothing, so the
+    /// `container` defaults (4 CPUs / 1 GB) apply. Memory uses the documented
+    /// `M` (MiByte) suffix. NEVER applied to one-shot wp-cli containers.
+    static func resourceArgs(for inst: any RunnableInstance) -> [String] {
+        var args: [String] = []
+        if let cpus = inst.cpuLimit, cpus > 0 { args += ["--cpus", "\(cpus)"] }
+        if let mb = inst.memoryLimitMB, mb > 0 { args += ["--memory", "\(mb)M"] }
+        return args
+    }
 
     /// `["--label", "dev.wpcontainer.site=<slug>", ("--label", "dev.wpcontainer.env=<envSlug>")]`
     static func labelArgs(for inst: any RunnableInstance) -> [String] {
@@ -75,6 +95,7 @@ public enum SiteRecipe {
         // otherwise the same virtiofs chown restriction kills its entrypoint
         // (holds for both fresh init and restarts).
         var args = ["run", "-d", "--rm", "--name", inst.dbContainerName, "--user", "999:999"]
+        args += resourceArgs(for: inst)
         args += labelArgs(for: inst)
         args += [
             "-v", "\(inst.databaseFolder.path):/var/lib/mysql",
@@ -101,11 +122,17 @@ public enum SiteRecipe {
     ///   so Xdebug's `client_host` ini substitution resolves to the host (§2c).
     /// - `elasticsearchURL`: when non-nil, pass `ELASTICSEARCH_URL` + `EP_HOST`
     ///   for ElasticPress (§2c).
+    /// - `mailpitHost`: when non-nil, inject `WPC_MAILPIT_HOST=<mail-ip>` so the
+    ///   `wpc-mailpit` mu-plugin routes PHPMailer to Mailpit's SMTP (issue #10).
+    ///   The IP is re-inspected each start (container IPs churn); env-var
+    ///   indirection keeps the mu-plugin file static.
     public static func runWordPressArgs(_ inst: any RunnableInstance, dbHost: String,
                                         imageOverride: String? = nil,
                                         xdebugClientHost: String? = nil,
-                                        elasticsearchURL: String? = nil) -> [String] {
+                                        elasticsearchURL: String? = nil,
+                                        mailpitHost: String? = nil) -> [String] {
         var args = ["run", "-d", "--rm", "--name", inst.wpContainerName]
+        args += resourceArgs(for: inst)
         args += labelArgs(for: inst)
         args += [
             "-p", "127.0.0.1:\(inst.port):80",
@@ -128,6 +155,9 @@ public enum SiteRecipe {
             args += ["-e", "ELASTICSEARCH_URL=\(elasticsearchURL)",
                      "-e", "EP_HOST=\(elasticsearchURL)"]
         }
+        if let mailpitHost {
+            args += ["-e", "WPC_MAILPIT_HOST=\(mailpitHost)"]
+        }
         args.append(imageOverride ?? inst.imageTag)
         return args
     }
@@ -138,6 +168,7 @@ public enum SiteRecipe {
     /// dir, single-node with security off and a modest heap.
     public static func runElasticsearchArgs(_ inst: any RunnableInstance) -> [String] {
         var args = ["run", "-d", "--rm", "--name", inst.esContainerName]
+        args += resourceArgs(for: inst)
         args += labelArgs(for: inst)
         args += [
             "-v", "\(inst.elasticsearchFolder.path):/usr/share/elasticsearch/data",
@@ -152,6 +183,25 @@ public enum SiteRecipe {
     /// Probe ES cluster health (green/yellow ⇒ ready) from a one-shot curl.
     public static func elasticsearchHealthURL(esHost: String) -> String {
         "http://\(esHost):9200/_cluster/health"
+    }
+
+    // MARK: - Mailpit email catcher (issue #10, validated)
+    /// `container run` args for a site's Mailpit container. Runs as root (Apple
+    /// `container` default), so the persistent `/data` bind mount on virtiofs
+    /// works without a uid override. SMTP stays on the container network (port
+    /// 1025, reached by WordPress via the injected IP); only the web UI (8025)
+    /// is published to `webPort` on localhost.
+    public static func runMailpitArgs(_ inst: any RunnableInstance, webPort: Int) -> [String] {
+        var args = ["run", "-d", "--rm", "--name", inst.mailContainerName]
+        args += resourceArgs(for: inst)
+        args += labelArgs(for: inst)
+        args += [
+            "-p", "127.0.0.1:\(webPort):\(mailpitWebPort)",
+            "-v", "\(inst.mailpitFolder.path):/data",
+            "-e", "MP_DATABASE=/data/mailpit.db",
+            mailpitImage,
+        ]
+        return args
     }
 
     /// The nested shadowing mount for a worktree env's repo. Isolated here so
@@ -280,8 +330,16 @@ public enum SiteRecipe {
     }
 
     /// Arbitrary proxied one-shot wp-cli invocation (`wp-container wp <site> -- …`).
-    public static func wpProxyArgs(_ inst: any RunnableInstance, dbHost: String, wpArgs: [String]) -> [String] {
+    ///
+    /// - `mailpitHost`: when non-nil, inject `WPC_MAILPIT_HOST` so `wp_mail`
+    ///   invoked from wp-cli (e.g. `wp eval 'wp_mail(...)'`, or an agent
+    ///   verifying an email) is caught by Mailpit too — the wp-cli one-shot
+    ///   container otherwise lacks the env the long-lived wp container gets
+    ///   (issue #10).
+    public static func wpProxyArgs(_ inst: any RunnableInstance, dbHost: String, wpArgs: [String],
+                                   mailpitHost: String? = nil) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
+        if let mailpitHost { args += ["-e", "WPC_MAILPIT_HOST=\(mailpitHost)"] }
         args += [cliImage(for: inst), "wp"]
         args += wpArgs
         return args

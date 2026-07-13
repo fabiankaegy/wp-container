@@ -84,5 +84,8 @@ enum MCPTools {
         Tool(name: "elasticsearch_toggle",
              description: "Enable or disable the per-site Elasticsearch sidecar (single-node, security off). Wires ELASTICSEARCH_URL/EP_HOST into WordPress; restarts the site to apply when running.",
              inputSchema: obj(["enabled": bool("Turn Elasticsearch on (true) or off (false).")], required: ["enabled"])),
+        Tool(name: "mailpit_toggle",
+             description: "Enable or disable the per-site Mailpit email catcher. When on, all outgoing WordPress mail is captured by Mailpit (SMTP) instead of being sent; browse or read it via its web UI + REST API (GET <mailboxUrl>/api/v1/messages). Writes/removes the wpc-mailpit mu-plugin and restarts the site to apply when running. The mailbox URL is returned here and in get_site_info.",
+             inputSchema: obj(["enabled": bool("Turn Mailpit on (true) or off (false).")], required: ["enabled"])),
     ]
 }

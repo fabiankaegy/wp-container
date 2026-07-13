@@ -43,6 +43,19 @@ struct OverviewCard: View {
                     }
                 }
 
+                if site.mailpitEnabled, let mailbox = site.mailboxURL {
+                    InfoRow(label: "Mailbox") {
+                        HStack(spacing: 6) {
+                            Button(mailbox.absoluteString) {
+                                SystemActions.openInBrowser(mailbox)
+                            }
+                            .buttonStyle(.link)
+                            .disabled(!site.status.isRunning)
+                            CopyButton(value: mailbox.absoluteString, help: "Copy mailbox URL")
+                        }
+                    }
+                }
+
                 InfoRow(label: "WordPress") {
                     Text(site.imageTag).textSelection(.enabled)
                 }

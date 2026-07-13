@@ -25,6 +25,14 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
     /// own Xdebug image / Elasticsearch sidecar when the parent has them enabled.
     public var xdebugEnabled: Bool
     public var elasticsearchEnabled: Bool
+    /// Inherited from the parent site (issue #10): the env runs its own Mailpit
+    /// container when the parent has it enabled, catching its mail separately.
+    public var mailpitEnabled: Bool
+    /// The env's own auto-allocated Mailpit web-UI port (issue #10).
+    public var mailpitPort: Int?
+    /// Inherited per-site resource caps (issue #11); nil = `container` defaults.
+    public var cpuLimit: Int?
+    public var memoryLimitMB: Int?
 
     /// Runtime-derived; NOT persisted.
     public var status: SiteStatus = .stopped
@@ -32,7 +40,8 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
     private enum CodingKeys: String, CodingKey {
         case id, parentSiteID, parentSlug, envSlug, repoRelPath, branch,
              worktreePath, envPath, port, imageTag, createdAt, provisioned,
-             xdebugEnabled, elasticsearchEnabled
+             xdebugEnabled, elasticsearchEnabled, cpuLimit, memoryLimitMB,
+             mailpitEnabled, mailpitPort
     }
 
     public init(
@@ -50,6 +59,10 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         provisioned: Bool = false,
         xdebugEnabled: Bool = false,
         elasticsearchEnabled: Bool = false,
+        mailpitEnabled: Bool = false,
+        mailpitPort: Int? = nil,
+        cpuLimit: Int? = nil,
+        memoryLimitMB: Int? = nil,
         status: SiteStatus = .stopped
     ) {
         self.id = id
@@ -66,6 +79,10 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         self.provisioned = provisioned
         self.xdebugEnabled = xdebugEnabled
         self.elasticsearchEnabled = elasticsearchEnabled
+        self.mailpitEnabled = mailpitEnabled
+        self.mailpitPort = mailpitPort
+        self.cpuLimit = cpuLimit
+        self.memoryLimitMB = memoryLimitMB
         self.status = status
     }
 
@@ -86,6 +103,12 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         // Absent in envs written before §2c.
         self.xdebugEnabled = (try? c.decode(Bool.self, forKey: .xdebugEnabled)) ?? false
         self.elasticsearchEnabled = (try? c.decode(Bool.self, forKey: .elasticsearchEnabled)) ?? false
+        // Absent in envs written before issue #10.
+        self.mailpitEnabled = (try? c.decode(Bool.self, forKey: .mailpitEnabled)) ?? false
+        self.mailpitPort = try? c.decodeIfPresent(Int.self, forKey: .mailpitPort)
+        // Absent in envs written before issue #11.
+        self.cpuLimit = try? c.decodeIfPresent(Int.self, forKey: .cpuLimit)
+        self.memoryLimitMB = try? c.decodeIfPresent(Int.self, forKey: .memoryLimitMB)
     }
 
     public var wordpressFolder: URL { envPath.appendingPathComponent("wordpress", isDirectory: true) }

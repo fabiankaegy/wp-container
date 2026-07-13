@@ -69,7 +69,12 @@ public actor StorePersistence {
         try ensureDirectory()
         return try withLock {
             var envelope = (try? readUnlocked()) ?? StoreEnvelope()
-            let taken = Set(envelope.sites.map(\.port)).union(envelope.envs.map(\.port))
+            // Include Mailpit web ports (issue #10) so a mailbox port is never
+            // handed out again as a site/env port or another mailbox port.
+            let taken = Set(envelope.sites.map(\.port))
+                .union(envelope.envs.map(\.port))
+                .union(envelope.sites.compactMap(\.mailpitPort))
+                .union(envelope.envs.compactMap(\.mailpitPort))
             guard let port = PortAllocator.firstFreePort(from: base, excluding: taken) else { return nil }
             let value = reserve(port, &envelope)
             envelope.version = StoreEnvelope.currentVersion

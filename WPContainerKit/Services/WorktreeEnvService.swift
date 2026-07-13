@@ -88,8 +88,30 @@ public actor WorktreeEnvService {
             imageTag: parent.imageTag,
             provisioned: false,
             xdebugEnabled: parent.xdebugEnabled,
-            elasticsearchEnabled: parent.elasticsearchEnabled
+            elasticsearchEnabled: parent.elasticsearchEnabled,
+            mailpitEnabled: parent.mailpitEnabled,
+            cpuLimit: parent.cpuLimit,
+            memoryLimitMB: parent.memoryLimitMB
         )
+    }
+
+    /// Build the env descriptor AND append it to `envelope`, reserving a second
+    /// free port for the env's own Mailpit web UI when the parent has Mailpit
+    /// enabled (issue #10). Call inside a locked `allocatePort` reserve closure
+    /// (which already reserved the env's main `port`): both ports land in the
+    /// same critical section, so a concurrent creator can't reuse either.
+    public static func reservedDescriptor(parent: Site, repoRelPath: String, branch: String,
+                                          port: Int, into envelope: inout StoreEnvelope) -> WorktreeEnv {
+        var env = descriptor(parent: parent, repoRelPath: repoRelPath, branch: branch, port: port)
+        if parent.mailpitEnabled {
+            let taken = Set(envelope.sites.map(\.port)).union(envelope.envs.map(\.port))
+                .union(envelope.sites.compactMap(\.mailpitPort))
+                .union(envelope.envs.compactMap(\.mailpitPort))
+                .union([port])
+            env.mailpitPort = PortAllocator.firstFreePort(from: port + 1, excluding: taken)
+        }
+        envelope.envs.append(env)
+        return env
     }
 
     /// Full creation flow (steps 1–6). Returns the fully provisioned env.
