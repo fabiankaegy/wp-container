@@ -83,11 +83,11 @@ XCB_TEAM=()
 
 log "Building WPContainer.app (Release, Hardened Runtime)"
 xcodebuild -project "$PROJECT" -scheme WPContainer -configuration Release \
-  -derivedDataPath "$DERIVED" "${XCB_TEAM[@]}" build >/dev/null
+  -derivedDataPath "$DERIVED" ${XCB_TEAM[@]+"${XCB_TEAM[@]}"} build >/dev/null
 
 log "Building wp-container CLI (Release)"
 xcodebuild -project "$PROJECT" -scheme wp-container -configuration Release \
-  -derivedDataPath "$DERIVED" "${XCB_TEAM[@]}" build >/dev/null
+  -derivedDataPath "$DERIVED" ${XCB_TEAM[@]+"${XCB_TEAM[@]}"} build >/dev/null
 
 APP_SRC="$PRODUCTS/WPContainer.app"
 CLI_SRC="$PRODUCTS/wp-container"
@@ -232,4 +232,5 @@ IDLINE="$(codesign -d --verbose=2 "$APP" 2>&1 | sed -n 's/^Authority=/  authorit
 FLAGS="$(codesign -d --verbose=2 "$APP" 2>&1 | sed -n 's/^CodeDirectory .*\(flags=[^ ]*\).*/  \1/p')"
 echo "Signed with: ${SIGN_IDENTITY}"
 [ -n "$FLAGS" ] && echo "$FLAGS"
-[ -n "$IDLINE" ] && echo "$IDLINE"
+if [ -n "$IDLINE" ]; then echo "$IDLINE"; else echo "  (ad-hoc: no certificate authority chain)"; fi
+exit 0
