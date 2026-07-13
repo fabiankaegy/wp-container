@@ -13,6 +13,7 @@ enum AppSettings {
     static let defaultWordPressVersionKey = "defaultWordPressVersion"
     static let defaultPHPVersionKey = "defaultPHPVersion"
     static let autoStartProxyKey = "autoStartProxy"
+    static let notificationsEnabledKey = "notificationsEnabled"
 
     // Defaults.
     static var showDockIcon: Bool {
@@ -30,11 +31,19 @@ enum AppSettings {
         UserDefaults.standard.bool(forKey: autoStartProxyKey)
     }
 
+    /// Master switch for native notifications (PLAN.md Task 1). Defaults TRUE via
+    /// `registerDefaults()`; the actual system authorization is a separate,
+    /// lazily-requested gate handled by `NotificationService`.
+    static var notificationsEnabled: Bool {
+        UserDefaults.standard.bool(forKey: notificationsEnabledKey)
+    }
+
     /// Register defaults for keys whose ABSENT value must not read as false.
     /// Call once, as early as possible.
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [
             autoStartProxyKey: true,
+            notificationsEnabledKey: true,
         ])
     }
 
