@@ -26,7 +26,9 @@ struct DomainCard: View {
                         .font(.caption2).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Text("Setting a domain edits /etc/hosts (one approval — Touch ID supported) and re-issues the local certificate.")
+                Text(HostsHelperClient.isEnabled
+                     ? "Setting a domain edits /etc/hosts (confirm with Touch ID) and re-issues the local certificate."
+                     : "Setting a domain edits /etc/hosts (one admin approval) and re-issues the local certificate. Enable the Touch ID helper in Settings to skip the password.")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }

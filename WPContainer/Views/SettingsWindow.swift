@@ -126,6 +126,8 @@ private struct GeneralSettingsPane: View {
                     }
                 }
             }
+
+            HostsHelperSettingsSection()
         }
         .task { authStatus = await NotificationService.shared.authorizationStatus() }
     }
@@ -182,6 +184,101 @@ private struct GeneralSettingsPane: View {
             loginError = "Could not \(enabled ? "enable" : "disable") launch at login: \(error.localizedDescription)"
             // Reflect the true state back into the toggle.
             launchAtLogin = SMAppService.mainApp.status == .enabled
+        }
+    }
+}
+
+// MARK: - Custom domains (Touch ID hosts helper, §2f-bis)
+
+/// Registration UI for the privileged `wpc-hosts-helper`. When enabled, custom
+/// domain changes rewrite `/etc/hosts` behind the Touch ID-capable system
+/// authorization dialog instead of the osascript password prompt. Registration
+/// needs a one-time user approval in System Settings > Login Items — reaching
+/// `.requiresApproval` is expected and the button deep-links there.
+private struct HostsHelperSettingsSection: View {
+    @State private var status = HostsHelperClient.status
+    @State private var error: String?
+
+    var body: some View {
+        SectionCard(title: "Custom Domains", systemImage: "touchid") {
+            VStack(alignment: .leading, spacing: 10) {
+                if HostsHelperClient.isSupportedBuild {
+                    content
+                } else {
+                    Label("The Touch ID helper is available in the signed release build. This build uses the one-time admin-password prompt for /etc/hosts.",
+                          systemImage: "info.circle")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let error {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .onAppear { status = HostsHelperClient.status }
+    }
+
+    @ViewBuilder private var content: some View {
+        switch status {
+        case .enabled:
+            HStack(alignment: .top, spacing: 8) {
+                Label("Enabled — custom domain changes use Touch ID (no password).",
+                      systemImage: "checkmark.seal.fill")
+                    .font(.callout).foregroundStyle(.green)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Button("Disable") { setEnabled(false) }
+                    .controlSize(.small)
+            }
+        case .requiresApproval:
+            statusRow(
+                text: "Almost done — approve “WP Container” in System Settings › General › Login Items › Allow in the Background, then reopen this window.",
+                systemImage: "exclamationmark.circle.fill", tint: .orange,
+                button: "Open Login Items…") { openLoginItems() }
+        default:
+            statusRow(
+                text: "Enable the privileged helper to update /etc/hosts with Touch ID. One-time setup — you'll approve it once in System Settings.",
+                systemImage: "touchid", tint: .secondary,
+                button: "Enable Helper…") { setEnabled(true) }
+        }
+    }
+
+    private func statusRow(text: String, systemImage: String, tint: Color,
+                           button: String,
+                           action: @escaping () -> Void) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Label(text, systemImage: systemImage)
+                .font(.callout).foregroundStyle(tint)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            Button(button, action: action)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+        }
+    }
+
+    private func setEnabled(_ enabled: Bool) {
+        error = nil
+        do {
+            if enabled {
+                try HostsHelperClient.register()
+            } else {
+                try HostsHelperClient.unregister()
+            }
+        } catch {
+            self.error = "Could not \(enabled ? "enable" : "disable") the helper: \(error.localizedDescription)"
+        }
+        status = HostsHelperClient.status
+        // Registration typically lands in .requiresApproval — send the user
+        // straight to the approval pane.
+        if enabled, status == .requiresApproval { openLoginItems() }
+    }
+
+    private func openLoginItems() {
+        if let url = HostsHelperClient.loginItemsSettingsURL {
+            NSWorkspace.shared.open(url)
         }
     }
 }
