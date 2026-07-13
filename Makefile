@@ -5,7 +5,7 @@ DERIVED  := build
 PRODUCTS := $(DERIVED)/Build/Products/$(CONFIG)
 PREFIX   := /usr/local/bin
 
-.PHONY: all generate build build-app build-cli install-cli clean
+.PHONY: all generate build build-app build-cli install-cli verify-version release clean
 
 all: build
 
@@ -34,5 +34,24 @@ install-cli: build-cli
 	@echo "Installed wp-container (+ wpc symlink) to $(PREFIX)"
 	@echo "Global wp router staged; run 'wp-container setup wp' to enable plain 'wp' inside sites."
 
+# Confirms the marketing version is identical in the Swift source of truth and
+# project.yml. Run by `make release`; handy on its own before tagging.
+verify-version:
+	@src=$$(sed -n 's/.*marketing = "\([0-9][^"]*\)".*/\1/p' WPContainerKit/WPContainerVersion.swift | head -1); \
+	yml=$$(sed -n 's/.*MARKETING_VERSION: *"\([0-9][^"]*\)".*/\1/p' project.yml | head -1); \
+	if [ "$$src" != "$$yml" ]; then \
+	  echo "version mismatch: WPContainerVersion.swift=$$src project.yml=$$yml"; exit 1; \
+	fi; \
+	echo "version OK: $$src"
+
+# Full signed/hardened/optionally-notarized release into dist/.
+# Usage:
+#   make release SIGN_IDENTITY="Developer ID Application: Name (TEAMID)" \
+#                TEAM_ID=TEAMID NOTARY_PROFILE=wpc-notary
+# With no SIGN_IDENTITY it validates the pipeline end-to-end with an ad-hoc
+# signature (not distributable). See docs/RELEASING.md.
+release: verify-version
+	SIGN_IDENTITY="$(SIGN_IDENTITY)" TEAM_ID="$(TEAM_ID)" NOTARY_PROFILE="$(NOTARY_PROFILE)" VERSION="$(VERSION)" ./scripts/release.sh
+
 clean:
-	rm -rf $(DERIVED) $(PROJECT)
+	rm -rf $(DERIVED) $(PROJECT) dist

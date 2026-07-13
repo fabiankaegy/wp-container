@@ -20,15 +20,31 @@ settings:
     # Swift 6 language mode + full strict concurrency checking.
     SWIFT_VERSION: "6.0"
     SWIFT_STRICT_CONCURRENCY: complete
-    # Ad-hoc signing for local development; App Sandbox intentionally OFF
-    # (no .entitlements file is attached, so the app is unsandboxed and may
-    # shell out to /usr/local/bin/container and manage arbitrary site folders).
-    CODE_SIGN_IDENTITY: "-"
+    # App Sandbox intentionally OFF (no .entitlements file is attached, so the
+    # app is unsandboxed and may shell out to /usr/local/bin/container and manage
+    # arbitrary site folders). Signing identity/team are per-config below and are
+    # overridden at release time via xcodebuild — never committed.
     CODE_SIGN_STYLE: Manual
     CODE_SIGNING_ALLOWED: "YES"
     CODE_SIGNING_REQUIRED: "NO"
-    ENABLE_HARDENED_RUNTIME: "NO"
-    DEVELOPMENT_TEAM: ""
+  configs:
+    # Debug is unchanged from day one: ad-hoc identity, no hardened runtime, zero
+    # signing friction for local development and `make build`.
+    Debug:
+      CODE_SIGN_IDENTITY: "-"
+      ENABLE_HARDENED_RUNTIME: "NO"
+      DEVELOPMENT_TEAM: ""
+    # Release turns Hardened Runtime ON (required for Developer ID + notarization).
+    # No com.apple.security.cs.* exceptions: spawning `container` via Process and
+    # binding a Network.framework listener need none (verified empirically — see
+    # docs/RELEASING.md). CODE_SIGN_IDENTITY defaults to ad-hoc "-" so a Release
+    # build succeeds with no cert; scripts/release.sh overrides it (and
+    # DEVELOPMENT_TEAM) with the real Developer ID Application identity via
+    # xcodebuild when one is available.
+    Release:
+      CODE_SIGN_IDENTITY: "-"
+      ENABLE_HARDENED_RUNTIME: "YES"
+      DEVELOPMENT_TEAM: ""
 
 targets:
   # Shared core: all models + services. Static library so the CLI binary is
@@ -44,6 +60,8 @@ targets:
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
         PRODUCT_NAME: WPContainerKit
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
         SKIP_INSTALL: "YES"
 
   # SwiftUI application.
@@ -89,6 +107,8 @@ targets:
       base:
         PRODUCT_NAME: wp-container
         PRODUCT_BUNDLE_IDENTIFIER: com.fabiankaegy.wpcontainer.cli
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
 
