@@ -356,6 +356,7 @@ struct SidebarSiteRow: View {
             .disabled(!site.status.isRunning)
         Button("Reveal in Finder", systemImage: "folder") { SystemActions.revealInFinder(site.path) }
         Button("Open in Terminal", systemImage: "terminal") { SystemActions.openTerminal(at: site.path, pathPrepend: site.path) }
+        OpenInSubmenu(folder: ExternalEditors.target.url(for: site))
         Button("Copy URL", systemImage: "link") { SystemActions.copyToClipboard(site.url.absoluteString) }
 
         Divider()
@@ -474,6 +475,7 @@ struct SidebarEnvRow: View {
                 .disabled(env.status.isTransitional)
         }
         Button("Reveal in Finder", systemImage: "folder") { SystemActions.revealInFinder(env.envPath) }
+        OpenInSubmenu(folder: env.worktreePath)
 
         Divider()
 

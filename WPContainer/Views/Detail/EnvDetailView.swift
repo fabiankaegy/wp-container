@@ -114,6 +114,8 @@ struct EnvDetailView: View {
                 .disabled(!env.status.isRunning)
             actionButton("Copy URL", "link") { SystemActions.copyToClipboard(env.localURL.absoluteString) }
             actionButton("Finder", "folder") { SystemActions.revealInFinder(env.envPath) }
+            // Envs open the worktree checkout — that's the branch you edit.
+            OpenInButton(folder: env.worktreePath)
             Spacer()
         }
     }
