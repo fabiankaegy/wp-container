@@ -246,9 +246,9 @@ struct StartCommand: AsyncParsableCommand {
         abstract: "Start a site (and all of its worktree envs) or a single env.",
         discussion: """
         Lifecycle is coupled (PLAN.md §2b): starting a SITE also starts every \
-        worktree environment created from it — the site first, then each env; a \
-        failure in one does not abort the others (env failures print as \
-        warnings). Starting an ENV slug starts just that environment.
+        worktree environment created from it — concurrently (they share nothing \
+        at runtime); a failure in one does not abort the others (env failures \
+        print as warnings). Starting an ENV slug starts just that environment.
         """
     )
     @Argument(help: "Site slug or env slug.") var target: String
@@ -277,8 +277,9 @@ struct StartCommand: AsyncParsableCommand {
                     throw CLIErrorJSON("start_failed", detail: parentError)
                 }
             case .env(let env):
-                _ = try await ctx.lifecycle.startContainers(env)
-                await ctx.lifecycle.markRunning(env.id)
+                // Guarded start (issue #5): dedupes against a concurrent
+                // action for the same env in THIS process.
+                _ = try await ctx.lifecycle.startInstance(env)
             }
             if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(target) started"))) }
             else { emitLine("Started \(target).") }

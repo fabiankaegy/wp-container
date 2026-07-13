@@ -723,7 +723,9 @@ public final class AppViewModel {
 
     public func startEnv(_ env: WorktreeEnv) {
         Task {
-            do { _ = try await lifecycle.startContainers(env); await lifecycle.markRunning(env.id) }
+            // Guarded start (issue #5): a double-click / dot-spam start while
+            // one is already in flight is silently ignored by the lifecycle.
+            do { _ = try await lifecycle.startInstance(env) }
             catch { lastError = SiteLifecycleErrorText(error) }
         }
     }
