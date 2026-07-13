@@ -144,6 +144,10 @@ public actor ContainerCLI {
                     continuation.yield(String(decoding: buffer, as: UTF8.self))
                 }
                 process.waitUntilExit()
+                // The child exited naturally — clear the recorded pid BEFORE
+                // finishing so the stream's onTermination handler can't SIGTERM
+                // a recycled pid belonging to an unrelated process (#8).
+                proc.clearPID()
                 _ = pipe
                 continuation.finish()
             }
@@ -157,6 +161,9 @@ final class ProcBox: @unchecked Sendable {
     private let lock = NSLock()
     private var pid: pid_t = 0
     func setPID(_ p: pid_t) { lock.lock(); pid = p; lock.unlock() }
+    /// Forget the pid once the child has exited naturally, so a later
+    /// `terminate()` (stream teardown) can never signal a recycled pid (#8).
+    func clearPID() { lock.lock(); pid = 0; lock.unlock() }
     func terminate() {
         lock.lock(); let p = pid; lock.unlock()
         if p > 0 { kill(p, SIGTERM) }
