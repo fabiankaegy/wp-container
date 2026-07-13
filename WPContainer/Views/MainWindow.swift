@@ -64,6 +64,11 @@ struct MainWindow: View {
                 Button("Add Site") { vm.presentingAddSite = true }
                     .buttonStyle(.borderedProminent)
             }
+            // Fill the panel and center: the enclosing `panel` frame pins its
+            // content to `.topLeading` (correct for the scrolling site detail),
+            // which otherwise strands this placeholder at the very top. Expanding
+            // to fill makes the placeholder own the whole panel and center within.
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
