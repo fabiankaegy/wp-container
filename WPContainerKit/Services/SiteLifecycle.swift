@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 public enum LifecycleError: Error, Sendable, CustomStringConvertible {
     case databaseNotReady
@@ -25,6 +26,15 @@ public enum LifecycleError: Error, Sendable, CustomStringConvertible {
 /// Orchestrates the container lifecycle for any `RunnableInstance` (a site or a
 /// worktree env) through ONE shared start/stop code path, and publishes status
 /// transitions on an `AsyncStream` so view models / callers can observe them.
+///
+/// Start pipeline (issue #9): the db and es containers (and the Xdebug derived-
+/// image check) launch CONCURRENTLY, and the wp container is gated only on the
+/// db/es IPs being assigned — never on db/es READINESS. WordPress's PHP retries
+/// the DB connection on every request, so apache serving before mariadb
+/// finishes InnoDB init is harmless; the only paths that genuinely need the DB
+/// up are one-shot wp-cli invocations (first-run provisioning, multisite
+/// install, worktree URL fixes/DB import), which gate explicitly via
+/// `waitForDatabaseReady`.
 public actor SiteLifecycle {
     public struct StatusEvent: Sendable {
         public let instanceID: UUID
@@ -54,24 +64,33 @@ public actor SiteLifecycle {
 
     // MARK: - Shared start path
 
-    /// Ensure folders, pull images, start DB, wait for readiness, resolve the DB
-    /// IP, start WP, and poll HTTP. Returns the resolved DB host IP. Emits
-    /// `.starting` up front and `.error` on failure (then rethrows). Does NOT
-    /// emit `.running` — callers do that after any post-start provisioning.
+    /// Ensure folders, pull images, launch db (+ es / xdebug prep) in parallel,
+    /// start WP as soon as the IPs are assigned, and poll HTTP. Returns the
+    /// resolved DB host IP. Emits `.starting` up front and `.error` on failure
+    /// (then rethrows). Does NOT emit `.running` — callers do that after any
+    /// post-start provisioning.
     @discardableResult
     public func startContainers(_ inst: any RunnableInstance) async throws -> String {
         let timer = PhaseTimer(inst.containerSlug)
         emit(inst.instanceID, .starting)
         do {
             try SiteFolders.ensure(for: inst)
-            try await cli.run(SiteRecipe.pullImageArgs(SiteRecipe.databaseImage))
-            try await cli.run(SiteRecipe.pullImageArgs(inst.imageTag))
-            // Every one-shot wp-cli surface (first-run provisioning, URL fixes,
-            // live DB clone, agent tools) runs on a PHP-matched cli image. Pull
-            // it here so it rides the SAME progress path as the base images —
-            // the first wp-cli use on a php8.4 site pulls wordpress:cli-php8.4.
-            try await cli.run(SiteRecipe.pullImageArgs(SiteRecipe.cliImage(for: inst)))
+
+            // Pull every needed image CONCURRENTLY (issue #9). A pull of an
+            // already-present tag is a ~1s registry revalidation; they used to
+            // run back-to-back. The wp-cli image rides along here so the first
+            // wp-cli use on a php8.4 site pulls wordpress:cli-php8.4 on the
+            // same progress path as the base images.
+            var images = [SiteRecipe.databaseImage, inst.imageTag, SiteRecipe.cliImage(for: inst)]
+            if inst.elasticsearchEnabled { images.append(SiteRecipe.elasticsearchImage) }
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for image in images {
+                    group.addTask { [cli] in try await cli.run(SiteRecipe.pullImageArgs(image)) }
+                }
+                try await group.waitForAll()
+            }
             timer.mark("images")
+
             // First-ever start: pre-seed WordPress core into the mount (see
             // SiteRecipe.seedWordPressArgs). Gate on the absence of index.php.
             let indexPHP = inst.wordpressFolder.appendingPathComponent("index.php")
@@ -79,31 +98,21 @@ public actor SiteLifecycle {
                 try await cli.run(SiteRecipe.seedWordPressArgs(inst))
                 timer.mark("seed")
             }
-            try await cli.run(SiteRecipe.runDatabaseArgs(inst))
-            timer.mark("db-run")
-            try await waitForDatabase(inst)
-            timer.mark("db-ready")
-            // The DB IP changes on every restart — re-inspect each start, never cache.
-            let dbHost = try await resolveDatabaseHost(inst)
-            timer.mark("db-ip")
 
-            // Elasticsearch sidecar (§2c): db → es → wp start order.
-            var elasticsearchURL: String? = nil
-            if inst.elasticsearchEnabled {
-                elasticsearchURL = try await startElasticsearch(inst)
-                timer.mark("es-green")
-            }
+            // Launch the wp container's dependencies CONCURRENTLY (issue #9):
+            // db run + IP, es run + IP (no green gate), Xdebug derived image.
+            // WP needs only the IP VALUES at `container run` time.
+            async let dbAddresses = launchDatabase(inst)
+            async let esURL = launchElasticsearch(inst)
+            async let xdebugImage = ensureXdebugImage(inst)
 
-            // Xdebug (§2c): swap in the derived image + pass the host gateway.
-            var imageOverride: String? = nil
-            var xdebugClientHost: String? = nil
-            if inst.xdebugEnabled {
-                imageOverride = try await xdebug.ensureImage(forBaseTag: inst.imageTag)
-                // Gateway is the same across containers on the network; read it
-                // fresh from the already-running DB container (never hardcode).
-                xdebugClientHost = try await cli.gatewayAddress(of: inst.dbContainerName)
-                timer.mark("xdebug")
-            }
+            let (dbHost, gateway) = try await dbAddresses
+            let elasticsearchURL = try await esURL
+            let imageOverride = try await xdebugImage
+            // Gateway (host address as seen from containers) comes from the
+            // same inspect that resolved the DB IP — never hardcoded.
+            let xdebugClientHost = inst.xdebugEnabled ? gateway : nil
+            timer.mark("deps")
 
             try await cli.run(SiteRecipe.runWordPressArgs(
                 inst, dbHost: dbHost, imageOverride: imageOverride,
@@ -118,14 +127,50 @@ public actor SiteLifecycle {
         }
     }
 
-    /// Start the Elasticsearch sidecar, wait for it to go green/yellow, and
-    /// return the `http://<es-ip>:9200` URL WordPress should point at (§2c).
-    private func startElasticsearch(_ inst: any RunnableInstance) async throws -> String {
+    /// Run the DB container and resolve its (IP, gateway) as soon as assigned.
+    /// The IP changes on every restart — re-inspect each start, never cache.
+    private func launchDatabase(_ inst: any RunnableInstance) async throws -> (ip: String, gateway: String?) {
+        try await cli.run(SiteRecipe.runDatabaseArgs(inst))
+        var delay = Duration.milliseconds(100)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(15))
+        while ContinuousClock.now < deadline {
+            try Task.checkCancellation()
+            if let record = try await cli.inspect(inst.dbContainerName).first,
+               let ip = record.ipAddress, !ip.isEmpty {
+                return (ip, record.gatewayAddress)
+            }
+            try await Task.sleep(for: delay)
+            delay = min(delay * 2, .milliseconds(500))
+        }
+        throw LifecycleError.databaseIPUnavailable
+    }
+
+    /// Start the Elasticsearch sidecar (when enabled) and return the
+    /// `http://<es-ip>:9200` URL as soon as the IP is assigned (§2c). No green
+    /// gate (issue #9): ElasticPress retries, and nothing in the start path
+    /// depends on cluster health — a sidecar that fails to boot surfaces via
+    /// logs/reconcile, not by holding the whole site start hostage.
+    private func launchElasticsearch(_ inst: any RunnableInstance) async throws -> String? {
+        guard inst.elasticsearchEnabled else { return nil }
         try FileManager.default.createDirectory(at: inst.elasticsearchFolder, withIntermediateDirectories: true)
         try await cli.run(SiteRecipe.runElasticsearchArgs(inst))
-        let esIP = try await resolveElasticsearchHost(inst)
-        try await waitForElasticsearch(esIP)
-        return "http://\(esIP):9200"
+        var delay = Duration.milliseconds(100)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(15))
+        while ContinuousClock.now < deadline {
+            try Task.checkCancellation()
+            if let ip = try await cli.ipAddress(of: inst.esContainerName), !ip.isEmpty {
+                return "http://\(ip):9200"
+            }
+            try await Task.sleep(for: delay)
+            delay = min(delay * 2, .milliseconds(500))
+        }
+        throw LifecycleError.elasticsearchIPUnavailable
+    }
+
+    /// Ensure the Xdebug derived image exists (when enabled). Cached ⇒ ~50ms.
+    private func ensureXdebugImage(_ inst: any RunnableInstance) async throws -> String? {
+        guard inst.xdebugEnabled else { return nil }
+        return try await xdebug.ensureImage(forBaseTag: inst.imageTag)
     }
 
     /// Start a site, provisioning WordPress on first run. Returns the (possibly
@@ -135,6 +180,10 @@ public actor SiteLifecycle {
         var provisioned = site.provisioned
         if !provisioned {
             do {
+                // First-run provisioning is one of the two places that GENUINELY
+                // needs the DB accepting connections (issue #9) — wp-cli does
+                // not retry. Gate here, not in the shared start path.
+                try await waitForDatabaseReady(site, dbHost: dbHost)
                 if site.networkType.isMultisite {
                     try await MultisiteService(cli: cli).provision(site, dbHost: dbHost, installURL: site.url)
                 } else {
@@ -173,34 +222,57 @@ public actor SiteLifecycle {
         }
     }
 
-    /// Start a site AND all of its worktree envs (coupled lifecycle, §2b).
-    /// The parent is sequenced first; a parent failure does NOT abort the env
-    /// starts already queued — every env is still attempted, and each failure
-    /// is surfaced individually (status events + the returned messages).
-    /// Never throws: callers read `errorSummary`.
+    /// Start a site AND all of its worktree envs (coupled lifecycle, §2b) —
+    /// CONCURRENTLY (issue #9). Parent and envs share nothing at runtime: each
+    /// env runs its own containers on its own port from its own CoW-cloned
+    /// `wordpress/` + `database/` folders (see `WorktreeEnvService.create`), so
+    /// there is no ordering dependency at all. A parent failure does NOT abort
+    /// the env starts; every failure is surfaced individually (status events +
+    /// the returned messages). Never throws: callers read `errorSummary`.
     public func startSiteWithEnvs(_ site: Site, envs: [WorktreeEnv]) async -> CoupledStartOutcome {
         var outcome = CoupledStartOutcome(provisioned: site.provisioned, envErrorMessages: [])
-        do {
-            outcome.provisioned = try await startSite(site)
-        } catch {
-            outcome.parentErrorMessage = Self.message(for: error)
+
+        enum Part: Sendable {
+            case parent(provisioned: Bool?, error: String?)
+            case env(slug: String, error: String?)
         }
-        for env in envs {
-            do {
-                _ = try await startContainers(env)
-                markRunning(env.id)
-            } catch {
-                outcome.envErrorMessages.append("\(env.envSlug): \(Self.message(for: error))")
+        await withTaskGroup(of: Part.self) { group in
+            group.addTask {
+                do { return .parent(provisioned: try await self.startSite(site), error: nil) }
+                catch { return .parent(provisioned: nil, error: Self.message(for: error)) }
+            }
+            for env in envs {
+                group.addTask {
+                    do {
+                        _ = try await self.startContainers(env)
+                        await self.markRunning(env.id)
+                        return .env(slug: env.envSlug, error: nil)
+                    } catch {
+                        return .env(slug: env.envSlug, error: Self.message(for: error))
+                    }
+                }
+            }
+            for await part in group {
+                switch part {
+                case .parent(let provisioned, let error):
+                    if let provisioned { outcome.provisioned = provisioned }
+                    outcome.parentErrorMessage = error
+                case .env(let slug, let error):
+                    if let error { outcome.envErrorMessages.append("\(slug): \(error)") }
+                }
             }
         }
         return outcome
     }
 
-    /// Stop a site AND all of its worktree envs (coupled lifecycle, §2b).
+    /// Stop a site AND all of its worktree envs (coupled lifecycle, §2b),
+    /// concurrently.
     public func stopSiteWithEnvs(_ site: Site, envs: [WorktreeEnv]) async {
-        await stop(site)
-        for env in envs {
-            await stop(env)
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await self.stop(site) }
+            for env in envs {
+                group.addTask { await self.stop(env) }
+            }
         }
     }
 
@@ -208,81 +280,96 @@ public actor SiteLifecycle {
 
     public func stop(_ inst: any RunnableInstance) async {
         emit(inst.instanceID, .stopping)
-        // Containers run with --rm, so `stop` makes them vanish. The es sidecar
-        // is stopped best-effort whether or not the flag is currently set (it
-        // may have been toggled off since start).
-        _ = try? await cli.run(SiteRecipe.stopArgs(inst.wpContainerName))
-        _ = try? await cli.run(SiteRecipe.stopArgs(inst.esContainerName))
-        _ = try? await cli.run(SiteRecipe.stopArgs(inst.dbContainerName))
+        // Containers run with --rm, so `stop` makes them vanish. The three
+        // containers are independent — stop them concurrently (issue #9). The
+        // es sidecar is stopped best-effort whether or not the flag is
+        // currently set (it may have been toggled off since start).
+        await withTaskGroup(of: Void.self) { group in
+            for name in [inst.wpContainerName, inst.esContainerName, inst.dbContainerName] {
+                group.addTask { [cli] in _ = try? await cli.run(SiteRecipe.stopArgs(name)) }
+            }
+        }
         emit(inst.instanceID, .stopped)
     }
 
+    /// Stop + best-effort delete (non --rm leftovers, prior crash, …).
     public func deleteContainers(_ inst: any RunnableInstance) async {
-        _ = try? await cli.run(SiteRecipe.stopArgs(inst.wpContainerName))
-        _ = try? await cli.run(SiteRecipe.stopArgs(inst.esContainerName))
-        _ = try? await cli.run(SiteRecipe.stopArgs(inst.dbContainerName))
-        // Best-effort delete in case anything lingers (non --rm, prior crash, …).
-        _ = try? await cli.run(SiteRecipe.deleteArgs(inst.wpContainerName))
-        _ = try? await cli.run(SiteRecipe.deleteArgs(inst.esContainerName))
-        _ = try? await cli.run(SiteRecipe.deleteArgs(inst.dbContainerName))
+        await withTaskGroup(of: Void.self) { group in
+            for name in [inst.wpContainerName, inst.esContainerName, inst.dbContainerName] {
+                group.addTask { [cli] in
+                    _ = try? await cli.run(SiteRecipe.stopArgs(name))
+                    _ = try? await cli.run(SiteRecipe.deleteArgs(name))
+                }
+            }
+        }
         emit(inst.instanceID, .stopped)
     }
 
     // MARK: - Readiness polling
 
-    private func waitForDatabase(_ inst: any RunnableInstance, timeout: Duration = .seconds(90)) async throws {
+    /// Wait until mariadb accepts TCP connections on `dbHost:3306` — required
+    /// ONLY by one-shot wp-cli work (provisioning, multisite install, worktree
+    /// URL fixes / DB import), never by the plain start path (issue #9).
+    ///
+    /// A TCP connect probe is equivalent to `healthcheck.sh --connect` here
+    /// (mariadb's first-init temp server runs with networking off, so a
+    /// successful connect means the final server is listening) and costs ~0ms
+    /// per probe vs ~300ms for a `container exec`. Container IPs are
+    /// host-reachable on Apple `container` (same fact the ES health poll used).
+    /// Poll: 200ms initial, ×2 backoff capped at 1s.
+    public func waitForDatabaseReady(_ inst: any RunnableInstance, dbHost: String,
+                                     timeout: Duration = .seconds(90)) async throws {
         let deadline = ContinuousClock.now.advanced(by: timeout)
+        var delay = Duration.milliseconds(200)
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
-            let result = try await cli.runCapturing(SiteRecipe.databaseHealthcheckArgs(inst))
-            if result.exitCode == 0 { return }
-            try await Task.sleep(for: .seconds(1))
+            if await Self.tcpProbe(host: dbHost, port: 3306, timeout: .seconds(2)) { return }
+            try await Task.sleep(for: delay)
+            delay = min(delay * 2, .seconds(1))
         }
         throw LifecycleError.databaseNotReady
     }
 
-    private func resolveDatabaseHost(_ inst: any RunnableInstance) async throws -> String {
-        for _ in 0..<20 {
-            try Task.checkCancellation()
-            if let ip = try await cli.ipAddress(of: inst.dbContainerName), !ip.isEmpty {
-                return ip
+    /// One TCP connect attempt. True ⇒ the port accepted a connection.
+    private static func tcpProbe(host: String, port: UInt16, timeout: Duration) async -> Bool {
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else { return false }
+        let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .tcp)
+        let once = ResumeOnce()
+        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    if once.claim() { cont.resume(returning: true) }
+                    connection.cancel()
+                case .failed, .cancelled:
+                    if once.claim() { cont.resume(returning: false) }
+                    connection.cancel()
+                default:
+                    break
+                }
             }
-            try await Task.sleep(for: .milliseconds(500))
+            connection.start(queue: .global(qos: .userInitiated))
+            // Per-attempt timeout: cancel the connection; the .cancelled state
+            // resumes the continuation (via the once-guard) if nothing else has.
+            let seconds = Double(timeout.components.seconds)
+                + Double(timeout.components.attoseconds) / 1e18
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + seconds) {
+                connection.cancel()
+            }
         }
-        throw LifecycleError.databaseIPUnavailable
     }
 
-    private func resolveElasticsearchHost(_ inst: any RunnableInstance) async throws -> String {
-        for _ in 0..<20 {
-            try Task.checkCancellation()
-            if let ip = try await cli.ipAddress(of: inst.esContainerName), !ip.isEmpty {
-                return ip
-            }
-            try await Task.sleep(for: .milliseconds(500))
+    /// Guards a checked continuation against double-resume from the racing
+    /// NWConnection state callbacks.
+    private final class ResumeOnce: @unchecked Sendable {
+        private let lock = NSLock()
+        private var resumed = false
+        func claim() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            if resumed { return false }
+            resumed = true
+            return true
         }
-        throw LifecycleError.elasticsearchIPUnavailable
-    }
-
-    /// Poll ES cluster health from the host (container IPs are host-reachable on
-    /// Apple `container`). green/yellow ⇒ ready.
-    private func waitForElasticsearch(_ esIP: String, timeout: Duration = .seconds(90)) async throws {
-        let deadline = ContinuousClock.now.advanced(by: timeout)
-        guard let url = URL(string: SiteRecipe.elasticsearchHealthURL(esHost: esIP)) else {
-            throw LifecycleError.elasticsearchNotReady
-        }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 3
-        while ContinuousClock.now < deadline {
-            try Task.checkCancellation()
-            if let (data, response) = try? await URLSession.shared.data(for: request),
-               let http = response as? HTTPURLResponse, http.statusCode == 200,
-               let body = String(data: data, encoding: .utf8),
-               body.contains("\"status\":\"green\"") || body.contains("\"status\":\"yellow\"") {
-                return
-            }
-            try await Task.sleep(for: .seconds(2))
-        }
-        throw LifecycleError.elasticsearchNotReady
     }
 
     /// Wait until the container's web server answers on 127.0.0.1:<port>.
@@ -295,6 +382,10 @@ public actor SiteLifecycle {
     /// or the /etc/hosts entry is absent — misreading a perfectly healthy site
     /// as unresponsive until timeout (user-reported bug). Readiness must never
     /// depend on proxy or hosts resolution.
+    ///
+    /// Poll: 200ms initial, ×2 backoff capped at 1s (issue #9) — a warm apache
+    /// answers in well under a second, and the old flat 2s sleep alone could
+    /// add up to 2s of pure perceived latency.
     private func waitForHTTP(_ inst: any RunnableInstance, timeout: Duration = .seconds(120)) async throws {
         let deadline = ContinuousClock.now.advanced(by: timeout)
         var request = URLRequest(url: inst.localURL)
@@ -305,6 +396,7 @@ public actor SiteLifecycle {
         // plugin warmup) — that shows up as "accepted the connection but hasn't
         // answered", distinct from "port never accepted a connection".
         var observed = "the port never accepted a connection"
+        var delay = Duration.milliseconds(200)
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
             do {
@@ -327,7 +419,8 @@ public actor SiteLifecycle {
             } catch {
                 observed = "kept failing with: \(error.localizedDescription)"
             }
-            try await Task.sleep(for: .seconds(2))
+            try await Task.sleep(for: delay)
+            delay = min(delay * 2, .seconds(1))
         }
         throw LifecycleError.httpNotReady(observed: observed)
     }
