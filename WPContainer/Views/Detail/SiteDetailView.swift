@@ -123,6 +123,7 @@ struct SiteDetailView: View {
             actionButton("WP-CLI", "command") { vm.openWPCLI(site) }
                 .disabled(!site.status.isRunning)
             actionButton("Copy URL", "link") { SystemActions.copyToClipboard(site.url.absoluteString) }
+            OpenInButton(site: site)
             Spacer()
         }
     }

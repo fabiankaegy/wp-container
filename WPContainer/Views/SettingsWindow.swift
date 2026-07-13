@@ -129,6 +129,7 @@ private struct SitesSettingsPane: View {
     @AppStorage(AppSettings.defaultSitesRootKey) private var defaultSitesRoot = ""
     @AppStorage(AppSettings.defaultWordPressVersionKey) private var defaultWordPress = "latest"
     @AppStorage(AppSettings.defaultPHPVersionKey) private var defaultPHP = WordPressImageCatalog.defaultPHP
+    @AppStorage(ExternalEditors.targetKey) private var openInTarget = OpenInTarget.siteFolder.rawValue
 
     @State private var choosingFolder = false
 
@@ -176,6 +177,16 @@ private struct SitesSettingsPane: View {
                                explanation: "Prefilled in the Add Site guide's version step.") {
                         Picker("", selection: $defaultPHP) {
                             ForEach(vm.versionMatrix.phpVersions(for: defaultWordPress), id: \.self) { v in Text(v).tag(v) }
+                        }
+                        .labelsHidden().fixedSize()
+                    }
+
+                    Divider().opacity(0.5)
+
+                    SettingRow(title: "\u{201C}Open In\u{201D} folder",
+                               explanation: "Which folder the Open In button and menus hand to external editors.") {
+                        Picker("", selection: $openInTarget) {
+                            ForEach(OpenInTarget.allCases) { t in Text(t.label).tag(t.rawValue) }
                         }
                         .labelsHidden().fixedSize()
                     }
