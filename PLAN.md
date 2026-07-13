@@ -296,18 +296,28 @@ row. The list mirrors sidebar grouping order but flat/compact. App keeps running
   honored by Safari/Chrome. The SecurityAgent confirmation dialog it may show
   supports Touch ID. `CertificateAuthority.trustCA()` uses this path (was: an
   osascript System-keychain admin prompt); `untrustCA()` is the documented undo.
-- **/etc/hosts (custom domains) — interim osascript, helper TODO.** Writing
-  `/etc/hosts` genuinely needs root. Shipped path: `HostsFileService.apply` stages
-  the rewritten file and copies it over via one `osascript … with administrator
-  privileges` prompt (password or Touch-ID-for-sudo if the user has `pam_tid`
-  enabled). The block-manipulation core is pure + spot-tested.
-  - **TODO (preferred):** a tiny privileged helper registered via `SMAppService`
-    (daemon) + XPC exposing exactly `writeHostsBlock(entries)` /
-    `removeHostsBlock()`, with the app calling `AuthorizationCreate` +
-    `kAuthorizationFlagInteractionAllowed` so the system auth dialog (Touch-ID
-    capable) gates the operation. Helper must hard-validate inputs (only our
-    marker block, only `127.0.0.1` lines, hostname regex). Deferred here because
-    an embedded, signed helper is not verifiable under this repo's ad-hoc signing.
+- **/etc/hosts (custom domains) — Touch ID helper (shipped, issue #2), osascript
+  fallback.** Writing `/etc/hosts` genuinely needs root.
+  - **Preferred path (shipped):** `wpc-hosts-helper`, a tiny privileged daemon
+    embedded at `WPContainer.app/Contents/MacOS/wpc-hosts-helper` with its
+    launchd plist at `Contents/Library/LaunchDaemons/`, registered via
+    `SMAppService.daemon(plistName:)`. It vends exactly `writeHostsBlock(entries)`
+    / `removeHostsBlock()` over an XPC mach service. The app calls
+    `AuthorizationCreate` + `AuthorizationCopyRights(kAuthorizationFlagInteractionAllowed)`
+    against a custom right (`com.fabiankaegy.wpcontainer.modify-hosts`, rule
+    `authenticate-admin`) → the Touch-ID-capable system dialog → passes the
+    `AuthorizationExternalForm` over XPC; the helper re-verifies it WITHOUT
+    interaction before acting. Security boundary (`HostsBlockRewriter`, duplicated
+    in the helper, never trusting the app): only `127.0.0.1 <strict-DNS-host>`
+    lines, only the `# wp-container` marker block, atomic `0644 root:wheel` write
+    with fsync. The helper pins the connecting client's code signature (team +
+    bundle id) via `SecCodeCopyGuestWithAttributes` on the audit token. Enabled
+    from Settings › General › Custom Domains (needs one-time Login-Items approval).
+    Requires a Developer-ID signed build (the helper UI is hidden on ad-hoc Debug
+    builds, which `SMAppService` won't register).
+  - **Fallback (unchanged):** when the helper is not registered/approved,
+    `HostsFileService.apply` stages the rewritten file and copies it over via one
+    `osascript … with administrator privileges` prompt.
 
 ## 2j. Multisite support
 
