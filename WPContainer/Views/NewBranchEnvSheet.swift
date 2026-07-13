@@ -19,6 +19,7 @@ struct NewBranchEnvSheet: View {
 
     @State private var phase: Phase = .idle
     @State private var errorText: String?
+    @State private var errorDetail: String?
     @State private var createdEnv: WorktreeEnv?
 
     private enum Phase { case idle, working, done, failed }
@@ -112,7 +113,24 @@ struct NewBranchEnvSheet: View {
             }
             if phase == .failed, let errorText {
                 Section {
-                    Text(errorText).font(.caption).foregroundStyle(.red)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label(errorText, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.red)
+                        Text("The half-created environment was rolled back (the branch was kept).")
+                            .font(.caption2).foregroundStyle(.secondary)
+                        if let errorDetail, errorDetail != errorText {
+                            DisclosureGroup("Details") {
+                                ScrollView {
+                                    Text(errorDetail)
+                                        .font(.system(.caption2, design: .monospaced))
+                                        .textSelection(.enabled)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .frame(maxHeight: 140)
+                            }
+                            .font(.caption)
+                        }
+                    }
                 }
             }
         }
@@ -188,7 +206,9 @@ struct NewBranchEnvSheet: View {
         guard let repo = selectedRepo else { return }
         phase = .working
         errorText = nil
+        errorDetail = nil
         vm.lastError = nil
+        vm.lastErrorDetail = nil
         let from = fromRef.trimmingCharacters(in: .whitespaces)
         let env = await vm.createEnvAwaiting(parent: site, repoRelPath: repo.relativePath,
                                              branch: branch.trimmingCharacters(in: .whitespaces),
@@ -198,6 +218,7 @@ struct NewBranchEnvSheet: View {
             phase = .done
         } else {
             errorText = vm.lastError ?? "Could not create the environment."
+            errorDetail = vm.lastErrorDetail
             phase = .failed
         }
     }

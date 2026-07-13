@@ -175,11 +175,18 @@ public enum SiteRecipe {
         return args
     }
 
+    /// The one-shot wp-cli image whose PHP version matches this instance's site
+    /// image. NEVER hardcode `wordpress:cli` at a call site — a php8.4 site must
+    /// run wp-cli on `wordpress:cli-php8.4` (see WordPressImageCatalog.cliImage).
+    public static func cliImage(for inst: any RunnableInstance) -> String {
+        WordPressImageCatalog.cliImage(for: inst.imageTag)
+    }
+
     /// `wp core install` for first-run provisioning.
     public static func wpCoreInstallArgs(_ inst: any RunnableInstance, dbHost: String) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
         args += [
-            wpCLIImage,
+            cliImage(for: inst),
             "wp", "core", "install",
             "--url=http://127.0.0.1:\(inst.port)",
             "--title=\(inst.displayName)",
@@ -198,7 +205,7 @@ public enum SiteRecipe {
                                               url: String, subdomains: Bool) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
         args += [
-            wpCLIImage,
+            cliImage(for: inst),
             "wp", "core", "multisite-install",
             "--url=\(url)",
             "--title=\(inst.displayName)",
@@ -214,21 +221,21 @@ public enum SiteRecipe {
     /// `wp site list --format=json` for the multisite subsites list (§2j).
     public static func wpSiteListArgs(_ inst: any RunnableInstance, dbHost: String) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
-        args += [wpCLIImage, "wp", "site", "list", "--format=json"]
+        args += [cliImage(for: inst), "wp", "site", "list", "--format=json"]
         return args
     }
 
     /// `wp core update` (+ database) for the "Update WordPress core" action (§2k).
     public static func wpCoreUpdateArgs(_ inst: any RunnableInstance, dbHost: String) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
-        args += [wpCLIImage, "sh", "-c", "wp core update && wp core update-db"]
+        args += [cliImage(for: inst), "sh", "-c", "wp core update && wp core update-db"]
         return args
     }
 
     /// `wp core version` for the live WordPress version display (§2k).
     public static func wpCoreVersionArgs(_ inst: any RunnableInstance, dbHost: String) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
-        args += [wpCLIImage, "wp", "core", "version"]
+        args += [cliImage(for: inst), "wp", "core", "version"]
         return args
     }
 
@@ -240,7 +247,7 @@ public enum SiteRecipe {
         // sh -c inside the wp-cli container chains the three commands; the host
         // side is still a plain argument array (no host shell interpolation).
         args += [
-            wpCLIImage,
+            cliImage(for: inst),
             "sh", "-c",
             "wp option update home '\(url)' && wp option update siteurl '\(url)' && wp cache flush",
         ]
@@ -252,7 +259,7 @@ public enum SiteRecipe {
     public static func wpSetURLsArgs(_ inst: any RunnableInstance, dbHost: String, url: String) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
         args += [
-            wpCLIImage,
+            cliImage(for: inst),
             "sh", "-c",
             "wp option update home '\(url)' && wp option update siteurl '\(url)' && wp cache flush",
         ]
@@ -267,7 +274,7 @@ public enum SiteRecipe {
     /// Arbitrary proxied one-shot wp-cli invocation (`wp-container wp <site> -- …`).
     public static func wpProxyArgs(_ inst: any RunnableInstance, dbHost: String, wpArgs: [String]) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
-        args += [wpCLIImage, "wp"]
+        args += [cliImage(for: inst), "wp"]
         args += wpArgs
         return args
     }
@@ -275,7 +282,7 @@ public enum SiteRecipe {
     /// `wp db export` to stdout inside a one-shot wp-cli container (live DB clone).
     public static func wpDBExportArgs(_ inst: any RunnableInstance, dbHost: String) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
-        args += [wpCLIImage, "wp", "db", "export", "-", "--single-transaction"]
+        args += [cliImage(for: inst), "wp", "db", "export", "-", "--single-transaction"]
         return args
     }
 

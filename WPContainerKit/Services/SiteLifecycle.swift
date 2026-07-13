@@ -61,6 +61,11 @@ public actor SiteLifecycle {
             try SiteFolders.ensure(for: inst)
             try await cli.run(SiteRecipe.pullImageArgs(SiteRecipe.databaseImage))
             try await cli.run(SiteRecipe.pullImageArgs(inst.imageTag))
+            // Every one-shot wp-cli surface (first-run provisioning, URL fixes,
+            // live DB clone, agent tools) runs on a PHP-matched cli image. Pull
+            // it here so it rides the SAME progress path as the base images —
+            // the first wp-cli use on a php8.4 site pulls wordpress:cli-php8.4.
+            try await cli.run(SiteRecipe.pullImageArgs(SiteRecipe.cliImage(for: inst)))
             // First-ever start: pre-seed WordPress core into the mount (see
             // SiteRecipe.seedWordPressArgs). Gate on the absence of index.php.
             let indexPHP = inst.wordpressFolder.appendingPathComponent("index.php")

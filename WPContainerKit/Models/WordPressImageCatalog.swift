@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Curated matrix of WordPress × PHP official image tags (PLAN.md §2k).
 ///
@@ -56,5 +57,44 @@ public enum WordPressImageCatalog {
         if ref == "latest" || ref.hasPrefix("php") { return "latest" }
         if let dash = ref.firstIndex(of: "-") { return String(ref[..<dash]) }
         return ref.isEmpty ? nil : ref
+    }
+
+    // MARK: - One-shot wp-cli image mapping (critical: PHP parity)
+
+    private static let log = Logger(subsystem: "com.fabiankaegy.wpcontainer", category: "images")
+
+    /// Base one-shot wp-cli image used for `latest`/plain sites and as the
+    /// last-resort fallback.
+    public static let baseCLIImage = "wordpress:cli"
+
+    /// PHP versions for which the official library publishes a
+    /// `wordpress:cli-php<X>` image. VERIFIED empirically 2026-07-13 by pulling
+    /// every tag: `cli-php8.1`, `cli-php8.2`, `cli-php8.3`, `cli-php8.4` all
+    /// resolve. Note that plain `wordpress:cli` currently == `cli-php8.3`
+    /// (PHP 8.3.32) — which is exactly why running it against a `php8.4-apache`
+    /// site whose code requires PHP >= 8.4 hit a Composer platform_check fatal.
+    public static let cliPHPVersions: Set<String> = ["8.1", "8.2", "8.3", "8.4"]
+
+    /// Map a site's WordPress image tag to the one-shot wp-cli image whose PHP
+    /// version MATCHES the site, so wp-cli never runs a mismatched PHP (PLAN.md
+    /// workstream A / §2e):
+    ///  - `wordpress:<wp>-php<X>-apache` → `wordpress:cli-php<X>`
+    ///  - `wordpress:php<X>-apache`      → `wordpress:cli-php<X>`
+    ///  - `wordpress:latest` / plain     → `wordpress:cli`
+    ///  - unknown/custom tag             → `wordpress:cli` (+ logged warning)
+    public static func cliImage(for siteImage: String) -> String {
+        if let php = php(fromTag: siteImage) {
+            if cliPHPVersions.contains(php) {
+                return "wordpress:cli-php\(php)"
+            }
+            log.warning("No published wordpress:cli-php\(php, privacy: .public) image for site image \(siteImage, privacy: .public); falling back to \(baseCLIImage, privacy: .public) — wp-cli PHP version may not match the site.")
+            return baseCLIImage
+        }
+        // No PHP marker: standard `wordpress:latest`/plain map cleanly to the
+        // base cli image. A non-`wordpress:` custom image can't be matched.
+        if !siteImage.hasPrefix("wordpress:") {
+            log.warning("Custom site image \(siteImage, privacy: .public) has no recognizable PHP version; using \(baseCLIImage, privacy: .public) for wp-cli — PHP version may not match the site.")
+        }
+        return baseCLIImage
     }
 }

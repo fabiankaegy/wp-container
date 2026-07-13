@@ -206,7 +206,8 @@ struct CreateCommand: AsyncParsableCommand {
                             customDomain: customDomain, networkType: networkType)
             try SiteFolders.ensure(for: site)
             // Write the per-site wp-cli shim at <site>/wp (§2e).
-            try? WPCLIShim.writeShim(slug: site.slug, siteRoot: site.path)
+            try? WPCLIShim.writeShim(slug: site.slug, siteRoot: site.path,
+                                     cliImage: WordPressImageCatalog.cliImage(for: site.imageTag))
             // Resolve/create the group (if requested) and persist atomically.
             let groupName = group
             let updated = try await ctx.persistence.mutate { env in

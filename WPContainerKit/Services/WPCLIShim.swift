@@ -19,20 +19,22 @@ public enum WPCLIShim {
     public static var routerPath: String { "\(routerDir)/wp" }
 
     /// Bumped whenever the shim body format changes so stale shims auto-refresh
-    /// (PLAN.md scope addition). Written into the shim header.
-    public static let shimVersion = 2
+    /// (PLAN.md scope addition). Written into the shim header. v3 bakes in the
+    /// site's PHP-matched cli image (was hardcoded `wordpress:cli`).
+    public static let shimVersion = 3
     private static let versionMarker = "# wpc-shim-version:"
 
     // MARK: - Per-site shim
 
     /// Body of the executable `wp` shim. `wordpressFolder` is baked in as an
     /// ABSOLUTE path so the shim works from any placement root and any cwd.
-    public static func shimScript(slug: String, wordpressFolder: URL) -> String {
+    /// `cliImage` is the PHP-matched one-shot wp-cli image for the site.
+    public static func shimScript(slug: String, wordpressFolder: URL, cliImage: String) -> String {
         """
         #!/bin/bash
         \(versionMarker) \(shimVersion)
         # WP Container wp-cli shim for site "\(slug)". Auto-generated — do not edit.
-        # Runs any wp-cli command against this site via a one-shot wordpress:cli
+        # Runs any wp-cli command against this site via a one-shot \(cliImage)
         # container. Tip: `wp` from Homebrew (/opt/homebrew/bin/wp) will shadow this
         # on PATH — call it as ./wp from the site root, or install the global router
         # with `wp-container setup wp`.
@@ -74,18 +76,21 @@ public enum WPCLIShim {
           -e "WORDPRESS_DB_USER=\(SiteRecipe.dbUser)" \\
           -e "WORDPRESS_DB_PASSWORD=\(SiteRecipe.dbPassword)" \\
           -e "WORDPRESS_DB_NAME=\(SiteRecipe.dbName)" \\
-          "\(SiteRecipe.wpCLIImage)" wp "$@"
+          "\(cliImage)" wp "$@"
         """
     }
 
     /// Write the shim to `<root>/wp` (0755). `wordpressFolder` defaults to
-    /// `<root>/wordpress` for the classic per-site placement. Idempotent.
+    /// `<root>/wordpress` for the classic per-site placement. `cliImage` is the
+    /// site's PHP-matched wp-cli image (default: base cli for latest/plain).
+    /// Idempotent.
     @discardableResult
-    public static func writeShim(slug: String, siteRoot: URL, wordpressFolder: URL? = nil) throws -> URL {
+    public static func writeShim(slug: String, siteRoot: URL, wordpressFolder: URL? = nil,
+                                 cliImage: String = WordPressImageCatalog.baseCLIImage) throws -> URL {
         let url = siteRoot.appendingPathComponent("wp")
         let wp = wordpressFolder ?? siteRoot.appendingPathComponent("wordpress", isDirectory: true)
         try FileManager.default.createDirectory(at: siteRoot, withIntermediateDirectories: true)
-        try shimScript(slug: slug, wordpressFolder: wp).write(to: url, atomically: true, encoding: .utf8)
+        try shimScript(slug: slug, wordpressFolder: wp, cliImage: cliImage).write(to: url, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
         return url
     }
@@ -132,6 +137,7 @@ public enum WPCLIShim {
         print("WPC_WP=" + shlex.quote(d["wordpressPath"]))
         print("WPC_DB=" + shlex.quote(d["dbContainer"]))
         print("WPC_SUB=" + shlex.quote(d.get("subpath", "")))
+        print("WPC_CLI=" + shlex.quote(d.get("cliImage", "wordpress:cli")))
         ')"
           DB_IP="$("$CONTAINER_BIN" inspect "$WPC_DB" 2>/dev/null \\
             | sed -n 's/.*"ipv4Address"[^"]*"\\([0-9.]*\\).*/\\1/p' | head -n1)"
@@ -149,7 +155,7 @@ public enum WPCLIShim {
             -e "WORDPRESS_DB_USER=\(SiteRecipe.dbUser)" \\
             -e "WORDPRESS_DB_PASSWORD=\(SiteRecipe.dbPassword)" \\
             -e "WORDPRESS_DB_NAME=\(SiteRecipe.dbName)" \\
-            "\(SiteRecipe.wpCLIImage)" wp "$@"
+            "${WPC_CLI:-\(WordPressImageCatalog.baseCLIImage)}" wp "$@"
         fi
 
         # Not inside a WP Container site → transparently exec the real wp-cli.
@@ -189,7 +195,8 @@ public enum WPCLIShim {
 
     /// A single shell command (for `Terminal.app`) that opens an interactive
     /// wp-cli shell inside a `wordpress:cli` container cd'd to /var/www/html.
-    public static func interactiveTerminalCommand(slug: String, wordpressFolder: URL) -> String {
+    public static func interactiveTerminalCommand(slug: String, wordpressFolder: URL,
+                                                  cliImage: String = WordPressImageCatalog.baseCLIImage) -> String {
         let wp = wordpressFolder.path
         let db = "wpc-\(slug)-db"
         return """
@@ -198,7 +205,7 @@ public enum WPCLIShim {
         \(containerBinary) run -it --rm -w /var/www/html -v \(shellQuote(wp)):/var/www/html \
         -e WORDPRESS_DB_HOST=$DB_IP -e WORDPRESS_DB_USER=\(SiteRecipe.dbUser) \
         -e WORDPRESS_DB_PASSWORD=\(SiteRecipe.dbPassword) -e WORDPRESS_DB_NAME=\(SiteRecipe.dbName) \
-        \(SiteRecipe.wpCLIImage) bash; fi
+        \(cliImage) bash; fi
         """
     }
 

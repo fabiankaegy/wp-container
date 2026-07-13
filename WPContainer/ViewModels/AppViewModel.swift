@@ -34,6 +34,10 @@ public final class AppViewModel {
     public var selection: UUID?
     public var systemStatus: SystemCheckResult?
     public var lastError: String?
+    /// Full underlying detail for the last error, when a concise summary was
+    /// surfaced in `lastError` (e.g. rolled-back worktree creation). Shown behind
+    /// a disclosure so the container log dump doesn't dominate the UI.
+    public var lastErrorDetail: String?
     /// Whether the local CA is trusted as a root (drives the "Trust CA" prompt).
     public var caTrusted = false
     /// The port the in-app HTTPS proxy bound, once started.
@@ -369,13 +373,15 @@ public final class AppViewModel {
     /// improvements ship automatically on the next launch (PLAN.md §2e).
     private func refreshStaleShims() {
         for site in store.sites where WPCLIShim.shimNeedsRefresh(siteRoot: site.path) {
-            _ = try? WPCLIShim.writeShim(slug: site.slug, siteRoot: site.path)
+            _ = try? WPCLIShim.writeShim(slug: site.slug, siteRoot: site.path,
+                                         cliImage: WordPressImageCatalog.cliImage(for: site.imageTag))
         }
         for site in store.sites {
             guard let root = site.agentToolsRoot else { continue }
             let url = URL(fileURLWithPath: root)
             if WPCLIShim.shimNeedsRefresh(siteRoot: url) {
-                _ = try? WPCLIShim.writeShim(slug: site.slug, siteRoot: url, wordpressFolder: site.wordpressFolder)
+                _ = try? WPCLIShim.writeShim(slug: site.slug, siteRoot: url, wordpressFolder: site.wordpressFolder,
+                                             cliImage: WordPressImageCatalog.cliImage(for: site.imageTag))
             }
         }
         if WPCLIShim.routerInstalled { _ = try? WPCLIShim.writeRouter() }
@@ -383,7 +389,8 @@ public final class AppViewModel {
 
     /// Open an interactive wp-cli shell for the site in Terminal.app (§2e).
     public func openWPCLI(_ site: Site) {
-        let command = WPCLIShim.interactiveTerminalCommand(slug: site.slug, wordpressFolder: site.wordpressFolder)
+        let command = WPCLIShim.interactiveTerminalCommand(slug: site.slug, wordpressFolder: site.wordpressFolder,
+                                                            cliImage: WordPressImageCatalog.cliImage(for: site.imageTag))
         SystemActions.openTerminalRunning(command)
     }
 
@@ -590,6 +597,7 @@ public final class AppViewModel {
             return env
         } catch {
             lastError = SiteLifecycleErrorText(error)
+            lastErrorDetail = (error as? WorktreeError)?.fullDetail
             return nil
         }
     }
@@ -662,6 +670,7 @@ public final class AppViewModel {
                 await store.upsertEnv(env)
             } catch {
                 lastError = SiteLifecycleErrorText(error)
+                lastErrorDetail = (error as? WorktreeError)?.fullDetail
             }
         }
     }
