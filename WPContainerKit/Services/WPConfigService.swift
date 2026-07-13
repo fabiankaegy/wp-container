@@ -166,13 +166,30 @@ public enum WPConfigService {
     }
     """
 
-    /// Inject the X-Forwarded-Proto snippet right after the opening `<?php` (idempotent).
+    /// True when `text` already contains a functionally-equivalent
+    /// X-Forwarded-Proto handler — an `if` guarded by
+    /// `$_SERVER['HTTP_X_FORWARDED_PROTO']` that sets `$_SERVER['HTTPS'] = 'on'`.
+    /// The official WordPress Docker image ships exactly such a block in its
+    /// wp-config template, so injecting ours next to it duplicates the same
+    /// idempotent check (#7). Matches both our snippet and the image's
+    /// (`'https' === …` vs `strpos(…, 'https') !== false` guard styles).
+    static func hasForwardedProtoHandler(_ text: String) -> Bool {
+        let pattern = #"isset\s*\(\s*\$_SERVER\s*\[\s*['\"]HTTP_X_FORWARDED_PROTO['\"]\s*\][\s\S]{0,300}?\$_SERVER\s*\[\s*['\"]HTTPS['\"]\s*\]\s*=\s*['\"]on['\"]"#
+        guard let re = try? NSRegularExpression(pattern: pattern) else { return false }
+        return re.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+    }
+
+    /// Inject the X-Forwarded-Proto snippet right after the opening `<?php`.
+    /// Idempotent, and a no-op when the file already handles
+    /// X-Forwarded-Proto — either our marked snippet or the Docker image's own
+    /// equivalent block (#7).
     @discardableResult
     public static func enableForwardedProto(wordpressFolder: URL) throws -> String? {
         let url = configURL(for: wordpressFolder)
         guard FileManager.default.fileExists(atPath: url.path) else { throw ConfigError.notFound(url.path) }
         guard var text = try? String(contentsOf: url, encoding: .utf8) else { throw ConfigError.unreadable(url.path) }
         if text.contains(forwardedProtoMarker) { return nil }
+        if hasForwardedProtoHandler(text) { return nil }
         let backup = try makeBackup(url)
         text = insertAfterOpeningTag(text, snippet: forwardedProtoSnippet)
         try text.write(to: url, atomically: true, encoding: .utf8)
