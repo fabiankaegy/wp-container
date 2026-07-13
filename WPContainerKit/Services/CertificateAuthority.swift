@@ -112,6 +112,22 @@ public actor CertificateAuthority {
         return true
     }
 
+    /// Make the leaf's SAN set EXACTLY `defaultSANs ∪ hosts`, re-issuing only
+    /// when it differs — adds new hostnames AND prunes leftovers whose site/env
+    /// no longer exists in the store (#4: deletions that predate SAN-removal
+    /// left stale hostnames in sans.json forever). Called with the full live
+    /// host set at proxy startup, so any historical leftover is cleaned up the
+    /// next time a proxy starts. Returns true if the leaf was re-issued.
+    @discardableResult
+    public func syncLeafCoverage(_ hosts: [String]) async throws -> Bool {
+        try await ensureGenerated()
+        let current = Set(currentSANs())
+        let desired = Set(Self.defaultSANs).union(hosts.filter { !$0.isEmpty })
+        guard desired != current else { return false }
+        try await issueLeaf(sans: desired.sorted())
+        return true
+    }
+
     /// Remove `hosts` from the leaf's SAN set (e.g. when a site is deleted or
     /// its HTTPS is disabled), re-issuing only if the set actually shrinks.
     /// Never drops below `Self.defaultSANs` — `*.localhost`/`localhost`/`127.0.0.1`

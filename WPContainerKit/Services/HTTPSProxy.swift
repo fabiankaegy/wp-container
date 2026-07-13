@@ -156,7 +156,9 @@ public final class HTTPSProxy: @unchecked Sendable {
             updateHostMap(routes: Self.routes(from: env))
             hosts = Self.sanHosts(from: env)
         }
-        try await ca.ensureLeafCovers(hosts)
+        // Exact-set sync (#4): covers every live hostname AND prunes SAN
+        // leftovers from sites/envs deleted before SAN-removal shipped.
+        try await ca.syncLeafCoverage(hosts)
         stateLock.withLock { coveredHosts = Set(hosts) }
         let identity = try await loadSecIdentity()
 
@@ -256,9 +258,11 @@ public final class HTTPSProxy: @unchecked Sendable {
                 self.updateHostMap(routes: Self.routes(from: env))
                 let wanted = Set(Self.sanHosts(from: env))
                 let known = self.stateLock.withLock { self.coveredHosts }
-                if !wanted.isSubset(of: known) {
+                if wanted != known {
                     self.stateLock.withLock { self.coveredHosts = wanted }
-                    if (try? await self.ca.ensureLeafCovers(Array(wanted))) == true {
+                    // Exact-set sync (#4): new hostnames get SANs, and SANs of
+                    // deleted sites/envs are pruned rather than kept forever.
+                    if (try? await self.ca.syncLeafCoverage(Array(wanted))) == true {
                         try? await self.reload()
                         return // reload() spins a fresh loop
                     }
