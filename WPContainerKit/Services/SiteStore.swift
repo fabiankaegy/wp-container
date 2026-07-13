@@ -110,6 +110,24 @@ public final class SiteStore {
         await apply { env in env.envs.removeAll { $0.id == id } }
     }
 
+    /// Allocate a free port and reserve it in ONE cross-process-locked
+    /// read-modify-write, matching the CLI (#3 follow-up). `reserve` MUST record
+    /// the port in the envelope (append the new site/env, or a placeholder a
+    /// follow-up upsert replaces) so it is visible as taken to the next locked
+    /// reader; its return value is handed back. Returns nil — with nothing
+    /// written — only when no free port exists. The store adopts the updated
+    /// envelope so the reservation is visible in-memory immediately.
+    public func allocatePort<T: Sendable>(
+        reserve: @Sendable @escaping (Int, inout StoreEnvelope) -> T
+    ) async -> (port: Int, value: T)? {
+        guard let result = try? await persistence.allocatePort(reserve: reserve) else { return nil }
+        sites = result.envelope.sites
+        envs = result.envelope.envs
+        groups = result.envelope.groups
+        applyStatuses()
+        return (result.port, result.value)
+    }
+
     // MARK: - Group mutations (write-through to disk under lock)
 
     /// Create a group (appended after existing ones) and return its id.
