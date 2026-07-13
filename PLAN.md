@@ -309,6 +309,65 @@ row. The list mirrors sidebar grouping order but flat/compact. App keeps running
   WP core updates happen inside WP or via wp-cli (button: "Update WordPress core").
 - Xdebug derived images (§2c) are built per base tag automatically.
 
+## 2l. App settings & sidebar quick actions (UI polish)
+
+- **Empty-state centering.** `MainWindow.panel` pins its content to `.topLeading`
+  (correct for the scrolling site detail). The "No Site Selected"
+  `ContentUnavailableView` therefore needs its own `.frame(maxWidth/​maxHeight:
+  .infinity)` so it owns the panel and centers; the onboarding view already did.
+- **Menu bar icon.** The `MenuBarExtra` label (and the popover header) render the
+  real app icon (`Image(nsImage: NSApp.applicationIconImage)`, resizable, high
+  interpolation, 18pt) rather than a monochrome template glyph — a deliberate
+  break from the platform norm because the user wants the colored mark.
+- **App Settings window (⌘,).** A SwiftUI `Settings` scene (free ⌘, + "Settings…"
+  menu item), a `TabView` of three panes reusing the in-app card/row design
+  language, fixed 520pt wide. Panes:
+  - *General:* one "Show Dock icon" toggle (off = menu-bar-first via
+    `NSApp.setActivationPolicy(.accessory)`), applied at launch in `App.init`
+    (no Dock flicker) and re-activating the app on a live flip so the settings
+    window stays up; "Launch at login" via `SMAppService.mainApp` with error
+    surfacing and true-state read-back.
+  - *Sites:* default sites-root folder picker + default WordPress×PHP pickers
+    that prefill the Add Site guide.
+  - *Proxy:* "Start HTTPS proxy at launch" (wired to `ensureProxyRunning`) + a
+    live proxy status line.
+  - All persisted via `@AppStorage`/`UserDefaults` through a central
+    `AppSettings` key registry. `SiteFolders.defaultSitesRoot` and
+    `AddSiteSheet` read the same keys (kit reads `UserDefaults.standard`). Per-
+    site settings stay in the site detail Settings tab.
+- **Sidebar context menu.** Each site row gets Start/Stop (state-dependent),
+  Open Site, WP Admin, Reveal in Finder, Open in Terminal, Copy URL, New Branch
+  Environment…, Move to Group ▸, and Delete Site… (confirmation offering
+  keep-or-trash-folder). All reuse existing `AppViewModel`/`SystemActions` — no
+  new logic. Worktree envs are not rendered as sidebar rows (they live in the
+  site detail Branches card + menu bar), so no sidebar env context menu is added.
+- **Clickable status dot.** In the sidebar the status dot is a start/stop
+  control (`InteractiveStatusDot`): hover swaps the dot for a play/stop glyph in
+  a fixed 16pt hit area (no layout shift), click toggles run state, transitional
+  states keep the pulse and are non-interactive, `.help()` gives tooltips. The
+  inner `Button` consumes clicks so row selection is unaffected; the dot is only
+  interactive where a toggle closure is passed (not in the drag preview).
+- **Favicon avatars.** `FaviconLocator` (kit, pure FS) finds a site's favicon —
+  web-root `favicon.{png,ico}`, else the largest WordPress Site Icon crop under
+  `uploads` (bounded depth-4 scan), else a theme `favicon.*`. SVG is skipped
+  (ImageIO rasterizes it unreliably at avatar size). `FaviconImageCache` (app)
+  loads off-main, downsamples via ImageIO capped at 128px, and caches per folder
+  keyed by the file's mtime. `SiteAvatar` shows the favicon (aspect-fill) and
+  falls back to the initials gradient, re-checking on a reload token (site
+  status) so an icon added while running appears without relaunch. Worktree envs
+  reuse `SiteAvatar` nowhere today, so parent inheritance is moot.
+- **Custom-domain registration UX.** The blocking `/etc/hosts` admin prompt is a
+  dedicated, honestly-labelled ("Waiting for admin approval to register
+  <domain>…"), skippable step in the Add Site flow — not folded into
+  `createAndStartSite`. The app activates before prompting so the dialog is
+  visible; a Skip button appears after 10s and a 2-minute timeout auto-skips
+  (both cancel the Task, which SIGTERMs `osascript`). A dismissed dialog
+  (osascript -128 → `HostsError.cancelled`) or a skip resolves the site as
+  created-with-unregistered-domain, and the Domain card flags it with "Register
+  now". Note: the create+start hints (seed/db/install) remain time-based
+  approximations — lifecycle emits no sub-step events, so fully honest labels for
+  the xdebug-image build / ES boot would need a lifecycle event refactor (future).
+
 ## 3. App architecture (MVVM, Swift 6 concurrency)
 
 ```
