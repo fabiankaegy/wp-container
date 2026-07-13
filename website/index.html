@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WP Container — Local WordPress for macOS, built for AI agents</title>
+  <meta name="description" content="WP Container runs local WordPress on macOS with Apple containers. Isolated branch environments in ~5s, a native SwiftUI app, an MCP server and JSON CLI built for AI coding agents. Free and open source.">
+
+  <link rel="icon" type="image/png" href="assets/favicon-128.png">
+  <link rel="apple-touch-icon" href="assets/icon.png">
+
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="WP Container — Local WordPress for macOS, built for AI agents">
+  <meta property="og:description" content="Isolated WordPress branch environments in ~5 seconds. Native SwiftUI, powered by Apple containers, with an MCP server and JSON CLI for AI coding agents. Free and open source.">
+  <meta property="og:image" content="assets/screenshot-main.png">
+  <meta property="og:url" content="https://github.com/fabiankaegy/wp-container">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="WP Container — Local WordPress for macOS">
+  <meta name="twitter:description" content="Isolated WordPress branch environments in ~5s. Native SwiftUI, Apple containers, MCP + JSON CLI for AI agents. Free and open source.">
+  <meta name="twitter:image" content="assets/screenshot-main.png">
+
+  <!-- Opt into motion only when the user hasn't asked to reduce it. Runs before paint to avoid a flash. -->
+  <script>
+    (function () {
+      try {
+        if (window.matchMedia('(prefers-reduced-motion: no-preference)').matches) {
+          document.documentElement.classList.add('motion');
+        }
+      } catch (e) {}
+    })();
+  </script>
+
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- ============ NAV ============ -->
+  <header class="nav" id="nav">
+    <div class="nav-pill">
+      <a class="brand" href="#top" aria-label="WP Container home">
+        <img src="assets/icon.png" width="28" height="28" alt="" class="brand-icon">
+        <span>WP Container</span>
+      </a>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="#features">Features</a>
+        <a href="#agents">AI&nbsp;agents</a>
+        <a href="#speed">Speed</a>
+        <a href="#faq">FAQ</a>
+      </nav>
+      <div class="nav-actions">
+        <a class="ghost-link" href="https://github.com/fabiankaegy/wp-container" target="_blank" rel="noopener" aria-label="WP Container on GitHub">
+          <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+          <span>GitHub</span>
+        </a>
+        <a class="btn btn-primary btn-sm" href="https://github.com/fabiankaegy/wp-container/releases/latest" target="_blank" rel="noopener">Download</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="top">
+
+    <!-- ============ HERO ============ -->
+    <section class="hero">
+      <div class="hero-glow" aria-hidden="true"></div>
+      <div class="container narrow hero-copy">
+        <span class="badge hero-item" style="--d:0ms">
+          <span class="badge-dot"></span>
+          Local WordPress · powered by Apple containers
+        </span>
+        <h1 class="hero-item" style="--d:70ms">
+          WordPress that keeps up with
+          <span class="grad">your git branches.</span>
+        </h1>
+        <p class="lead hero-item" style="--d:140ms">
+          Spin up an isolated, fully-running clone of any site for any branch in about five seconds.
+          A native SwiftUI app with an MCP server and JSON CLI built for AI coding agents.
+        </p>
+        <div class="cta hero-item" style="--d:210ms">
+          <a class="btn btn-primary btn-lg" href="https://github.com/fabiankaegy/wp-container/releases/latest" target="_blank" rel="noopener">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="currentColor"><path d="M12 3a1 1 0 0 1 1 1v9.59l3.3-3.3a1 1 0 1 1 1.4 1.42l-5 5a1 1 0 0 1-1.4 0l-5-5a1 1 0 1 1 1.4-1.42l3.3 3.3V4a1 1 0 0 1 1-1Zm-7 15a1 1 0 0 1 1 1v1h12v-1a1 1 0 1 1 2 0v2a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-2a1 1 0 0 1 1-1Z"/></svg>
+            Download for macOS
+          </a>
+          <div class="install">
+            <code id="install-cmd">git clone https://github.com/fabiankaegy/wp-container.git &amp;&amp; make build</code>
+            <button class="copy-btn" data-copy="install-cmd" aria-label="Copy install command">
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+            </button>
+          </div>
+        </div>
+        <p class="req hero-item" style="--d:280ms">macOS 27 · Apple Silicon · Free &amp; open source</p>
+      </div>
+
+      <div class="hero-shot-wrap">
+        <div class="hero-shot">
+          <img src="assets/screenshot-main.png"
+               width="2000" height="1386"
+               alt="WP Container app showing the Demo Environment site overview: URL, local port, WordPress and PHP versions, and a Branches panel for creating branch environments."
+               fetchpriority="high">
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ FEATURES ============ -->
+    <section class="section" id="features">
+      <div class="container">
+        <header class="section-head reveal">
+          <span class="pill-label">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+            Features
+          </span>
+          <h2>Everything a WordPress dev environment should be.</h2>
+          <p>One-click sites in a Studio-style UI, real files on disk, and the low-level power tools you actually reach for.</p>
+        </header>
+
+        <div class="grid grid-3">
+          <article class="card reveal" style="--d:0ms">
+            <span class="glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5v7M8.4 6H14a4 4 0 0 1 4 4v5.5"/></svg></span>
+            <h3>Branch environments</h3>
+            <p>Spin up an isolated, running clone of a site for any git branch in <strong>~5 seconds</strong> — APFS copy-on-write plus a git worktree, on its own port. The parent site keeps running untouched.</p>
+          </article>
+
+          <article class="card reveal" style="--d:70ms">
+            <span class="glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 4.4-3 7.6-7 9-4-1.4-7-4.6-7-9V7l7-4Z"/><path d="M9.2 12.2l1.8 1.8 3.8-3.8"/></svg></span>
+            <h3>Built for AI agents</h3>
+            <p>A bundled MCP server with <strong>18 tools</strong>, auto-generated <code>AGENTS.md</code>, <code>--json</code> on every command, and a global <code>wp</code> router. Point Claude, Cursor or Copilot straight at a site.</p>
+          </article>
+
+          <article class="card reveal" style="--d:140ms">
+            <span class="glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></svg></span>
+            <h3>Your files, real folders</h3>
+            <p>The <strong>entire WordPress install lives in a normal folder</strong> on your Mac. Drop your git-managed <code>wp-content</code> plugin and theme repos straight in — they're live immediately.</p>
+          </article>
+
+          <article class="card reveal" style="--d:0ms">
+            <span class="glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15" r="1.3"/></svg></span>
+            <h3>Trusted HTTPS &amp; .local domains</h3>
+            <p>A locally-trusted certificate authority — <strong>no admin password, Touch ID supported</strong> — serves real <code>https://</code> for every site, with custom <code>.local</code> domains routed for you.</p>
+          </article>
+
+          <article class="card reveal" style="--d:70ms">
+            <span class="glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3l-1 6h5l-8 12 1-8H6l8-10Z"/></svg></span>
+            <h3>One-click power tools</h3>
+            <p>Toggle <strong>Xdebug</strong> and <strong>Elasticsearch</strong> per site, pick any <strong>WordPress × PHP</strong> combination, and create subdirectory or subdomain <strong>multisite</strong> networks from a guided flow.</p>
+          </article>
+
+          <article class="card reveal" style="--d:140ms">
+            <span class="glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 9 9"/><path d="M12 8v4l3 2"/><path d="M21 4l-4 1 1-4"/></svg></span>
+            <h3>Fast &amp; native</h3>
+            <p>A site is running in <strong>~2–3 seconds</strong>. Each container is a lightweight VM, so <strong>stopped sites cost zero</strong> — no daemon idling in the background eating your RAM.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ AI AGENTS ============ -->
+    <section class="section section-agents" id="agents">
+      <div class="container">
+        <div class="split">
+          <div class="split-copy reveal">
+            <span class="pill-label">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 4.4-3 7.6-7 9-4-1.4-7-4.6-7-9V7l7-4Z"/></svg>
+              For AI coding agents
+            </span>
+            <h2>Give your agent a real WordPress to work in.</h2>
+            <p>Every action WP Container performs is scriptable and returns clean JSON, so an agent can create a branch environment, run WP-CLI, read logs and check site health without a human in the loop.</p>
+            <ul class="check-list">
+              <li>Bundled <strong>MCP stdio server</strong> exposing 18 tools — <code>wp_cli</code>, log readers, <code>wp-config</code> editing, site health, start/stop, <code>worktree_*</code> and more.</li>
+              <li>One command writes <code>.mcp.json</code> (plus Cursor &amp; VS Code configs) and a marked <code>AGENTS.md</code> block into your repo.</li>
+              <li><code>--json</code> everywhere and a global <code>wp</code> router so plain <code>wp</code> inside a site runs containerized WP-CLI.</li>
+            </ul>
+          </div>
+
+          <div class="terminal reveal" id="term"
+               aria-label="Terminal running: wp-container worktree create --site my-blog --repo wp-content/plugins/my-plugin --branch feature-x --json, returning a JSON object with a url, path and worktreePath.">
+            <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="term-title">zsh — feature-x</span></div>
+            <pre class="term-body"><code><span class="c-comment"># spin up an isolated env for a feature branch</span>
+<span class="c-prompt">$</span> <span class="term-cmd" data-cmd="wp-container worktree create \
+    --site my-blog \
+    --repo wp-content/plugins/my-plugin \
+    --branch feature-x --json">wp-container worktree create \
+    --site my-blog \
+    --repo wp-content/plugins/my-plugin \
+    --branch feature-x --json</span><span class="term-cursor" aria-hidden="true"></span>
+<span class="term-out"><span class="c-punct">{</span>
+  <span class="c-key">"url"</span><span class="c-punct">:</span> <span class="c-str">"http://127.0.0.1:8882"</span><span class="c-punct">,</span>
+  <span class="c-key">"path"</span><span class="c-punct">:</span> <span class="c-str">"~/WP Container Sites/my-blog-feature-x"</span><span class="c-punct">,</span>
+  <span class="c-key">"worktreePath"</span><span class="c-punct">:</span> <span class="c-str">"…/my-plugin (feature-x)"</span>
+<span class="c-punct">}</span>
+<span class="c-comment"># ↑ ready in ~5s — agent opens the URL and starts working</span></span></code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ SPEED ============ -->
+    <section class="section" id="speed">
+      <div class="container">
+        <header class="section-head reveal">
+          <span class="pill-label">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L4.5 13.5H11l-1 8.5 9-12h-6.5L13 2Z"/></svg>
+            Speed
+          </span>
+          <h2>Fast because it's native.</h2>
+          <p>No always-on daemon, no heavyweight VM. Each site runs in its own lightweight Apple container that starts fast and disappears when you stop it.</p>
+        </header>
+        <div class="grid grid-3 stats">
+          <div class="stat reveal" style="--d:0ms">
+            <span class="stat-num">~3s</span>
+            <span class="stat-label">to a running site</span>
+            <p>Create, start and open. Containers are ephemeral; all state lives in the site folder.</p>
+          </div>
+          <div class="stat reveal" style="--d:70ms">
+            <span class="stat-num">~5s</span>
+            <span class="stat-label">to a branch environment</span>
+            <p>APFS copy-on-write clones the site instantly instead of copying gigabytes of files.</p>
+          </div>
+          <div class="stat reveal" style="--d:140ms">
+            <span class="stat-num">0</span>
+            <span class="stat-label">cost when stopped</span>
+            <p>Stopped sites use no CPU and no memory. Stopping what you're not using is the only lever that matters.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ SCREENSHOTS ============ -->
+    <section class="section">
+      <div class="container">
+        <header class="section-head reveal">
+          <span class="pill-label">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 9h18"/></svg>
+            The app
+          </span>
+          <h2>A Studio-style app, all the way down.</h2>
+          <p>A dark window shell with a light inset content panel, live status in the sidebar, and a menu-bar extra for one-glance control of every site.</p>
+        </header>
+
+        <div class="shot shot-inline reveal">
+          <img src="assets/screenshot-settings.png" width="2000" height="1386" loading="lazy"
+               alt="WP Container Settings tab: toggles for Trusted HTTPS with a trusted certificate authority, AI Agent Tools, the global wp command, Xdebug, Elasticsearch, and WP_DEBUG debugging switches.">
+        </div>
+
+        <div class="shot-caption-grid">
+          <div class="shot shot-menubar reveal">
+            <img src="assets/screenshot-menubar.png" width="900" height="582" loading="lazy"
+                 alt="WP Container menu-bar extra showing 1 of 1 sites running, the Demo Environment on localhost:8881 with a start/stop control, and Open and Quit actions.">
+          </div>
+          <div class="menubar-copy reveal" style="--d:80ms">
+            <h3>Menu-bar-first, if you like.</h3>
+            <p>Hide the Dock icon and drive everything from the menu bar: per-site status at a glance, start and stop in one click, and native notifications when a site or branch environment comes up.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ FAQ ============ -->
+    <section class="section section-faq" id="faq">
+      <div class="container">
+        <header class="section-head reveal">
+          <span class="pill-label">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.8.4-1 .9-1 1.7"/><path d="M12 17h.01"/></svg>
+            FAQ
+          </span>
+          <h2>Questions &amp; answers</h2>
+        </header>
+        <div class="faq reveal">
+          <details>
+            <summary>What do I need to run it?</summary>
+            <p>macOS 27 on Apple Silicon, and Apple's <a href="https://github.com/apple/container" target="_blank" rel="noopener"><code>container</code></a> tool version 1.1.0 or newer (<code>brew install container</code> or the release installer). WP Container offers to start its system service for you on first launch.</p>
+          </details>
+          <details>
+            <summary>How is it different from LocalWP or WordPress Studio?</summary>
+            <p>Same friendly, one-click spirit — but WP Container is built on Apple's native container runtime rather than bundled binaries, so stopped sites truly cost nothing. It adds first-class <strong>git branch environments</strong>, real trusted HTTPS with custom domains, and a full CLI plus MCP server designed for AI coding agents. The complete WordPress install always lives in a plain folder you own.</p>
+          </details>
+          <details>
+            <summary>How is it different from Docker or a docker-compose setup?</summary>
+            <p>There's no <code>docker-compose.yml</code> to write and no Docker Desktop running in the background. Each site is two lightweight Apple containers (WordPress + MariaDB) that the app provisions, labels and reconciles automatically. Containers are disposable; your files and database persist in the site folder.</p>
+          </details>
+          <details>
+            <summary>Where do my files live?</summary>
+            <p>In a normal folder — by default <code>~/WP Container Sites/&lt;site&gt;/</code>. Inside it, <code>wordpress/</code> is the entire host-visible WP install (mount your <code>wp-content</code> git repos into it), <code>database/</code> holds MariaDB data that survives restarts, and a per-site <code>wp</code> shim runs WP-CLI in the container.</p>
+          </details>
+          <details>
+            <summary>Does it really work with AI coding agents?</summary>
+            <p>Yes — that's a core design goal. Run <code>wp-container agent-tools enable</code> to write MCP and IDE configs plus an <code>AGENTS.md</code> block into your repo. The MCP server exposes 18 tools, and every CLI command supports <code>--json</code>, so an agent can create environments, run WP-CLI, read logs and check health end to end.</p>
+          </details>
+          <details>
+            <summary>Is it free?</summary>
+            <p>Yes. WP Container is free and <a href="https://github.com/fabiankaegy/wp-container" target="_blank" rel="noopener">open source on GitHub</a>. Download the latest release, or clone the repo and build it yourself with <code>make build</code>.</p>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ FINAL CTA ============ -->
+    <section class="section section-final">
+      <div class="final-glow" aria-hidden="true"></div>
+      <div class="container narrow final-inner reveal">
+        <img src="assets/icon.png" width="72" height="72" alt="" class="final-icon">
+        <h2>Bring WordPress local — the native way.</h2>
+        <p class="lead">Free, open source, and ready for you and your AI agents.</p>
+        <div class="cta center">
+          <a class="btn btn-primary btn-lg" href="https://github.com/fabiankaegy/wp-container/releases/latest" target="_blank" rel="noopener">Download for macOS</a>
+          <a class="btn btn-ghost btn-lg" href="https://github.com/fabiankaegy/wp-container" target="_blank" rel="noopener">View on GitHub</a>
+        </div>
+        <p class="req">macOS 27 · Apple Silicon · Apple container ≥ 1.1.0</p>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============ FOOTER ============ -->
+  <footer class="footer">
+    <div class="container footer-inner">
+      <div class="footer-brand">
+        <img src="assets/icon.png" width="26" height="26" alt="">
+        <span>WP Container</span>
+      </div>
+      <nav class="footer-links" aria-label="Footer">
+        <a href="https://github.com/fabiankaegy/wp-container" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/fabiankaegy/wp-container/releases/latest" target="_blank" rel="noopener">Releases</a>
+        <a href="https://github.com/fabiankaegy/wp-container/issues" target="_blank" rel="noopener">Issues</a>
+      </nav>
+      <p class="footer-note">Open source on GitHub. Not affiliated with the WordPress Foundation or Automattic.</p>
+    </div>
+  </footer>
+
+  <script src="main.js"></script>
+</body>
+</html>
