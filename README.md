@@ -66,7 +66,12 @@ Sites are provisioned automatically (no install wizard) and log in with
 - **Studio-style dark-frame UI** — dark window shell with a light inset content
   panel, Overview / Logs / Settings tabs, collapsible **site groups** with
   drag & drop, and a **menu bar extra** for one-glance status and start/stop of
-  every site.
+  every site. Sites with a favicon or WordPress Site Icon show it as their
+  avatar; sidebar rows get right-click quick actions and a clickable
+  start/stop status dot.
+- **Menu-bar-first option** — app settings (⌘,) cover hiding the Dock icon,
+  launch at login, default sites folder and WP×PHP versions, and HTTPS-proxy
+  autostart.
 
 - **Xdebug & Elasticsearch** — per-site one-click toggles in Settings → Development.
   Xdebug builds a derived image once per base tag and points `client_host` at the
