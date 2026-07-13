@@ -59,7 +59,7 @@ public enum HostsHelperInfo {
 
 /// The helper's implementation version, returned by `helperVersion` and used as
 /// a reachability probe.
-public let hostsHelperVersion = "0.1.0"
+public let hostsHelperVersion = "0.1.1"
 
 /// Install (idempotently) the custom authorization right into the policy
 /// database using `authRef`. Both the client (which holds an interactive ref)

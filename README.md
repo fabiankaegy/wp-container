@@ -106,6 +106,15 @@ Sites are provisioned automatically (no install wizard) and log in with
 - **Dev-ready by default** — every site gets `WP_DEVELOPMENT_MODE=all` /
   `WP_ENVIRONMENT_TYPE=local`, with live `WP_DEBUG`-family switches in
   Settings → Development.
+- **Mailpit email catching** — per-site toggle; all outgoing mail lands in a
+  local mailbox (`https://<site>-mail.localhost`, plus a REST API agents can
+  read). Persistent across restarts.
+- **Per-site resource limits** — cap CPU/memory per site in
+  Settings → Resources or `wp-container limits <slug> --cpus 2 --memory 512`
+  (see [docs/RESOURCES.md](docs/RESOURCES.md)).
+- **Touch ID for privileged actions** — the optional signed hosts-helper
+  makes custom-domain changes a Touch ID dialog instead of a password prompt
+  (one-time enable in Settings → General).
 
 ## Requirements
 
