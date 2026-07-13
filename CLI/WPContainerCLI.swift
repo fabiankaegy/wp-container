@@ -236,7 +236,16 @@ struct CreateCommand: AsyncParsableCommand {
 // MARK: - start / stop / delete
 
 struct StartCommand: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "start", abstract: "Start a site or env.")
+    static let configuration = CommandConfiguration(
+        commandName: "start",
+        abstract: "Start a site (and all of its worktree envs) or a single env.",
+        discussion: """
+        Lifecycle is coupled (PLAN.md §2b): starting a SITE also starts every \
+        worktree environment created from it — the site first, then each env; a \
+        failure in one does not abort the others (env failures print as \
+        warnings). Starting an ENV slug starts just that environment.
+        """
+    )
     @Argument(help: "Site slug or env slug.") var target: String
     @OptionGroup var output: JSONOptions
 
@@ -247,11 +256,20 @@ struct StartCommand: AsyncParsableCommand {
             guard let resolved = resolveTarget(target, in: envelope) else { throw CLIErrorJSON("not_found", detail: target) }
             switch resolved {
             case .site(let site):
-                let provisioned = try await ctx.lifecycle.startSite(site)
-                if provisioned != site.provisioned {
+                let envs = envelope.envs.filter { $0.parentSiteID == site.id }
+                let outcome = await ctx.lifecycle.startSiteWithEnvs(site, envs: envs)
+                if outcome.provisioned != site.provisioned {
                     _ = try await ctx.persistence.mutate { env in
-                        if let i = env.sites.firstIndex(where: { $0.id == site.id }) { env.sites[i].provisioned = provisioned }
+                        if let i = env.sites.firstIndex(where: { $0.id == site.id }) { env.sites[i].provisioned = outcome.provisioned }
                     }
+                }
+                // Env failures are non-fatal warnings; a parent failure fails
+                // the command (envs were still attempted first, per §2b).
+                for message in outcome.envErrorMessages {
+                    FileHandle.standardError.write(Data(("warning: env start failed — \(message)\n").utf8))
+                }
+                if let parentError = outcome.parentErrorMessage {
+                    throw CLIErrorJSON("start_failed", detail: parentError)
                 }
             case .env(let env):
                 _ = try await ctx.lifecycle.startContainers(env)
@@ -266,7 +284,15 @@ struct StartCommand: AsyncParsableCommand {
 }
 
 struct StopCommand: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "stop", abstract: "Stop a site or env.")
+    static let configuration = CommandConfiguration(
+        commandName: "stop",
+        abstract: "Stop a site (and all of its worktree envs) or a single env.",
+        discussion: """
+        Lifecycle is coupled (PLAN.md §2b): stopping a SITE also stops every \
+        worktree environment created from it. Stopping an ENV slug stops just \
+        that environment.
+        """
+    )
     @Argument(help: "Site slug or env slug.") var target: String
     @OptionGroup var output: JSONOptions
 
@@ -275,7 +301,13 @@ struct StopCommand: AsyncParsableCommand {
         do {
             let envelope = try await ctx.load()
             guard let resolved = resolveTarget(target, in: envelope) else { throw CLIErrorJSON("not_found", detail: target) }
-            await ctx.lifecycle.stop(resolved.instance)
+            switch resolved {
+            case .site(let site):
+                let envs = envelope.envs.filter { $0.parentSiteID == site.id }
+                await ctx.lifecycle.stopSiteWithEnvs(site, envs: envs)
+            case .env(let env):
+                await ctx.lifecycle.stop(env)
+            }
             if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(target) stopped"))) }
             else { emitLine("Stopped \(target).") }
         } catch {

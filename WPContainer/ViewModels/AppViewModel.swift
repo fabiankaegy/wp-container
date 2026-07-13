@@ -629,23 +629,32 @@ public final class AppViewModel {
         return store.site(id: selection)
     }
 
+    /// The selected worktree env, when the sidebar selection is an env row (§2b).
+    public var selectedEnv: WorktreeEnv? {
+        guard let selection else { return nil }
+        return store.env(id: selection)
+    }
+
+    /// Coupled lifecycle (§2b): starting a site also starts all of its worktree
+    /// envs (parent first, then envs; individual failures surfaced together).
     public func startSite(_ site: Site) {
         Task {
-            do {
-                let provisioned = try await lifecycle.startSite(site)
-                if provisioned != site.provisioned {
-                    var updated = site
-                    updated.provisioned = provisioned
-                    await store.upsertSite(updated)
-                }
-            } catch {
-                lastError = SiteLifecycleErrorText(error)
+            let envs = store.envs(forSite: site.id)
+            let outcome = await lifecycle.startSiteWithEnvs(site, envs: envs)
+            if outcome.provisioned != site.provisioned {
+                var updated = site
+                updated.provisioned = outcome.provisioned
+                await store.upsertSite(updated)
+            }
+            if let summary = outcome.errorSummary {
+                lastError = summary
             }
         }
     }
 
+    /// Coupled lifecycle (§2b): stopping a site also stops its worktree envs.
     public func stopSite(_ site: Site) {
-        Task { await lifecycle.stop(site) }
+        Task { await lifecycle.stopSiteWithEnvs(site, envs: store.envs(forSite: site.id)) }
     }
 
     public func deleteSite(_ site: Site, trashFolder: Bool) {
@@ -698,11 +707,14 @@ public final class AppViewModel {
         Task { await lifecycle.stop(env) }
     }
 
-    public func deleteEnv(_ env: WorktreeEnv) {
+    /// Delete an env. The git branch is ALWAYS kept; `keepWorktree` optionally
+    /// leaves the worktree checkout on disk (§2b context-menu option).
+    public func deleteEnv(_ env: WorktreeEnv, keepWorktree: Bool = false) {
         Task {
             let parent = store.site(id: env.parentSiteID)
-            await worktrees.delete(env, parent: parent, keepBranch: true, keepWorktree: false)
+            await worktrees.delete(env, parent: parent, keepBranch: true, keepWorktree: keepWorktree)
             await store.removeEnv(id: env.id)
+            if selection == env.id { selection = env.parentSiteID }
             try? await ca.removeLeafCoverage(["\(env.envSlug).localhost"])
         }
     }

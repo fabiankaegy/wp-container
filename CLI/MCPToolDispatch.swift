@@ -208,20 +208,34 @@ enum MCPToolDispatch {
 
     // MARK: - Lifecycle
 
+    /// Coupled lifecycle (§2b): starting a site also starts its worktree envs
+    /// (parent first, then envs; env failures reported but non-fatal).
     private static func siteStart(ctx: CLIContext, slug: String) async throws -> CallTool.Result {
         let site = try await resolveSite(slug, ctx: ctx)
-        let provisioned = try await ctx.lifecycle.startSite(site)
-        if provisioned != site.provisioned {
+        let envs = try await ctx.load().envs.filter { $0.parentSiteID == site.id }
+        let outcome = await ctx.lifecycle.startSiteWithEnvs(site, envs: envs)
+        if outcome.provisioned != site.provisioned {
             _ = try await ctx.persistence.mutate { env in
-                if let i = env.sites.firstIndex(where: { $0.id == site.id }) { env.sites[i].provisioned = provisioned }
+                if let i = env.sites.firstIndex(where: { $0.id == site.id }) { env.sites[i].provisioned = outcome.provisioned }
             }
+        }
+        if let parentError = outcome.parentErrorMessage {
+            throw ToolError("start_failed", parentError)
+        }
+        if !outcome.envErrorMessages.isEmpty {
+            return MCPResult.json([
+                "slug": site.slug, "status": "running",
+                "envWarnings": outcome.envErrorMessages,
+            ])
         }
         return try await siteStatus(ctx: ctx, slug: slug)
     }
 
+    /// Coupled lifecycle (§2b): stopping a site also stops its worktree envs.
     private static func siteStop(ctx: CLIContext, slug: String) async throws -> CallTool.Result {
         let site = try await resolveSite(slug, ctx: ctx)
-        await ctx.lifecycle.stop(site)
+        let envs = try await ctx.load().envs.filter { $0.parentSiteID == site.id }
+        await ctx.lifecycle.stopSiteWithEnvs(site, envs: envs)
         return MCPResult.json(["slug": slug, "status": "stopped"])
     }
 

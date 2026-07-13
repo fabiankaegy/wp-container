@@ -46,16 +46,17 @@ struct MenuBarContent: View {
         count += vm.store.sortedGroups.filter { group in
             vm.sites.contains { $0.groupID == group.id }
         }.count
-        if !runningEnvs.isEmpty { count += 1 }
         return count
     }
 
     /// The site/env list itself (shared by the intrinsic and scrolling layouts).
+    /// Running worktree envs are nested directly under their parent site with a
+    /// small indent + branch glyph (§2b), mirroring the sidebar's nesting.
     private var list: some View {
         VStack(alignment: .leading, spacing: 1) {
             // Ungrouped sites first.
             ForEach(vm.sites.filter { $0.groupID == nil }) { site in
-                SiteMenuRow(site: site, focus: focusMainWindow)
+                siteBlock(site)
             }
             // Grouped sites, in sidebar order, with tiny headers.
             ForEach(vm.store.sortedGroups) { group in
@@ -63,19 +64,21 @@ struct MenuBarContent: View {
                 if !sites.isEmpty {
                     sectionHeader(group.name)
                     ForEach(sites) { site in
-                        SiteMenuRow(site: site, focus: focusMainWindow)
+                        siteBlock(site)
                     }
-                }
-            }
-            // Running worktree environments.
-            if !runningEnvs.isEmpty {
-                sectionHeader("Environments")
-                ForEach(runningEnvs) { env in
-                    EnvMenuRow(env: env, focus: focusMainWindow)
                 }
             }
         }
         .padding(6)
+    }
+
+    /// One site row plus its running envs nested/indented underneath.
+    @ViewBuilder
+    private func siteBlock(_ site: Site) -> some View {
+        SiteMenuRow(site: site, focus: focusMainWindow)
+        ForEach(runningEnvs.filter { $0.parentSiteID == site.id }) { env in
+            EnvMenuRow(env: env, focus: focusMainWindow)
+        }
     }
 
     private var header: some View {
@@ -165,7 +168,9 @@ private struct SiteMenuRow: View {
     }
 }
 
-/// One running worktree-env row in the menu bar popover.
+/// One running worktree-env row in the menu bar popover: indented under its
+/// parent site with a branch glyph (§2b). Clicking focuses the env's detail
+/// pane in the main window.
 private struct EnvMenuRow: View {
     @Environment(AppViewModel.self) private var vm
     let env: WorktreeEnv
@@ -173,12 +178,15 @@ private struct EnvMenuRow: View {
     @State private var hovering = false
 
     var body: some View {
-        HStack(spacing: 9) {
-            StatusDot(status: env.status, size: 8)
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.triangle.branch")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 12)
+            StatusDot(status: env.status, size: 7)
             VStack(alignment: .leading, spacing: 0) {
-                Label(env.branch, systemImage: "arrow.triangle.branch")
-                    .labelStyle(.titleAndIcon)
-                    .font(.callout.weight(.medium)).lineLimit(1)
+                Text(env.branch)
+                    .font(.footnote.weight(.medium)).lineLimit(1)
                 Text("localhost:\(String(env.port))")
                     .font(.caption2).foregroundStyle(.secondary)
             }
@@ -187,12 +195,17 @@ private struct EnvMenuRow: View {
                        start: { vm.startEnv(env) },
                        stop: { vm.stopEnv(env) })
         }
-        .padding(.horizontal, 8).padding(.vertical, 5)
+        .padding(.vertical, 4)
+        .padding(.trailing, 8)
+        .padding(.leading, 8)
+        // Nest under the parent row.
+        .padding(.leading, 18)
         .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
-            .fill(hovering ? Color.primary.opacity(0.06) : .clear))
+            .fill(hovering ? Color.primary.opacity(0.06) : .clear)
+            .padding(.leading, 18))
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .onTapGesture { focus(env.parentSiteID) }
+        .onTapGesture { focus(env.id) }
     }
 }
 

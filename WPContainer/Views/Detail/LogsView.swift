@@ -3,10 +3,27 @@ import WPContainerKit
 
 /// Live streaming container logs with a wp/db picker, follow toggle, and clear
 /// button. The stream lifecycle is tied to view appearance and cancelled on
-/// disappear (or when the picker/follow/site changes) by `SiteDetailViewModel`.
+/// disappear (or when the picker/follow/instance changes) by
+/// `SiteDetailViewModel`. Serves both sites and worktree envs — anything with
+/// wp/db container names (§2b env detail pane).
 struct LogsView: View {
     @Environment(AppViewModel.self) private var appVM
-    let site: Site
+    /// Stable identity of the shown instance (site or env id).
+    let instanceID: UUID
+    let wpContainer: String
+    let dbContainer: String
+
+    init(site: Site) {
+        self.instanceID = site.id
+        self.wpContainer = site.wpContainerName
+        self.dbContainer = site.dbContainerName
+    }
+
+    init(env: WorktreeEnv) {
+        self.instanceID = env.id
+        self.wpContainer = env.wpContainerName
+        self.dbContainer = env.dbContainerName
+    }
 
     @State private var model: SiteDetailViewModel?
 
@@ -20,13 +37,13 @@ struct LogsView: View {
                 Color.clear.frame(height: 1)
             }
         }
-        .task(id: site.id) {
+        .task(id: instanceID) {
             let m = model ?? SiteDetailViewModel(cli: appVM.cli)
-            m.configure(wpContainer: site.wpContainerName, dbContainer: site.dbContainerName)
+            m.configure(wpContainer: wpContainer, dbContainer: dbContainer)
             model = m
             m.start()
             defer { m.stop() }
-            // Keep the task alive for the lifetime of this site selection.
+            // Keep the task alive for the lifetime of this selection.
             try? await Task.sleep(for: .seconds(60 * 60 * 24 * 365))
         }
     }

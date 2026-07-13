@@ -10,6 +10,9 @@ struct SidebarView: View {
     @Environment(AppViewModel.self) private var vm
 
     @State private var collapsed: Set<UUID> = []
+    /// Sites whose nested env rows are collapsed (§2b). Persisted so the
+    /// disclosure state survives relaunch; default (absent) = expanded.
+    @State private var envCollapsed: Set<UUID> = SidebarView.loadEnvCollapsed()
     @State private var newGroupPresented = false
     @State private var newGroupName = ""
     @State private var renamingGroup: SiteGroup?
@@ -17,6 +20,23 @@ struct SidebarView: View {
 
     private var groups: [SiteGroup] { vm.store.sortedGroups }
     private var ungrouped: [Site] { vm.sites.filter { $0.groupID == nil } }
+
+    // MARK: Env-collapse persistence (§2b)
+
+    private static let envCollapsedKey = "sidebarEnvCollapsedSites"
+
+    private static func loadEnvCollapsed() -> Set<UUID> {
+        let raw = UserDefaults.standard.stringArray(forKey: envCollapsedKey) ?? []
+        return Set(raw.compactMap(UUID.init(uuidString:)))
+    }
+
+    private func toggleEnvCollapsed(_ siteID: UUID) {
+        withAnimation(.easeOut(duration: 0.15)) {
+            if envCollapsed.contains(siteID) { envCollapsed.remove(siteID) }
+            else { envCollapsed.insert(siteID) }
+        }
+        UserDefaults.standard.set(envCollapsed.map(\.uuidString), forKey: Self.envCollapsedKey)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -54,8 +74,7 @@ struct SidebarView: View {
             LazyVStack(alignment: .leading, spacing: 2) {
                 // Ungrouped sites at the top.
                 ForEach(ungrouped) { site in
-                    SidebarSiteRow(site: site, groups: groups,
-                                   onMove: { vm.moveSite(site, toGroup: $0) })
+                    siteBlock(site)
                 }
                 // A drop target so a site can be dragged back to "ungrouped".
                 if !groups.isEmpty {
@@ -72,6 +91,24 @@ struct SidebarView: View {
         }
     }
 
+    /// One site row plus its worktree-env rows nested underneath in a
+    /// collapsible disclosure (§2b): env rows are indented, smaller, carry a
+    /// branch glyph instead of an avatar, and are selectable like sites.
+    @ViewBuilder
+    private func siteBlock(_ site: Site) -> some View {
+        let envs = vm.store.envs(forSite: site.id)
+        SidebarSiteRow(site: site, groups: groups,
+                       envCount: envs.count,
+                       isExpanded: !envCollapsed.contains(site.id),
+                       onToggleExpanded: { toggleEnvCollapsed(site.id) },
+                       onMove: { vm.moveSite(site, toGroup: $0) })
+        if !envs.isEmpty && !envCollapsed.contains(site.id) {
+            ForEach(envs) { env in
+                SidebarEnvRow(env: env)
+            }
+        }
+    }
+
     @ViewBuilder
     private func groupSection(_ group: SiteGroup) -> some View {
         let sites = vm.sites.filter { $0.groupID == group.id }
@@ -81,8 +118,7 @@ struct SidebarView: View {
             groupHeader(group, count: sites.count, isCollapsed: isCollapsed)
             if !isCollapsed {
                 ForEach(sites) { site in
-                    SidebarSiteRow(site: site, groups: groups,
-                                   onMove: { vm.moveSite(site, toGroup: $0) })
+                    siteBlock(site)
                 }
                 if sites.isEmpty {
                     Text("Drop sites here")
@@ -260,6 +296,9 @@ struct SidebarSiteRow: View {
     @Environment(AppViewModel.self) private var vm
     let site: Site
     let groups: [SiteGroup]
+    var envCount: Int = 0
+    var isExpanded: Bool = true
+    var onToggleExpanded: (() -> Void)? = nil
     let onMove: (UUID?) -> Void
 
     @State private var hovering = false
@@ -270,8 +309,10 @@ struct SidebarSiteRow: View {
     var body: some View {
         // The trailing status dot is a start/stop control; its clicks are
         // consumed by its own Button so they never change row selection.
-        SiteRow(site: site, envCount: vm.store.envs(forSite: site.id).count,
-                onToggleRun: toggleRun)
+        SiteRow(site: site, envCount: envCount,
+                onToggleRun: toggleRun,
+                isExpanded: isExpanded,
+                onToggleExpanded: onToggleExpanded)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(isSelected ? Theme.sidebarSelection
@@ -350,5 +391,97 @@ struct SidebarSiteRow: View {
     private func delete(trashFolder: Bool) {
         vm.deleteSite(site, trashFolder: trashFolder)
         if vm.selection == site.id { vm.selection = nil }
+    }
+}
+
+/// A worktree-env row nested under its parent site (PLAN.md §2b): indented,
+/// visually distinct from site rows — smaller height, a branch glyph instead of
+/// an avatar, branch name as title and port as subtitle — selectable (shows the
+/// env detail pane), with the same interactive status-dot behavior and a
+/// dedicated context menu.
+struct SidebarEnvRow: View {
+    @Environment(AppViewModel.self) private var vm
+    let env: WorktreeEnv
+
+    @State private var hovering = false
+    @State private var confirmingDelete = false
+
+    private var isSelected: Bool { vm.selection == env.id }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.triangle.branch")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(isSelected || hovering ? Theme.onFrame : Theme.onFrameSecondary)
+                .frame(width: 16)
+
+            VStack(alignment: .leading, spacing: 0) {
+                Text(env.branch)
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(Theme.onFrame)
+                    .lineLimit(1)
+                Text("localhost:\(String(env.port))")
+                    .font(.caption2)
+                    .foregroundStyle(Theme.onFrameSecondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 4)
+
+            InteractiveStatusDot(status: env.status, onToggle: toggleRun)
+        }
+        .padding(.vertical, 3)
+        .padding(.leading, 8)
+        .padding(.trailing, 8)
+        .contentShape(Rectangle())
+        // Indent the whole row under the parent's avatar column.
+        .padding(.leading, 26)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(isSelected ? Theme.sidebarSelection
+                      : (hovering ? Theme.sidebarHover : Color.clear))
+                .padding(.leading, 26)
+        )
+        .onHover { hovering = $0 }
+        .onTapGesture { vm.selection = env.id }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .animation(.easeOut(duration: 0.12), value: isSelected)
+        .contextMenu { contextMenu }
+        .confirmationDialog("Delete environment \"\(env.branch)\"?",
+                            isPresented: $confirmingDelete, titleVisibility: .visible) {
+            Button("Delete Environment", role: .destructive) { vm.deleteEnv(env) }
+            Button("Delete, Keep Worktree Checkout", role: .destructive) { vm.deleteEnv(env, keepWorktree: true) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Stops its containers and removes the cloned files. The git branch \(env.branch) is always kept; optionally keep the worktree checkout on disk too.")
+        }
+    }
+
+    // MARK: Context menu (§2b)
+
+    @ViewBuilder
+    private var contextMenu: some View {
+        Button("Open", systemImage: "safari") { SystemActions.openInBrowser(env.localURL) }
+            .disabled(!env.status.isRunning)
+        Button("WP Admin", systemImage: "person.badge.key") { SystemActions.openInBrowser(env.adminURL) }
+            .disabled(!env.status.isRunning)
+        Button("Copy URL", systemImage: "link") { SystemActions.copyToClipboard(env.localURL.absoluteString) }
+
+        if env.status.isRunning {
+            Button("Stop", systemImage: "stop.fill") { vm.stopEnv(env) }
+        } else {
+            Button("Start", systemImage: "play.fill") { vm.startEnv(env) }
+                .disabled(env.status.isTransitional)
+        }
+        Button("Reveal in Finder", systemImage: "folder") { SystemActions.revealInFinder(env.envPath) }
+
+        Divider()
+
+        Button("Delete Environment…", systemImage: "trash", role: .destructive) { confirmingDelete = true }
+    }
+
+    private func toggleRun() {
+        if env.status.isRunning { vm.stopEnv(env) }
+        else if !env.status.isTransitional { vm.startEnv(env) }
     }
 }

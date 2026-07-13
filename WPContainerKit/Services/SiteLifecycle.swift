@@ -139,6 +139,57 @@ public actor SiteLifecycle {
         return provisioned
     }
 
+    // MARK: - Coupled site + env lifecycle (PLAN.md §2b)
+
+    /// Outcome of a coupled start: the parent's provisioned flag, plus any
+    /// errors — surfaced individually so one env failing never hides the rest.
+    public struct CoupledStartOutcome: Sendable {
+        public var provisioned: Bool
+        /// Parent site start failure, if any (envs are still attempted).
+        public var parentErrorMessage: String?
+        /// Per-env failures as "<envSlug>: <message>".
+        public var envErrorMessages: [String]
+
+        /// One human-readable summary, or nil when everything started.
+        public var errorSummary: String? {
+            var parts: [String] = []
+            if let parentErrorMessage { parts.append(parentErrorMessage) }
+            parts.append(contentsOf: envErrorMessages)
+            return parts.isEmpty ? nil : parts.joined(separator: "\n")
+        }
+    }
+
+    /// Start a site AND all of its worktree envs (coupled lifecycle, §2b).
+    /// The parent is sequenced first; a parent failure does NOT abort the env
+    /// starts already queued — every env is still attempted, and each failure
+    /// is surfaced individually (status events + the returned messages).
+    /// Never throws: callers read `errorSummary`.
+    public func startSiteWithEnvs(_ site: Site, envs: [WorktreeEnv]) async -> CoupledStartOutcome {
+        var outcome = CoupledStartOutcome(provisioned: site.provisioned, envErrorMessages: [])
+        do {
+            outcome.provisioned = try await startSite(site)
+        } catch {
+            outcome.parentErrorMessage = Self.message(for: error)
+        }
+        for env in envs {
+            do {
+                _ = try await startContainers(env)
+                markRunning(env.id)
+            } catch {
+                outcome.envErrorMessages.append("\(env.envSlug): \(Self.message(for: error))")
+            }
+        }
+        return outcome
+    }
+
+    /// Stop a site AND all of its worktree envs (coupled lifecycle, §2b).
+    public func stopSiteWithEnvs(_ site: Site, envs: [WorktreeEnv]) async {
+        await stop(site)
+        for env in envs {
+            await stop(env)
+        }
+    }
+
     // MARK: - Stop / delete
 
     public func stop(_ inst: any RunnableInstance) async {

@@ -114,10 +114,29 @@ core moves into a shared framework and a CLI executable (binary `wp-container`, 
   the file (DispatchSource) to live-reload CLI-made changes; container labels remain
   the reconciliation ground truth.
 
-**UI:** each site's detail view gets a "Branches" section listing its worktree envs
-(branch name, status dot, port, Open/Start/Stop/Trash), plus a "New branch
-environment…" sheet (repo picker auto-detected from git repos found under
-`wp-content`, branch field with existing-branch autocomplete).
+**UI (nested design):** worktree envs are shown differently from sites and are
+first-class in the sidebar:
+- Env rows render INDENTED under their parent site row in a collapsible
+  disclosure (chevron on the parent row, default expanded, collapse state
+  persisted per site). Env rows are visually distinct: smaller height, a
+  branch glyph (`arrow.triangle.branch`) instead of an avatar, branch name as
+  title, port subtitle, and the same interactive status dot as sites.
+- A site with ≥1 env gets a "layer" badge (`square.3.layers.3d`) overlaid on
+  its avatar corner (favicon/initials avatar stays underneath).
+- Env rows are selectable and show a compact detail pane (header +
+  Open/WP Admin/Copy URL/Finder, overview, live logs, delete with keep-branch
+  semantics + keep-worktree checkbox), plus a context menu (Open, WP Admin,
+  Copy URL, Start/Stop, Reveal in Finder, Delete Environment…).
+- **Coupled lifecycle:** starting a site also starts all its worktree envs and
+  stopping it stops them (kit-level `startSiteWithEnvs`/`stopSiteWithEnvs`, so
+  app, CLI `wp-container start|stop <site>` and MCP behave identically; the
+  parent is sequenced first and per-env failures surface individually without
+  aborting the rest). Envs remain individually start/stoppable.
+- The menu bar extra nests running envs under their parent site row (small
+  indent + branch glyph).
+- Each site's detail view keeps its "Branches" card, plus the "New branch
+  environment…" sheet (repo picker auto-detected from git repos found under
+  `wp-content`, branch field with existing-branch autocomplete).
 
 ## 2c. Per-site add-ons: Xdebug & Elasticsearch (one-click toggles)
 
@@ -339,8 +358,9 @@ row. The list mirrors sidebar grouping order but flat/compact. App keeps running
   Open Site, WP Admin, Reveal in Finder, Open in Terminal, Copy URL, New Branch
   Environment…, Move to Group ▸, and Delete Site… (confirmation offering
   keep-or-trash-folder). All reuse existing `AppViewModel`/`SystemActions` — no
-  new logic. Worktree envs are not rendered as sidebar rows (they live in the
-  site detail Branches card + menu bar), so no sidebar env context menu is added.
+  new logic. Worktree envs ARE sidebar rows now (nested under their parent per
+  §2b) with their own context menu (Open, WP Admin, Copy URL, Start/Stop,
+  Reveal in Finder, Delete Environment…).
 - **Clickable status dot.** In the sidebar the status dot is a start/stop
   control (`InteractiveStatusDot`): hover swaps the dot for a play/stop glyph in
   a fixed 16pt hit area (no layout shift), click toggles run state, transitional

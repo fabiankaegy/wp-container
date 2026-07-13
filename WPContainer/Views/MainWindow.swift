@@ -55,6 +55,11 @@ struct MainWindow: View {
         } else if let site = vm.selectedSite {
             SiteDetailView(site: site)
                 .id(site.id)
+        } else if let env = vm.selectedEnv {
+            // Worktree-env rows are selectable in the sidebar (§2b) and get a
+            // compact detail pane of their own.
+            EnvDetailView(env: env)
+                .id(env.id)
         } else {
             ContentUnavailableView {
                 Label("No Site Selected", systemImage: "square.stack.3d.up")
