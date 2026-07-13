@@ -2,10 +2,22 @@ import Foundation
 
 /// Filesystem helpers for site / env folder layout.
 public enum SiteFolders {
-    /// Default root for new sites: `~/WP Container Sites`.
-    public static var defaultSitesRoot: URL {
+    /// The built-in default root for new sites: `~/WP Container Sites`. Used as
+    /// the fallback when no user override is set.
+    public static var builtInDefaultSitesRoot: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("WP Container Sites", isDirectory: true)
+    }
+
+    /// Default root for new sites: the user's override from Settings (PLAN.md
+    /// §2l, `UserDefaults` key `defaultSitesRoot`) when set, else the built-in
+    /// `~/WP Container Sites`. Both the app's Add Site guide and the CLI honor it.
+    public static var defaultSitesRoot: URL {
+        if let override = UserDefaults.standard.string(forKey: "defaultSitesRoot"),
+           !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
+        return builtInDefaultSitesRoot
     }
 
     /// Ensure `wordpress/` and `database/` exist for a runnable instance.

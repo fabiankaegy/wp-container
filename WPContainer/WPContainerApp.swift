@@ -8,10 +8,17 @@ struct WPContainerApp: App {
     init() {
         let vm = AppViewModel()
         _viewModel = State(initialValue: vm)
+        // Apply the persisted Dock-icon preference (menu-bar-first mode) before
+        // the app finishes launching so there is no visible Dock flicker.
+        AppSettings.applyActivationPolicy()
         // Bootstrap at APP level, not window level: the menu bar extra must have
         // a loaded store + running reconcile loop even if the popover is opened
         // before the main window appears (or after it has been closed).
-        Task { @MainActor in await vm.onAppear() }
+        Task { @MainActor in
+            await vm.onAppear()
+            // Optionally spin up the HTTPS proxy at launch (PLAN.md §2l).
+            if AppSettings.autoStartProxy { await vm.ensureProxyRunning() }
+        }
     }
 
     var body: some Scene {
@@ -24,6 +31,13 @@ struct WPContainerApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
         .commands { AppCommands(vm: viewModel) }
+
+        // App Settings window (PLAN.md §2l). Declaring a `Settings` scene gives
+        // ⌘, and the "Settings…" app-menu item for free.
+        Settings {
+            SettingsWindow()
+                .environment(viewModel)
+        }
 
         // Menu bar extra (PLAN.md §2h): a compact list of all sites + running
         // envs with inline start/stop. Keeps the app alive when the main window

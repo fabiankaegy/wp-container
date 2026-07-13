@@ -16,9 +16,9 @@ struct AddSiteSheet: View {
     @State private var choosingFolder = false
     @State private var groupID: UUID?
 
-    // Versions
-    @State private var wpVersion = "latest"
-    @State private var php = WordPressImageCatalog.defaultPHP
+    // Versions — prefilled from the app's Settings defaults (PLAN.md §2l).
+    @State private var wpVersion = UserDefaults.standard.string(forKey: AppSettings.defaultWordPressVersionKey) ?? "latest"
+    @State private var php = UserDefaults.standard.string(forKey: AppSettings.defaultPHPVersionKey) ?? WordPressImageCatalog.defaultPHP
 
     // Options
     @State private var networkType: NetworkType = .none
