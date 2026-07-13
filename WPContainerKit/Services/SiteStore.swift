@@ -47,6 +47,8 @@ public final class SiteStore {
 
     public var takenPorts: Set<Int> {
         Set(sites.map(\.port)).union(envs.map(\.port))
+            .union(sites.compactMap(\.mailpitPort))
+            .union(envs.compactMap(\.mailpitPort))
     }
     public var existingSlugs: Set<String> {
         Set(sites.map(\.slug))

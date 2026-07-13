@@ -38,6 +38,15 @@ public protocol RunnableInstance: Sendable {
     var elasticsearchEnabled: Bool { get }
     /// WordPress network type — governs multisite provisioning (§2j).
     var networkType: NetworkType { get }
+    /// Per-instance CPU cap for `container run --cpus` (issue #11); nil = default.
+    var cpuLimit: Int? { get }
+    /// Per-instance memory cap in MB for `container run --memory` (issue #11);
+    /// nil = default.
+    var memoryLimitMB: Int? { get }
+    /// Whether a per-instance Mailpit email-catcher container runs (issue #10).
+    var mailpitEnabled: Bool { get }
+    /// The localhost port the Mailpit web UI is published on (issue #10).
+    var mailpitPort: Int? { get }
 }
 
 public extension RunnableInstance {
@@ -45,6 +54,8 @@ public extension RunnableInstance {
     var dbContainerName: String { "wpc-\(containerSlug)-db" }
     /// Per-instance Elasticsearch sidecar container name (§2c).
     var esContainerName: String { "wpc-\(containerSlug)-es" }
+    /// Per-instance Mailpit container name (issue #10).
+    var mailContainerName: String { "wpc-\(containerSlug)-mail" }
     var localURL: URL { URL(string: "http://127.0.0.1:\(port)")! }
     var adminURL: URL { URL(string: "http://127.0.0.1:\(port)/wp-admin")! }
     var extraMounts: [Mount] { [] }
@@ -52,8 +63,25 @@ public extension RunnableInstance {
     var xdebugEnabled: Bool { false }
     var elasticsearchEnabled: Bool { false }
     var networkType: NetworkType { .none }
+    var cpuLimit: Int? { nil }
+    var memoryLimitMB: Int? { nil }
+    var mailpitEnabled: Bool { false }
+    var mailpitPort: Int? { nil }
     /// Per-instance Elasticsearch data directory bind mount host path.
     var elasticsearchFolder: URL {
         wordpressFolder.deletingLastPathComponent().appendingPathComponent("elasticsearch", isDirectory: true)
     }
+    /// Per-instance Mailpit persistent data directory bind mount host path
+    /// (issue #10). Sits alongside `wordpress/`, never inside it.
+    var mailpitFolder: URL {
+        wordpressFolder.deletingLastPathComponent().appendingPathComponent("mailpit", isDirectory: true)
+    }
+    /// The Mailpit web-UI URL on its published localhost port, if enabled and a
+    /// port is assigned (issue #10). The reliable, proxy-independent mailbox URL.
+    var mailboxURL: URL? {
+        guard mailpitEnabled, let port = mailpitPort else { return nil }
+        return URL(string: "http://127.0.0.1:\(port)")
+    }
+    /// The proxy hostname for the mailbox (`<slug>-mail.localhost`, issue #10).
+    var mailboxHost: String { "\(containerSlug)-mail.localhost" }
 }

@@ -119,10 +119,19 @@ public final class HTTPSProxy: @unchecked Sendable {
             let route = Route(port: site.port, slug: site.slug, displayName: site.name)
             map["\(site.slug).localhost"] = route
             if let domain = site.customDomain, !domain.isEmpty { map[domain.lowercased()] = route }
+            // Mailpit web UI at <slug>-mail.localhost (issue #10).
+            if site.mailpitEnabled, let mp = site.mailpitPort {
+                map["\(site.slug)-mail.localhost"] = Route(port: mp, slug: site.slug,
+                                                           displayName: "\(site.name) · Mailbox")
+            }
         }
         for env in envelope.envs {
             map["\(env.envSlug).localhost"] = Route(port: env.port, slug: env.envSlug,
                                                     displayName: "\(env.parentSlug) · \(env.branch)")
+            if env.mailpitEnabled, let mp = env.mailpitPort {
+                map["\(env.envSlug)-mail.localhost"] = Route(port: mp, slug: env.envSlug,
+                                                             displayName: "\(env.parentSlug) · \(env.branch) · Mailbox")
+            }
         }
         return map
     }
@@ -136,8 +145,16 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// (includes custom domains and subdomain-multisite wildcards, §2i/§2j).
     public static func sanHosts(from envelope: StoreEnvelope) -> [String] {
         var hosts = Set<String>()
-        for site in envelope.sites { site.proxyHosts.forEach { hosts.insert($0) } }
-        for env in envelope.envs { hosts.insert("\(env.envSlug).localhost") }
+        for site in envelope.sites {
+            site.proxyHosts.forEach { hosts.insert($0) }
+            // Cover the mailbox hostname so https://<slug>-mail.localhost is
+            // trusted when the proxy serves it (issue #10).
+            if site.mailpitEnabled, site.mailpitPort != nil { hosts.insert("\(site.slug)-mail.localhost") }
+        }
+        for env in envelope.envs {
+            hosts.insert("\(env.envSlug).localhost")
+            if env.mailpitEnabled, env.mailpitPort != nil { hosts.insert("\(env.envSlug)-mail.localhost") }
+        }
         return Array(hosts)
     }
 

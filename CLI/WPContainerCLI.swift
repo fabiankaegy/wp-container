@@ -25,6 +25,8 @@ struct WPContainerCLI: AsyncParsableCommand {
             ProxyCommand.self,
             XdebugCommand.self,
             ElasticsearchCommand.self,
+            MailpitCommand.self,
+            LimitsCommand.self,
             DomainCommand.self,
             ResolveSiteCommand.self,
             SetupCommand.self,
@@ -159,6 +161,8 @@ struct CreateCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Multisite network: subdirectory | subdomain.") var multisite: String?
     @Option(name: .long, help: "Custom domain, e.g. mysite.local.") var domain: String?
     @Option(name: .long, help: "Sidebar group name (created if it doesn't exist).") var group: String?
+    @Option(name: .long, help: "CPU cap per container (1–8; default: container default of 4).") var cpus: Int?
+    @Option(name: .long, help: "Memory cap per container in MB (e.g. 512; default: container default of 1024).") var memory: Int?
     @OptionGroup var output: JSONOptions
 
     func run() async throws {
@@ -207,9 +211,12 @@ struct CreateCommand: AsyncParsableCommand {
             let sitePHPLabel = phpLabel
             let siteDomain = customDomain
             let siteNetwork = networkType
+            let siteCPU = cpus
+            let siteMemory = memory
             guard let (_, created, updated) = try await ctx.persistence.allocatePort(reserve: { port, env in
                 var s = Site(name: siteName, slug: slug, path: sitePath,
                              port: port, imageTag: siteImageTag, phpVersion: sitePHPLabel,
+                             cpuLimit: siteCPU, memoryLimitMB: siteMemory,
                              customDomain: siteDomain, networkType: siteNetwork)
                 if let groupName, !groupName.trimmingCharacters(in: .whitespaces).isEmpty {
                     if let existing = env.groups.first(where: { $0.name.caseInsensitiveCompare(groupName) == .orderedSame }) {
@@ -399,10 +406,8 @@ struct WorktreeCreate: AsyncParsableCommand {
             let repoArg = repo
             let branchArg = branch
             guard let (_, reserved, _) = try await ctx.persistence.allocatePort(reserve: { port, store in
-                let d = WorktreeEnvService.descriptor(parent: parent, repoRelPath: repoArg,
-                                                      branch: branchArg, port: port)
-                store.envs.append(d)
-                return d
+                WorktreeEnvService.reservedDescriptor(parent: parent, repoRelPath: repoArg,
+                                                      branch: branchArg, port: port, into: &store)
             }) else { throw CLIErrorJSON("no_free_port") }
 
             do {
@@ -530,7 +535,10 @@ struct WPCommand: AsyncParsableCommand {
             // form (e.g. `wp itest-alpha -- core version`); wp-cli itself treats
             // "--" as an unknown command, so strip a single leading occurrence.
             if passthroughArgs.first == "--" { passthroughArgs.removeFirst() }
-            let result = try await ctx.cli.runCapturing(SiteRecipe.wpProxyArgs(inst, dbHost: dbHost, wpArgs: passthroughArgs))
+            // Route wp_mail through Mailpit too when the site has it enabled.
+            var mailHost: String? = nil
+            if inst.mailpitEnabled { mailHost = (try? await ctx.cli.ipAddress(of: inst.mailContainerName)) ?? nil }
+            let result = try await ctx.cli.runCapturing(SiteRecipe.wpProxyArgs(inst, dbHost: dbHost, wpArgs: passthroughArgs, mailpitHost: mailHost))
             if jsonOut {
                 struct WPResult: Codable { let stdout: String; let stderr: String; let exitCode: Int32 }
                 emitLine(CLIJSON.string(WPResult(stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode)))

@@ -28,6 +28,8 @@ struct DevelopmentCard: View {
                 Divider().opacity(0.5)
                 elasticsearchRow
                 Divider().opacity(0.5)
+                mailpitRow
+                Divider().opacity(0.5)
                 debugSection
             }
         }
@@ -82,6 +84,35 @@ struct DevelopmentCard: View {
             Spacer()
             Toggle("", isOn: Binding(get: { site.elasticsearchEnabled },
                                      set: { vm.setElasticsearch(site, enabled: $0) }))
+                .labelsHidden().toggleStyle(.switch)
+        }
+    }
+
+    // MARK: Mailpit
+
+    private var mailpitRow: some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Mailpit").font(.callout.weight(.medium))
+                Text("Catch all outgoing site email locally and browse it in Mailpit's web UI — nothing leaves your Mac.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if site.mailpitEnabled, let mailbox = site.mailboxURL {
+                    Button {
+                        SystemActions.openInBrowser(mailbox)
+                    } label: {
+                        Label("Open Mailbox", systemImage: "envelope")
+                    }
+                    .buttonStyle(.link).controlSize(.small)
+                    .disabled(!site.status.isRunning)
+                }
+                if site.status.isRunning {
+                    Text("Toggling restarts the site.").font(.caption2).foregroundStyle(.tertiary)
+                }
+            }
+            Spacer()
+            Toggle("", isOn: Binding(get: { site.mailpitEnabled },
+                                     set: { vm.setMailpit(site, enabled: $0) }))
                 .labelsHidden().toggleStyle(.switch)
         }
     }

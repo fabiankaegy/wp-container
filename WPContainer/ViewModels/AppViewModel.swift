@@ -159,6 +159,67 @@ public final class AppViewModel {
     public func setXdebug(_ site: Site, enabled: Bool) { toggleAddon(site) { $0.xdebugEnabled = enabled } }
     public func setElasticsearch(_ site: Site, enabled: Bool) { toggleAddon(site) { $0.elasticsearchEnabled = enabled } }
 
+    // MARK: - Mailpit (issue #10)
+
+    /// Enable/disable the per-site Mailpit email catcher: write or remove the
+    /// mu-plugin, allocate the mailbox web port on first enable, and restart a
+    /// running site so the container recipe takes effect. The proxy's refresh
+    /// loop picks up the new `<slug>-mail.localhost` host + cert SAN within a few
+    /// seconds; the primary mailbox URL is the proxy-independent localhost port.
+    public func setMailpit(_ site: Site, enabled: Bool) {
+        Task {
+            var updated = site
+            if enabled {
+                try? MailpitService.writeMuPlugin(wordpressFolder: site.wordpressFolder)
+                if site.mailpitPort == nil {
+                    // Reserve the mailbox web port inside the locked mutation.
+                    let result = await store.allocatePort { port, env -> Site? in
+                        guard let i = env.sites.firstIndex(where: { $0.id == site.id }) else { return nil }
+                        env.sites[i].mailpitPort = port
+                        env.sites[i].mailpitEnabled = true
+                        return env.sites[i]
+                    }
+                    guard let (_, reservedSite) = result, let s = reservedSite else {
+                        lastError = "No free port available for the mailbox."
+                        return
+                    }
+                    updated = s
+                } else {
+                    updated.mailpitEnabled = true
+                    await store.upsertSite(updated)
+                }
+            } else {
+                try? MailpitService.removeMuPlugin(wordpressFolder: site.wordpressFolder)
+                updated.mailpitEnabled = false
+                await store.upsertSite(updated)
+            }
+            if site.status.isRunning {
+                await lifecycle.stop(updated)
+                do {
+                    let provisioned = try await lifecycle.startSite(updated)
+                    if provisioned != updated.provisioned {
+                        updated.provisioned = provisioned
+                        await store.upsertSite(updated)
+                    }
+                } catch { lastError = SiteLifecycleErrorText(error) }
+            }
+        }
+    }
+
+    // MARK: - Resource limits (issue #11)
+
+    /// Persist a site's optional CPU/memory caps. Unlike the add-on toggles this
+    /// does NOT restart a running site: limits are a `container run` argument, so
+    /// they take effect on the next start (the Resources card shows a hint).
+    public func setResources(_ site: Site, cpuLimit: Int?, memoryLimitMB: Int?) {
+        Task {
+            var updated = site
+            updated.cpuLimit = cpuLimit
+            updated.memoryLimitMB = memoryLimitMB
+            await store.upsertSite(updated)
+        }
+    }
+
     /// Persist an add-on flag change and restart the site when it is running so
     /// the new container recipe takes effect.
     private func toggleAddon(_ site: Site, _ apply: @escaping (inout Site) -> Void) {
@@ -705,9 +766,7 @@ public final class AppViewModel {
         // The reserved record keeps the final env's UUID so `upsertEnv` (success)
         // or `removeEnv` (rollback) is a simple by-id swap.
         guard let (_, reserved) = await store.allocatePort(reserve: { port, envelope in
-            let d = WorktreeEnvService.descriptor(parent: parent, repoRelPath: repoRelPath, branch: branch, port: port)
-            envelope.envs.append(d)
-            return d
+            WorktreeEnvService.reservedDescriptor(parent: parent, repoRelPath: repoRelPath, branch: branch, port: port, into: &envelope)
         }) else {
             lastError = "No free port available."
             return nil
@@ -807,9 +866,7 @@ public final class AppViewModel {
         Task {
             // Port + env reservation in one locked mutation (#3 follow-up).
             guard let (_, reserved) = await store.allocatePort(reserve: { port, envelope in
-                let d = WorktreeEnvService.descriptor(parent: parent, repoRelPath: repoRelPath, branch: branch, port: port)
-                envelope.envs.append(d)
-                return d
+                WorktreeEnvService.reservedDescriptor(parent: parent, repoRelPath: repoRelPath, branch: branch, port: port, into: &envelope)
             }) else {
                 lastError = "No free port available."
                 return

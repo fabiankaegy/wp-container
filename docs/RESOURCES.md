@@ -76,10 +76,16 @@ host memory; add ~0.7–1 GB for Elasticsearch.
 
 ## Known limitations
 
-1. **No per-site resource knobs in the UI yet** — everything uses the
-   `container` CLI defaults (4 CPU / 1 GB). The CLI supports `--cpus`/
-   `--memory` per container; exposing this per site is tracked in the issue
-   queue.
+1. ~~No per-site resource knobs in the UI yet~~ **Per-site CPU/memory caps
+   are now configurable** (issue #11). Set them in **Settings → Resources**
+   (CPU 1–8, memory 512 MB / 1 / 2 / 4 GB, each with a "Default" state), on
+   the CLI via `wp-container create --cpus N --memory MB` or
+   `wp-container limits <slug> [--cpus N] [--memory MB]`. Caps are passed to
+   `container run` for the db/WordPress/Elasticsearch/Mailpit containers (never
+   the short-lived one-shot wp-cli containers), take effect on the next start,
+   and are inherited by worktree environments. A `nil`/"Default" cap uses the
+   `container` defaults (4 CPUs / 1 GB). Especially useful for trimming
+   Elasticsearch (its 512 MB Java heap fits a smaller VM) and for 16 GB Macs.
 2. **virtiofs I/O overhead**: bind-mounted folders (your `wordpress/` and
    `database/`) go through virtiofs, which is slower than a native disk
    image — noticeable on huge `npm install`-style file storms inside the

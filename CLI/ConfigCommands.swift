@@ -72,6 +72,138 @@ struct ElasticsearchCommand: AsyncParsableCommand {
     }
 }
 
+// MARK: - mailpit (issue #10)
+
+struct MailpitCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "mailpit",
+        abstract: "Enable or disable the Mailpit email catcher for a site: mailpit on|off <slug>.",
+        discussion: """
+        On enable, writes the wpc-mailpit mu-plugin, reserves a localhost port for \
+        the mailbox web UI, and (for a running site) restarts to launch the mail \
+        container. Outgoing WordPress mail is then caught by Mailpit instead of \
+        being sent. The mailbox is browsable at the printed URL.
+        """
+    )
+    @Argument(help: "on | off") var state: String
+    @Argument(help: "Site slug.") var slug: String
+    @OptionGroup var output: JSONOptions
+
+    func run() async throws {
+        guard let onOff = OnOff(rawValue: state.lowercased()) else {
+            throw CLIErrorJSON("bad_args", detail: "state must be on|off")
+        }
+        let ctx = CLIContext()
+        do {
+            let envelope = try await ctx.load()
+            guard let site = envelope.sites.first(where: { $0.slug == slug }) else {
+                throw CLIErrorJSON("site_not_found", detail: slug)
+            }
+            let updated: Site
+            if onOff.enabled {
+                try MailpitService.writeMuPlugin(wordpressFolder: site.wordpressFolder)
+                if site.mailpitPort == nil {
+                    guard let (_, reservedSite, _) = try await ctx.persistence.allocatePort(reserve: { port, env -> Site? in
+                        guard let i = env.sites.firstIndex(where: { $0.id == site.id }) else { return nil }
+                        env.sites[i].mailpitPort = port
+                        env.sites[i].mailpitEnabled = true
+                        return env.sites[i]
+                    }), let s = reservedSite else { throw CLIErrorJSON("no_free_port") }
+                    updated = s
+                } else {
+                    let env2 = try await ctx.persistence.mutate { e in
+                        if let i = e.sites.firstIndex(where: { $0.id == site.id }) { e.sites[i].mailpitEnabled = true }
+                    }
+                    updated = env2.sites.first { $0.id == site.id } ?? site
+                }
+            } else {
+                try? MailpitService.removeMuPlugin(wordpressFolder: site.wordpressFolder)
+                let env2 = try await ctx.persistence.mutate { e in
+                    if let i = e.sites.firstIndex(where: { $0.id == site.id }) { e.sites[i].mailpitEnabled = false }
+                }
+                updated = env2.sites.first { $0.id == site.id } ?? site
+            }
+            let running = await ctx.runningContainerNames().contains(site.wpContainerName)
+            var restarted = false
+            if running {
+                await ctx.lifecycle.stop(updated)
+                _ = try await ctx.lifecycle.startSite(updated)
+                await ctx.lifecycle.markRunning(updated.id)
+                restarted = true
+            }
+            let mailbox = updated.mailboxURL?.absoluteString
+            if output.json {
+                emitLine(MCPJSON.string(["ok": true, "slug": slug, "enabled": onOff.enabled,
+                                         "restarted": restarted,
+                                         "mailboxUrl": mailbox as Any? ?? NSNull()]))
+            } else {
+                var line = (onOff.enabled ? "Enabled Mailpit" : "Disabled Mailpit") + " for \(slug)."
+                if onOff.enabled, let mailbox { line += " Mailbox: \(mailbox)." }
+                line += restarted ? " Restarted to apply." : " Restart the site to apply."
+                emitLine(line)
+            }
+        } catch { throw failCommand(error, json: output.json) }
+    }
+}
+
+// MARK: - limits (issue #11)
+
+struct LimitsCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "limits",
+        abstract: "Show or set a site's per-container CPU/memory caps: limits <slug> [--cpus N] [--memory MB].",
+        discussion: """
+        Caps are passed to `container run` for the db/WordPress/Elasticsearch/Mailpit \
+        containers and take effect on the next start (restart a running site to \
+        apply). Pass 0 to reset a cap to the container default (4 CPUs / 1024 MB). \
+        Worktree environments inherit the parent's caps at creation.
+        """
+    )
+    @Argument(help: "Site slug.") var slug: String
+    @Option(name: .long, help: "CPU cap (1–8), or 0 to reset to the default (4).") var cpus: Int?
+    @Option(name: .long, help: "Memory cap in MB (e.g. 512), or 0 to reset to the default (1024).") var memory: Int?
+    @OptionGroup var output: JSONOptions
+
+    func run() async throws {
+        let ctx = CLIContext()
+        do {
+            let envelope = try await ctx.load()
+            guard let site = envelope.sites.first(where: { $0.slug == slug }) else {
+                throw CLIErrorJSON("site_not_found", detail: slug)
+            }
+            // No options → report the current caps.
+            if cpus == nil && memory == nil {
+                if output.json {
+                    emitLine(MCPJSON.string(["slug": slug,
+                                             "cpus": site.cpuLimit as Any? ?? NSNull(),
+                                             "memoryMB": site.memoryLimitMB as Any? ?? NSNull()]))
+                } else {
+                    emitLine("\(slug): CPU \(site.cpuLimit.map(String.init) ?? "default (4)"), memory \(site.memoryLimitMB.map { "\($0) MB" } ?? "default (1024 MB)").")
+                }
+                return
+            }
+            let newCPU = cpus
+            let newMem = memory
+            let updated = try await ctx.persistence.mutate { env in
+                if let i = env.sites.firstIndex(where: { $0.id == site.id }) {
+                    if let c = newCPU { env.sites[i].cpuLimit = c == 0 ? nil : c }
+                    if let m = newMem { env.sites[i].memoryLimitMB = m == 0 ? nil : m }
+                }
+            }
+            let s = updated.sites.first { $0.id == site.id } ?? site
+            let running = await ctx.runningContainerNames().contains(site.wpContainerName)
+            if output.json {
+                emitLine(MCPJSON.string(["ok": true, "slug": slug,
+                                         "cpus": s.cpuLimit as Any? ?? NSNull(),
+                                         "memoryMB": s.memoryLimitMB as Any? ?? NSNull(),
+                                         "restartNeeded": running]))
+            } else {
+                emitLine("\(slug): CPU \(s.cpuLimit.map(String.init) ?? "default (4)"), memory \(s.memoryLimitMB.map { "\($0) MB" } ?? "default (1024 MB)").\(running ? " Restart the site to apply." : "")")
+            }
+        } catch { throw failCommand(error, json: output.json) }
+    }
+}
+
 // MARK: - domain (§2i)
 
 struct DomainCommand: AsyncParsableCommand {
