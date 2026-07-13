@@ -55,6 +55,7 @@ targets:
     deploymentTarget: "27.0"
     sources:
       - path: WPContainerKit
+      - path: Shared
     settings:
       base:
         SWIFT_VERSION: "6.0"
@@ -71,8 +72,23 @@ targets:
     deploymentTarget: "27.0"
     sources:
       - path: WPContainer
+      # Embed the privileged helper's launchd plist at
+      # Contents/Library/LaunchDaemons/ per SMAppService.daemon requirements.
+      - path: LaunchDaemons/com.fabiankaegy.wpcontainer.hostshelper.plist
+        buildPhase:
+          copyFiles:
+            destination: wrapper
+            subpath: Contents/Library/LaunchDaemons
     dependencies:
       - target: WPContainerKit
+      # Embed the helper executable into Contents/MacOS (code-signed on copy).
+      # It is a tool, not a library, so it is copied — never linked.
+      - target: wpc-hosts-helper
+        link: false
+        embed: true
+        codeSign: true
+        copy:
+          destination: executables
     settings:
       base:
         PRODUCT_NAME: WPContainer
@@ -112,6 +128,53 @@ targets:
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
 
+  # Tiny privileged daemon (PLAN.md §2f-bis): an XPC listener on a mach service
+  # that rewrites the managed /etc/hosts block after re-verifying the caller's
+  # authorization and code signature. Registered by the app via
+  # SMAppService.daemon and embedded at Contents/MacOS/wpc-hosts-helper.
+  # Concurrency is `minimal`: it is a self-contained NSXPC daemon whose objects
+  # deliberately are not Sendable, and it links no app code.
+  wpc-hosts-helper:
+    type: tool
+    platform: macOS
+    deploymentTarget: "27.0"
+    sources:
+      - path: HostsHelper
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_NAME: wpc-hosts-helper
+        PRODUCT_BUNDLE_IDENTIFIER: com.fabiankaegy.wpcontainer.hostshelper
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: minimal
+        SWIFT_OBJC_BRIDGING_HEADER: HostsHelper/HostsHelper-Bridging.h
+        # Embed an Info.plist section in the binary so it carries a bundle id +
+        # version (helps SecCode identify the daemon).
+        GENERATE_INFOPLIST_FILE: "YES"
+        CREATE_INFOPLIST_SECTION_IN_BINARY: "YES"
+        INFOPLIST_KEY_CFBundleDisplayName: "WP Container Hosts Helper"
+        SKIP_INSTALL: "YES"
+
+  # Pure-logic unit tests for the helper's security boundary. Compiles the
+  # helper's own validation/rewrite source (and the shared contract) directly so
+  # tests exercise the exact code the daemon runs. No test host needed.
+  HostsHelperTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "27.0"
+    sources:
+      - path: HostsHelperTests
+      - path: HostsHelper/HostsBlockRewriter.swift
+      - path: Shared/HostsHelperProtocol.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.fabiankaegy.wpcontainer.hostshelpertests
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: minimal
+        GENERATE_INFOPLIST_FILE: "YES"
+
 schemes:
   WPContainer:
     build:
@@ -129,3 +192,18 @@ schemes:
       config: Debug
     archive:
       config: Release
+  wpc-hosts-helper:
+    build:
+      targets:
+        wpc-hosts-helper: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+  HostsHelperTests:
+    build:
+      targets:
+        HostsHelperTests: all
+    test:
+      targets:
+        - HostsHelperTests
