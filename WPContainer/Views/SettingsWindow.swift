@@ -1,6 +1,7 @@
 import ServiceManagement
 import SwiftUI
 import UniformTypeIdentifiers
+import UserNotifications
 import WPContainerKit
 
 /// The app Settings window (⌘,) — PLAN.md §2l. Three panes in a native settings
@@ -67,8 +68,10 @@ private struct SettingRow<Control: View>: View {
 
 private struct GeneralSettingsPane: View {
     @AppStorage(AppSettings.showDockIconKey) private var showDockIcon = true
+    @AppStorage(AppSettings.notificationsEnabledKey) private var notificationsEnabled = true
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var loginError: String?
+    @State private var authStatus: UNAuthorizationStatus = .notDetermined
 
     var body: some View {
         SettingsPane {
@@ -103,6 +106,60 @@ private struct GeneralSettingsPane: View {
                     }
                 }
             }
+
+            SectionCard(title: "Notifications", systemImage: "bell.badge") {
+                VStack(alignment: .leading, spacing: 12) {
+                    SettingRow(title: "Notifications",
+                               explanation: "Notify me when a site or environment starts or stops while WP Container is in the background, a new site or branch environment is ready, WordPress core finishes updating, or the HTTPS proxy can’t start.") {
+                        Toggle("", isOn: $notificationsEnabled)
+                            .labelsHidden().toggleStyle(.switch)
+                    }
+                    if notificationsEnabled {
+                        authorizationNote
+                    }
+                }
+            }
+        }
+        .task { authStatus = await NotificationService.shared.authorizationStatus() }
+    }
+
+    /// Reflects the system authorization state (PLAN Task 1): a Request button
+    /// while undecided, a deep-link to System Settings once the user has denied.
+    @ViewBuilder private var authorizationNote: some View {
+        switch authStatus {
+        case .authorized, .provisional, .ephemeral:
+            Label("Allowed in macOS System Settings.", systemImage: "checkmark.seal.fill")
+                .font(.caption).foregroundStyle(.green)
+        case .denied:
+            HStack(alignment: .top, spacing: 8) {
+                Label("Turned off in System Settings — WP Container can’t show notifications until you allow them there.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+                Spacer(minLength: 8)
+                Button("Open Notification Settings…") { openNotificationSettings() }
+                    .controlSize(.small)
+            }
+        case .notDetermined:
+            HStack(alignment: .top, spacing: 8) {
+                Text("WP Container will ask for permission the first time it needs to notify you.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Button("Request…") {
+                    Task {
+                        _ = await NotificationService.shared.requestAuthorization()
+                        authStatus = await NotificationService.shared.authorizationStatus()
+                    }
+                }
+                .controlSize(.small)
+            }
+        @unknown default:
+            EmptyView()
+        }
+    }
+
+    private func openNotificationSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") {
+            NSWorkspace.shared.open(url)
         }
     }
 

@@ -173,6 +173,9 @@ public final class SiteStore {
         }
     }
 
+    /// The last-known runtime status for an instance id (nil if never tracked).
+    public func status(for id: UUID) -> SiteStatus? { statusByID[id] }
+
     /// Update runtime status (not persisted). Ignored for unknown ids.
     public func setStatus(_ status: SiteStatus, for id: UUID) {
         statusByID[id] = status

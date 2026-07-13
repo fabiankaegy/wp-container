@@ -30,6 +30,12 @@ public final class AppViewModel {
     @ObservationIgnored let ca: CertificateAuthority
     @ObservationIgnored let httpsIntegration: HTTPSIntegration
     @ObservationIgnored let proxy: HTTPSProxy
+    @ObservationIgnored let notifications = NotificationService.shared
+
+    /// Instances whose start/stop status notifications are suppressed because an
+    /// explicit create flow is driving them (it posts a "ready"/"created"
+    /// notification instead of a bare "started"). Keyed by instance UUID.
+    @ObservationIgnored private var suppressStatusNotify: Set<UUID> = []
 
     public var selection: UUID?
     public var systemStatus: SystemCheckResult?
@@ -84,6 +90,7 @@ public final class AppViewModel {
         guard !started else { return }
         started = true
         await store.start()
+        notifications.configure()
         refreshStaleShims()
         await refreshSystemStatus()
         await refreshCATrusted()
@@ -240,7 +247,10 @@ public final class AppViewModel {
                 lastError = "Start the site before updating WordPress core."
                 return
             }
-            do { try await cli.run(SiteRecipe.wpCoreUpdateArgs(site, dbHost: dbHost)) }
+            do {
+                try await cli.run(SiteRecipe.wpCoreUpdateArgs(site, dbHost: dbHost))
+                notifications.notifyCoreUpdated(name: site.name)
+            }
             catch { lastError = SiteLifecycleErrorText(error) }
         }
     }
@@ -327,6 +337,21 @@ public final class AppViewModel {
             proxyPort = port
         } catch {
             lastError = "HTTPS proxy: \(error)"
+            notifications.notifyProxyFailed(reason: Self.proxyFailureReason(error))
+        }
+    }
+
+    /// Actionable one-line reason for a proxy start failure (PLAN Task 1: "port
+    /// busy" and friends).
+    private static func proxyFailureReason(_ error: Error) -> String {
+        guard let e = error as? HTTPSProxy.ProxyError else { return "\(error)" }
+        switch e {
+        case .noPortAvailable:
+            return "Ports 443 and 8443 are both busy. Quit whatever is using them, then start the proxy again."
+        case .listenerFailed(let detail):
+            return "The proxy couldn’t bind its port (\(detail)). Another process may be holding 443 or 8443."
+        case .identityUnavailable(let detail):
+            return "The TLS certificate couldn’t be loaded (\(detail)). Re-trust the WP Container CA in Settings."
         }
     }
 
@@ -443,8 +468,51 @@ public final class AppViewModel {
         let events = lifecycle.events
         statusTask = Task { [weak self] in
             for await event in events {
-                self?.store.setStatus(event.status, for: event.instanceID)
+                guard let self else { break }
+                let prior = self.store.status(for: event.instanceID)
+                self.store.setStatus(event.status, for: event.instanceID)
+                self.notifyStatusTransition(event, prior: prior)
             }
+        }
+    }
+
+    /// Fire a start/stop notification for a genuine run-state transition, but
+    /// ONLY when the app is not frontmost (menu-bar-first mode — a start/stop the
+    /// user triggered from a visible window needs no notification, PLAN Task 1)
+    /// and not while an explicit create flow owns the instance (that flow posts
+    /// its own "created"/"ready" notification instead of a bare "started").
+    private func notifyStatusTransition(_ event: SiteLifecycle.StatusEvent, prior: SiteStatus?) {
+        guard !NSApp.isActive else { return }
+        guard !suppressStatusNotify.contains(event.instanceID) else { return }
+        switch event.status {
+        case .running where prior != .running:
+            if let site = store.site(id: event.instanceID) {
+                notifications.notifyStarted(name: site.name, url: site.url, faviconFolder: site.wordpressFolder)
+            } else if let env = store.env(id: event.instanceID) {
+                notifications.notifyStarted(name: "\(env.parentSlug) · \(env.branch)",
+                                            url: env.localURL, faviconFolder: env.wordpressFolder)
+            }
+        case .stopped where prior != nil && prior != .stopped:
+            // `prior != nil` skips a first-observation stop (e.g. deleting a
+            // never-tracked instance), so a delete of an already-stopped site is
+            // silent.
+            if let site = store.site(id: event.instanceID) {
+                notifications.notifyStopped(name: site.name)
+            } else if let env = store.env(id: event.instanceID) {
+                notifications.notifyStopped(name: "\(env.parentSlug) · \(env.branch)")
+            }
+        default:
+            break
+        }
+    }
+
+    /// Stop suppressing an instance's start/stop notifications after a short
+    /// delay, so any buffered `.running`/`.stopped` event emitted during the
+    /// create flow has drained (and been suppressed) first.
+    private func clearSuppressionSoon(_ id: UUID) {
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            self?.suppressStatusNotify.remove(id)
         }
     }
 
@@ -569,6 +637,9 @@ public final class AppViewModel {
             return nil
         }
         selection = site.id
+        // Suppress the bare "started" notification for this site — the create
+        // flow posts a "site ready"/"couldn't create" notification instead.
+        suppressStatusNotify.insert(site.id)
         do {
             let provisioned = try await lifecycle.startSite(site)
             if provisioned != site.provisioned {
@@ -576,9 +647,13 @@ public final class AppViewModel {
                 updated.provisioned = provisioned
                 await store.upsertSite(updated)
             }
+            notifications.notifySiteCreated(name: site.name, url: site.url, faviconFolder: site.wordpressFolder)
         } catch {
-            lastError = SiteLifecycleErrorText(error)
+            let text = SiteLifecycleErrorText(error)
+            lastError = text
+            notifications.notifySiteCreationFailed(name: site.name, error: text)
         }
+        clearSuppressionSoon(site.id)
         // NOTE: custom-domain registration (the blocking /etc/hosts admin prompt)
         // is intentionally NOT done here. The Add Site sheet drives it as a
         // separate, honestly-labelled, skippable step via `registerCustomDomain`
@@ -637,14 +712,21 @@ public final class AppViewModel {
             lastError = "No free port available."
             return nil
         }
+        // Suppress the env's bare "started" notification (its `.running` fires
+        // inside `create`); the "environment ready" notification stands in.
+        suppressStatusNotify.insert(reserved.id)
         do {
             let env = try await worktrees.create(parent: parent, parentIsRunning: parent.status.isRunning,
                                                  repoRelPath: repoRelPath, branch: branch, from: from,
                                                  port: reserved.port, reserved: reserved)
             await store.upsertEnv(env)
+            notifications.notifyEnvReady(branch: env.branch, parent: parent.name,
+                                         url: env.localURL, faviconFolder: env.wordpressFolder)
+            clearSuppressionSoon(env.id)
             return env
         } catch {
             await store.removeEnv(id: reserved.id)
+            clearSuppressionSoon(reserved.id)
             lastError = SiteLifecycleErrorText(error)
             lastErrorDetail = (error as? WorktreeError)?.fullDetail
             return nil
@@ -733,13 +815,18 @@ public final class AppViewModel {
                 return
             }
             let parentRunning = parent.status.isRunning
+            suppressStatusNotify.insert(reserved.id)
             do {
                 let env = try await worktrees.create(parent: parent, parentIsRunning: parentRunning,
                                                      repoRelPath: repoRelPath, branch: branch, from: from,
                                                      port: reserved.port, reserved: reserved)
                 await store.upsertEnv(env)
+                notifications.notifyEnvReady(branch: env.branch, parent: parent.name,
+                                             url: env.localURL, faviconFolder: env.wordpressFolder)
+                clearSuppressionSoon(env.id)
             } catch {
                 await store.removeEnv(id: reserved.id)
+                clearSuppressionSoon(reserved.id)
                 lastError = SiteLifecycleErrorText(error)
                 lastErrorDetail = (error as? WorktreeError)?.fullDetail
             }
