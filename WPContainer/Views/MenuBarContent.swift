@@ -80,7 +80,11 @@ struct MenuBarContent: View {
 
     private var header: some View {
         HStack(spacing: 6) {
-            Image(systemName: "cube.transparent.fill").foregroundStyle(Theme.accent)
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 18, height: 18)
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             Text("WP Container").font(.headline)
             Spacer()
             let running = vm.sites.filter { $0.status.isRunning }.count

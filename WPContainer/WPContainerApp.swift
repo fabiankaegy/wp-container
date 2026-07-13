@@ -32,7 +32,13 @@ struct WPContainerApp: App {
             MenuBarContent()
                 .environment(viewModel)
         } label: {
-            Image(systemName: "cube.transparent.fill")
+            // The real app icon artwork (PLAN.md §2h) rather than a monochrome
+            // template glyph — the user wants the colored mark. Rendered at
+            // menu-bar size with high interpolation so it stays crisp.
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 18, height: 18)
         }
         .menuBarExtraStyle(.window)
     }
