@@ -9,7 +9,7 @@ struct WPContainerCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "wp-container",
         abstract: "Manage local WordPress dev sites and git worktree environments running on Apple containers.",
-        version: "0.1.0",
+        version: WPContainerVersion.current,
         subcommands: [
             ListCommand.self,
             CreateCommand.self,

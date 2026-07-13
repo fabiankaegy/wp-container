@@ -34,7 +34,7 @@ final class MCPServerRunner: @unchecked Sendable {
     func run() async throws {
         let server = Server(
             name: "wp-container",
-            version: "0.1.0",
+            version: WPContainerVersion.current,
             capabilities: .init(tools: .init(listChanged: false))
         )
 
