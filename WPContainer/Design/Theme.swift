@@ -168,21 +168,65 @@ struct StatusPill: View {
     }
 }
 
-/// Colored rounded-square avatar with the site's initials.
+/// Rounded-square site avatar. Renders the site's favicon / Site Icon when one
+/// is found in its files (PLAN.md §2l), falling back to a colored initials
+/// gradient. The favicon loads asynchronously off-main via `FaviconImageCache`
+/// and re-checks when `reloadToken` changes (site selection / start), so an icon
+/// added while the app is open appears without a relaunch.
 struct SiteAvatar: View {
     let name: String
     let slug: String
     var size: CGFloat = 30
+    /// The site's `wordpress/` folder — searched for a favicon. nil = no lookup
+    /// (e.g. the not-yet-created site in the Add Site sheet).
+    var wordpressFolder: URL? = nil
+    /// Any value that should force a favicon re-check (e.g. the site status), so
+    /// an icon uploaded while running is picked up after a start.
+    var reloadToken: AnyHashable = 0
+
+    @State private var favicon: NSImage?
+
+    private var corner: CGFloat { size * 0.28 }
 
     var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-            .fill(Theme.avatarGradient(for: slug))
-            .frame(width: size, height: size)
-            .overlay {
-                Text(Theme.initials(for: name))
-                    .font(.system(size: size * 0.42, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
+        Group {
+            if let favicon {
+                Image(nsImage: favicon)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: size, height: size)
+                    .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+                    .background(
+                        RoundedRectangle(cornerRadius: corner, style: .continuous)
+                            .fill(Color.white)
+                    )
+            } else {
+                RoundedRectangle(cornerRadius: corner, style: .continuous)
+                    .fill(Theme.avatarGradient(for: slug))
+                    .frame(width: size, height: size)
+                    .overlay {
+                        Text(Theme.initials(for: name))
+                            .font(.system(size: size * 0.42, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                    }
             }
-            .shadow(color: .black.opacity(0.12), radius: 1, y: 1)
+        }
+        .shadow(color: .black.opacity(0.12), radius: 1, y: 1)
+        .task(id: FaviconKey(path: wordpressFolder?.path, token: reloadToken)) {
+            await loadFavicon()
+        }
+    }
+
+    private func loadFavicon() async {
+        guard let wordpressFolder else { favicon = nil; return }
+        let data = await FaviconImageCache.shared.faviconPNG(wordpressFolder: wordpressFolder)
+        favicon = data.flatMap(NSImage.init(data:))
+    }
+
+    /// Distinct task identity: reload when either the folder or the token change.
+    private struct FaviconKey: Hashable {
+        let path: String?
+        let token: AnyHashable
     }
 }

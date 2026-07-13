@@ -13,7 +13,8 @@ struct SiteRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            SiteAvatar(name: site.name, slug: site.slug, size: 28)
+            SiteAvatar(name: site.name, slug: site.slug, size: 28,
+                       wordpressFolder: site.wordpressFolder, reloadToken: site.status)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(site.name)

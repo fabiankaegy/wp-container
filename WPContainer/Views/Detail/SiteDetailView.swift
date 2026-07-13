@@ -66,7 +66,8 @@ struct SiteDetailView: View {
 
     private var header: some View {
         HStack(alignment: .center, spacing: 14) {
-            SiteAvatar(name: site.name, slug: site.slug, size: 48)
+            SiteAvatar(name: site.name, slug: site.slug, size: 48,
+                       wordpressFolder: site.wordpressFolder, reloadToken: site.status)
             VStack(alignment: .leading, spacing: 6) {
                 Text(site.name)
                     .font(.system(.largeTitle, weight: .bold))
