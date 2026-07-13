@@ -486,9 +486,10 @@ struct WPCommand: AsyncParsableCommand {
         commandName: "wp",
         abstract: "Run a one-shot wp-cli command against a site or env: wp-container wp <target> -- <wp args>",
         discussion: """
-        Note: --json is captured as part of <wp args> (passthrough) if it appears \
-        after <target>, so place it BEFORE <target> if you want JSON output for the \
-        wp-container invocation itself: `wp-container wp --json <target> -- <wp args>`.
+        JSON output: `--json` before <target> always works. As a convenience, a \
+        `--json` between <target> and the `--` separator (e.g. `wp-container wp \
+        mysite --json -- option get home`) is also treated as wp-container's own \
+        flag. A --json AFTER `--` is passed through to wp-cli untouched.
         """
     )
     @Argument(help: "Site slug or env slug.") var target: String
@@ -497,6 +498,26 @@ struct WPCommand: AsyncParsableCommand {
 
     func run() async throws {
         let ctx = CLIContext()
+        // `.captureForPassthrough` swallows everything after <target>, including
+        // a `--json` the caller meant for wp-container itself (#8). Reclaim a
+        // `--json` that appears BEFORE the literal `--` separator — tokens there
+        // cannot be wp-cli arguments (the documented passthrough form puts wp
+        // args after `--`). With no separator, only a LEADING `--json` is
+        // reclaimed. A `--json` after `--` still reaches wp-cli verbatim.
+        var passthroughArgs = wpArgs
+        var jsonOut = output.json
+        if let sep = passthroughArgs.firstIndex(of: "--") {
+            let before = passthroughArgs[..<sep]
+            if before.contains("--json") {
+                jsonOut = true
+                passthroughArgs = before.filter { $0 != "--json" } + passthroughArgs[sep...]
+            }
+        } else {
+            while passthroughArgs.first == "--json" {
+                jsonOut = true
+                passthroughArgs.removeFirst()
+            }
+        }
         do {
             let envelope = try await ctx.load()
             guard let resolved = resolveTarget(target, in: envelope) else { throw CLIErrorJSON("not_found", detail: target) }
@@ -508,10 +529,9 @@ struct WPCommand: AsyncParsableCommand {
             // caller uses the documented `wp-container wp <target> -- <wp args>`
             // form (e.g. `wp itest-alpha -- core version`); wp-cli itself treats
             // "--" as an unknown command, so strip a single leading occurrence.
-            var passthroughArgs = wpArgs
             if passthroughArgs.first == "--" { passthroughArgs.removeFirst() }
             let result = try await ctx.cli.runCapturing(SiteRecipe.wpProxyArgs(inst, dbHost: dbHost, wpArgs: passthroughArgs))
-            if output.json {
+            if jsonOut {
                 struct WPResult: Codable { let stdout: String; let stderr: String; let exitCode: Int32 }
                 emitLine(CLIJSON.string(WPResult(stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode)))
             } else {
@@ -522,7 +542,7 @@ struct WPCommand: AsyncParsableCommand {
         } catch let code as ExitCode {
             throw code
         } catch {
-            throw failCommand(error, json: output.json)
+            throw failCommand(error, json: jsonOut)
         }
     }
 }
