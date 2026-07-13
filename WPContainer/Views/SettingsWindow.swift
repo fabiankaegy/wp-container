@@ -13,13 +13,20 @@ import WPContainerKit
 /// tools, add-ons, debug constants, domain) stay in the site detail Settings tab.
 struct SettingsWindow: View {
     var body: some View {
-        TabView {
-            GeneralSettingsPane()
-                .tabItem { Label("General", systemImage: "gearshape") }
-            SitesSettingsPane()
-                .tabItem { Label("Sites", systemImage: "square.stack.3d.up") }
-            ProxySettingsPane()
-                .tabItem { Label("Proxy", systemImage: "lock.shield") }
+        VStack(spacing: 0) {
+            TabView {
+                GeneralSettingsPane()
+                    .tabItem { Label("General", systemImage: "gearshape") }
+                SitesSettingsPane()
+                    .tabItem { Label("Sites", systemImage: "square.stack.3d.up") }
+                ProxySettingsPane()
+                    .tabItem { Label("Proxy", systemImage: "lock.shield") }
+            }
+            Divider()
+            Text("WP Container \(WPContainerVersion.marketing)")
+                .font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 6)
         }
         .frame(width: 520)
     }
