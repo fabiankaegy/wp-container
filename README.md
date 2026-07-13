@@ -133,6 +133,12 @@ specifics we handle for you (all empirically verified — see
 virtiofs mounts reject `chown`, MariaDB runs as its own uid, and the DB's IP is
 re-discovered on every start.
 
+Each container runs in its own lightweight VM — memory/CPU defaults, real
+measured usage, and the limitations to be aware of are documented in
+[docs/RESOURCES.md](docs/RESOURCES.md). Short version: caps aren't
+reservations, stopped sites cost zero, and stopping unused sites is the lever
+that matters.
+
 ## Development
 
 - `PLAN.md` — full architecture and product spec.
