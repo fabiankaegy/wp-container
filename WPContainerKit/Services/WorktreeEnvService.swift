@@ -3,6 +3,9 @@ import Foundation
 public enum WorktreeError: Error, Sendable, CustomStringConvertible {
     case parentDatabaseIPUnavailable
     case repoNotFound(String)
+    /// The repo path relative to `wordpress/` contains `..` (or is empty after
+    /// trimming) — it would resolve outside `/var/www/html` inside the container.
+    case invalidRepoPath(String)
     /// Creation failed and the half-created env was rolled back. `short` is the
     /// first fatal line (surface this); `full` is the complete underlying text
     /// (keep behind a disclosure).
@@ -12,6 +15,7 @@ public enum WorktreeError: Error, Sendable, CustomStringConvertible {
         switch self {
         case .parentDatabaseIPUnavailable: return "Could not resolve the parent site's database IP for a live DB clone."
         case .repoNotFound(let p):         return "No git repo found at \(p)."
+        case .invalidRepoPath(let p):      return "Invalid repo path \"\(p)\": must be relative to wordpress/ with no \"..\" components (e.g. wp-content/plugins/my-plugin)."
         case .creationFailed(let short, _): return short
         }
     }
@@ -55,25 +59,64 @@ public actor WorktreeEnvService {
         self.lifecycle = lifecycle
     }
 
+    /// True when a repo rel path is safe to mount under `/var/www/html/`:
+    /// non-empty after trimming `/`, and free of `.`/`..` components (a
+    /// `..`-laden path would shadow-mount OUTSIDE the container's docroot, #8).
+    public static func isValidRepoRelPath(_ repoRelPath: String) -> Bool {
+        let clean = repoRelPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !clean.isEmpty else { return false }
+        return clean.split(separator: "/", omittingEmptySubsequences: false)
+            .allSatisfy { $0 != ".." && $0 != "." && !$0.isEmpty }
+    }
+
+    /// The deterministic descriptor for an env of `parent` on `branch` — all
+    /// fields except `provisioned` are knowable before any work happens. Used
+    /// by callers to reserve the env (and its port) in the store atomically
+    /// BEFORE the (long) creation flow runs (#3), then passed to `create` so
+    /// the final record keeps the same identity.
+    public static func descriptor(parent: Site, repoRelPath: String, branch: String, port: Int) -> WorktreeEnv {
+        let branchSlug = Slug.make(branch)
+        return WorktreeEnv(
+            parentSiteID: parent.id,
+            parentSlug: parent.slug,
+            envSlug: WorktreeEnv.makeSlug(parentSlug: parent.slug, branch: branch),
+            repoRelPath: repoRelPath,
+            branch: branch,
+            worktreePath: parent.worktreesFolder.appendingPathComponent(branchSlug, isDirectory: true),
+            envPath: parent.envsFolder.appendingPathComponent(branchSlug, isDirectory: true),
+            port: port,
+            imageTag: parent.imageTag,
+            provisioned: false,
+            xdebugEnabled: parent.xdebugEnabled,
+            elasticsearchEnabled: parent.elasticsearchEnabled
+        )
+    }
+
     /// Full creation flow (steps 1–6). Returns the fully provisioned env.
     ///
     /// - Parameters:
     ///   - parentIsRunning: chooses the fast CoW DB clone (stopped) vs. the live
     ///     wp-cli export/import path (running).
     ///   - port: pre-allocated by the caller (respects the store's taken set).
+    ///   - reserved: when the caller already reserved a store record via
+    ///     `descriptor(parent:repoRelPath:branch:port:)` (#3), pass it so the
+    ///     final env keeps that identity (same UUID → the caller's replace-in-
+    ///     store is a simple swap).
     public func create(
         parent: Site,
         parentIsRunning: Bool,
         repoRelPath: String,
         branch: String,
         from: String?,
-        port: Int
+        port: Int,
+        reserved: WorktreeEnv? = nil
     ) async throws -> WorktreeEnv {
         let fm = FileManager.default
-        let branchSlug = Slug.make(branch)
-        let envSlug = WorktreeEnv.makeSlug(parentSlug: parent.slug, branch: branch)
-        let envPath = parent.envsFolder.appendingPathComponent(branchSlug, isDirectory: true)
-        let worktreePath = parent.worktreesFolder.appendingPathComponent(branchSlug, isDirectory: true)
+        // Reject `..`-laden rel paths outright (#8): the shadow mount would
+        // resolve outside /var/www/html inside the container.
+        guard Self.isValidRepoRelPath(repoRelPath) else {
+            throw WorktreeError.invalidRepoPath(repoRelPath)
+        }
         let repoURL = parent.repoURL(forRelativePath: repoRelPath)
 
         guard fm.fileExists(atPath: repoURL.appendingPathComponent(".git").path) else {
@@ -82,23 +125,12 @@ public actor WorktreeEnvService {
 
         // The descriptor is built up front (its fields never depend on a step
         // that can fail) so rollback can target the env's containers even if the
-        // failure happens AFTER they start.
-        var env = WorktreeEnv(
-            parentSiteID: parent.id,
-            parentSlug: parent.slug,
-            envSlug: envSlug,
-            repoRelPath: repoRelPath,
-            branch: branch,
-            worktreePath: worktreePath,
-            envPath: envPath,
-            port: port,
-            imageTag: parent.imageTag,
-            provisioned: false,
-            // Inherit the parent's add-ons (§2c): the env gets its own es
-            // container; a fresh ES index is fine (data is not cloned).
-            xdebugEnabled: parent.xdebugEnabled,
-            elasticsearchEnabled: parent.elasticsearchEnabled
-        )
+        // failure happens AFTER they start. Inherits the parent's add-ons (§2c):
+        // the env gets its own ES container; a fresh ES index is fine.
+        var env = reserved ?? Self.descriptor(parent: parent, repoRelPath: repoRelPath,
+                                              branch: branch, port: port)
+        let envPath = env.envPath
+        let worktreePath = env.worktreePath
 
         do {
             // 1. git worktree add (create branch if new).

@@ -286,14 +286,32 @@ enum MCPToolDispatch {
         guard let parent = envelope.sites.first(where: { $0.slug == parentSlug }) else {
             throw ToolError("site_not_found", "No site with slug \(parentSlug).")
         }
-        let taken = Set(envelope.sites.map(\.port)).union(envelope.envs.map(\.port))
-        guard let port = PortAllocator.firstFreePort(excluding: taken) else {
-            throw ToolError("no_free_port", "No free port available.")
+        guard WorktreeEnvService.isValidRepoRelPath(repo) else {
+            throw ToolError("invalid_repo_path", WorktreeError.invalidRepoPath(repo).description)
         }
         let running = await ctx.runningContainerNames()
-        let env = try await ctx.worktrees.create(parent: parent, parentIsRunning: running.contains(parent.wpContainerName),
-                                                 repoRelPath: repo, branch: branch, from: from, port: port)
-        _ = try await ctx.persistence.mutate { $0.envs.append(env) }
+        // Port allocation + env reservation happen in ONE locked store mutation
+        // (#3) so a concurrent creator can't observe the same port as free.
+        guard let (_, reserved, _) = try await ctx.persistence.allocatePort(reserve: { port, store in
+            let d = WorktreeEnvService.descriptor(parent: parent, repoRelPath: repo, branch: branch, port: port)
+            store.envs.append(d)
+            return d
+        }) else {
+            throw ToolError("no_free_port", "No free port available.")
+        }
+        let env: WorktreeEnv
+        do {
+            env = try await ctx.worktrees.create(parent: parent, parentIsRunning: running.contains(parent.wpContainerName),
+                                                 repoRelPath: repo, branch: branch, from: from,
+                                                 port: reserved.port, reserved: reserved)
+            _ = try await ctx.persistence.mutate { store in
+                store.envs.removeAll { $0.id == env.id }
+                store.envs.append(env)
+            }
+        } catch {
+            _ = try? await ctx.persistence.mutate { store in store.envs.removeAll { $0.id == reserved.id } }
+            throw error
+        }
         let d = WorktreeDescriptor(from: env)
         return MCPResult.json([
             "url": d.url, "port": d.port, "path": d.path, "worktreePath": d.worktreePath,

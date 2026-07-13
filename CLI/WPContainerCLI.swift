@@ -166,10 +166,6 @@ struct CreateCommand: AsyncParsableCommand {
         do {
             let envelope = try await ctx.load()
             let slug = Slug.unique(name, existing: Set(envelope.sites.map(\.slug)))
-            let taken = Set(envelope.sites.map(\.port)).union(envelope.envs.map(\.port))
-            guard let port = PortAllocator.firstFreePort(excluding: taken) else {
-                throw CLIErrorJSON("no_free_port")
-            }
             // Resolve the image tag: explicit --php override wins; else map the
             // WP × PHP matrix (§2k); else default.
             let imageTag: String
@@ -200,18 +196,21 @@ struct CreateCommand: AsyncParsableCommand {
                 customDomain = normalized
             }
             let root = path.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) } ?? SiteFolders.defaultSitesRoot
-            let site = Site(name: name, slug: slug,
-                            path: root.appendingPathComponent(slug, isDirectory: true),
-                            port: port, imageTag: imageTag, phpVersion: phpLabel,
-                            customDomain: customDomain, networkType: networkType)
-            try SiteFolders.ensure(for: site)
-            // Write the per-site wp-cli shim at <site>/wp (§2e).
-            try? WPCLIShim.writeShim(slug: site.slug, siteRoot: site.path,
-                                     cliImage: WordPressImageCatalog.cliImage(for: site.imageTag))
-            // Resolve/create the group (if requested) and persist atomically.
+            let sitePath = root.appendingPathComponent(slug, isDirectory: true)
+            // Allocate the port INSIDE the locked store mutation (#3): the port
+            // is picked from the store's current taken set AND the new site is
+            // appended in the same critical section, so a concurrent creator
+            // (app or another CLI) can never observe the same port as free.
             let groupName = group
-            let updated = try await ctx.persistence.mutate { env in
-                var s = site
+            let siteName = name
+            let siteImageTag = imageTag
+            let sitePHPLabel = phpLabel
+            let siteDomain = customDomain
+            let siteNetwork = networkType
+            guard let (_, created, updated) = try await ctx.persistence.allocatePort(reserve: { port, env in
+                var s = Site(name: siteName, slug: slug, path: sitePath,
+                             port: port, imageTag: siteImageTag, phpVersion: sitePHPLabel,
+                             customDomain: siteDomain, networkType: siteNetwork)
                 if let groupName, !groupName.trimmingCharacters(in: .whitespaces).isEmpty {
                     if let existing = env.groups.first(where: { $0.name.caseInsensitiveCompare(groupName) == .orderedSame }) {
                         s.groupID = existing.id
@@ -222,8 +221,14 @@ struct CreateCommand: AsyncParsableCommand {
                     }
                 }
                 env.sites.append(s)
+                return s
+            }) else {
+                throw CLIErrorJSON("no_free_port")
             }
-            let created = updated.sites.first { $0.id == site.id } ?? site
+            try SiteFolders.ensure(for: created)
+            // Write the per-site wp-cli shim at <site>/wp (§2e).
+            try? WPCLIShim.writeShim(slug: created.slug, siteRoot: created.path,
+                                     cliImage: WordPressImageCatalog.cliImage(for: created.imageTag))
             let resolvedGroupName = created.groupID.flatMap { id in updated.groups.first { $0.id == id }?.name }
             if output.json { emitLine(CLIJSON.string(SiteJSON(from: created, group: resolvedGroupName))) }
             else { emitLine("Created \(created.slug) at \(created.path.path) (port \(created.port))\(resolvedGroupName.map { " in group \"\($0)\"" } ?? "").") }
@@ -381,17 +386,42 @@ struct WorktreeCreate: AsyncParsableCommand {
         do {
             let envelope = try await ctx.load()
             guard let parent = envelope.sites.first(where: { $0.slug == site }) else { throw CLIErrorJSON("site_not_found", detail: site) }
-            let taken = Set(envelope.sites.map(\.port)).union(envelope.envs.map(\.port))
-            guard let port = PortAllocator.firstFreePort(excluding: taken) else { throw CLIErrorJSON("no_free_port") }
+            guard WorktreeEnvService.isValidRepoRelPath(repo) else {
+                throw CLIErrorJSON("invalid_repo_path", detail: WorktreeError.invalidRepoPath(repo).description)
+            }
             let running = await ctx.runningContainerNames()
             let parentRunning = running.contains(parent.wpContainerName)
 
-            let env = try await ctx.worktrees.create(parent: parent, parentIsRunning: parentRunning,
-                                                     repoRelPath: repo, branch: branch, from: from, port: port)
-            _ = try await ctx.persistence.mutate { $0.envs.append(env) }
+            // Allocate the port AND reserve the env record in one locked store
+            // mutation (#3), so a concurrent creator can't pick the same port
+            // during the (long) creation flow below.
+            let repoArg = repo
+            let branchArg = branch
+            guard let (_, reserved, _) = try await ctx.persistence.allocatePort(reserve: { port, store in
+                let d = WorktreeEnvService.descriptor(parent: parent, repoRelPath: repoArg,
+                                                      branch: branchArg, port: port)
+                store.envs.append(d)
+                return d
+            }) else { throw CLIErrorJSON("no_free_port") }
 
-            if output.json { emitLine(CLIJSON.string(WorktreeDescriptor(from: env))) }
-            else { emitLine("Created env \(env.envSlug) at \(env.localURL.absoluteString) (worktree: \(env.worktreePath.path)).") }
+            do {
+                let env = try await ctx.worktrees.create(parent: parent, parentIsRunning: parentRunning,
+                                                         repoRelPath: repo, branch: branch, from: from,
+                                                         port: reserved.port, reserved: reserved)
+                _ = try await ctx.persistence.mutate { store in
+                    store.envs.removeAll { $0.id == env.id }
+                    store.envs.append(env)
+                }
+                if output.json { emitLine(CLIJSON.string(WorktreeDescriptor(from: env))) }
+                else { emitLine("Created env \(env.envSlug) at \(env.localURL.absoluteString) (worktree: \(env.worktreePath.path)).") }
+            } catch {
+                // Creation rolled back its containers/folders; also release the
+                // reserved store record (and with it, the port).
+                _ = try? await ctx.persistence.mutate { store in
+                    store.envs.removeAll { $0.id == reserved.id }
+                }
+                throw error
+            }
         } catch {
             throw failCommand(error, json: output.json)
         }
