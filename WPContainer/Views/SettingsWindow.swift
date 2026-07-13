@@ -198,14 +198,16 @@ private struct SitesSettingsPane: View {
 
 private struct ProxySettingsPane: View {
     @Environment(AppViewModel.self) private var vm
-    @AppStorage(AppSettings.autoStartProxyKey) private var autoStartProxy = false
+    // Registered default is TRUE (AppSettings.registerDefaults): the proxy is
+    // required for HTTPS/custom-domain sites, so launch-start is opt-OUT.
+    @AppStorage(AppSettings.autoStartProxyKey) private var autoStartProxy = true
 
     var body: some View {
         SettingsPane {
             SectionCard(title: "HTTPS Proxy", systemImage: "lock.shield") {
                 VStack(alignment: .leading, spacing: 14) {
                     SettingRow(title: "Start HTTPS proxy at launch",
-                               explanation: "Automatically start the local HTTPS reverse proxy when WP Container opens, so https://<site>.localhost works right away.") {
+                               explanation: "Start the local HTTPS reverse proxy when WP Container opens, so https://<site>.localhost and custom domains work right away. Even when off, the proxy still starts whenever a site that needs it exists or is started.") {
                         Toggle("", isOn: $autoStartProxy)
                             .labelsHidden().toggleStyle(.switch)
                     }
