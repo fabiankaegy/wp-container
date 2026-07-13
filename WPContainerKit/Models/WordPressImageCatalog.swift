@@ -8,21 +8,34 @@ import os
 /// WP×PHP pairing is published, so `isKnownValid` gates the combinations the UI
 /// offers; a custom-tag escape hatch covers anything outside the matrix.
 public enum WordPressImageCatalog {
-    /// WordPress versions offered in the setup guide (newest first).
-    public static let wordPressVersions: [String] = ["latest", "6.8", "6.7", "6.6"]
-
-    /// PHP versions offered in the setup guide (newest first).
-    public static let phpVersions: [String] = ["8.4", "8.3", "8.2", "8.1"]
-
     /// The default PHP version paired with a fresh site.
     public static let defaultPHP = "8.3"
 
-    /// Combinations known to be unpublished on Docker Hub. Kept as a denylist so
-    /// the matrix stays permissive: only genuinely-missing tags are disabled.
-    /// (PHP 8.4 images only exist for WP 6.7+; older WP lines cap at PHP 8.3.)
-    private static let knownInvalid: Set<String> = [
-        "6.6-php8.4",
-    ]
+    /// LAST-RESORT static fallback matrix, used only when the live Docker Hub
+    /// discovery (`WordPressVersionCatalog`) has neither a network response nor a
+    /// disk cache. A static matrix ALWAYS rots — keep this conservative and let
+    /// live discovery be the real source. Refreshed 2026-07-13 (WordPress 7.0.1
+    /// is current; the library publishes 7.0 and 6.9 tags).
+    public static let fallbackMatrix = WordPressVersionMatrix(
+        wordPressVersions: ["latest", "7.0", "6.9", "6.8", "6.7", "6.6"],
+        phpByWordPress: [
+            "latest": ["8.4", "8.3", "8.2", "8.1"],
+            "7.0": ["8.4", "8.3", "8.2", "8.1"],
+            "6.9": ["8.4", "8.3", "8.2", "8.1"],
+            "6.8": ["8.4", "8.3", "8.2", "8.1"],
+            "6.7": ["8.4", "8.3", "8.2", "8.1"],
+            "6.6": ["8.3", "8.2", "8.1"],
+        ],
+        allPHPVersions: ["8.4", "8.3", "8.2", "8.1"]
+    )
+
+    /// WordPress versions offered in the setup guide (fallback; live catalog
+    /// supersedes). Newest first.
+    public static var wordPressVersions: [String] { fallbackMatrix.wordPressVersions }
+
+    /// PHP versions offered in the setup guide (fallback; live catalog
+    /// supersedes). Newest first.
+    public static var phpVersions: [String] { fallbackMatrix.allPHPVersions }
 
     /// Build the official image tag for a WP + PHP pair.
     ///
@@ -38,9 +51,11 @@ public enum WordPressImageCatalog {
         return "wordpress:\(wordpress)-php\(php)-apache"
     }
 
-    /// Whether a WP×PHP pairing is expected to resolve to a published tag.
+    /// Whether a WP×PHP pairing is expected to resolve to a published tag,
+    /// per the fallback matrix. Prefer `WordPressVersionMatrix.isValid` against a
+    /// live-discovered matrix; this is the offline default.
     public static func isKnownValid(wordpress: String, php: String) -> Bool {
-        !knownInvalid.contains("\(wordpress)-php\(php)")
+        fallbackMatrix.isValid(wp: wordpress, php: php)
     }
 
     /// Best-effort PHP version extracted from an arbitrary image tag
@@ -70,10 +85,25 @@ public enum WordPressImageCatalog {
     /// PHP versions for which the official library publishes a
     /// `wordpress:cli-php<X>` image. VERIFIED empirically 2026-07-13 by pulling
     /// every tag: `cli-php8.1`, `cli-php8.2`, `cli-php8.3`, `cli-php8.4` all
-    /// resolve. Note that plain `wordpress:cli` currently == `cli-php8.3`
-    /// (PHP 8.3.32) — which is exactly why running it against a `php8.4-apache`
-    /// site whose code requires PHP >= 8.4 hit a Composer platform_check fatal.
-    public static let cliPHPVersions: Set<String> = ["8.1", "8.2", "8.3", "8.4"]
+    /// resolve (Docker Hub additionally lists cli-php7.3–8.5). Note that plain
+    /// `wordpress:cli` currently == `cli-php8.3` (PHP 8.3.32) — which is exactly
+    /// why running it against a `php8.4-apache` site whose code requires
+    /// PHP >= 8.4 hit a Composer platform_check fatal.
+    ///
+    /// The live catalog (`WordPressVersionCatalog`) extends this seed set with
+    /// whatever cli-php tags Docker Hub publishes, via
+    /// `registerPublishedCLIPHPVersions`.
+    public static var cliPHPVersions: Set<String> { cliPHPState.withLock { $0 } }
+
+    private static let cliPHPState = OSAllocatedUnfairLock<Set<String>>(
+        initialState: ["8.1", "8.2", "8.3", "8.4"])
+
+    /// Merge live-discovered `cli-php<X>` versions into the known set (called by
+    /// `WordPressVersionCatalog` after a successful Docker Hub fetch).
+    public static func registerPublishedCLIPHPVersions(_ versions: [String]) {
+        guard !versions.isEmpty else { return }
+        cliPHPState.withLock { $0.formUnion(versions) }
+    }
 
     /// Map a site's WordPress image tag to the one-shot wp-cli image whose PHP
     /// version MATCHES the site, so wp-cli never runs a mismatched PHP (PLAN.md

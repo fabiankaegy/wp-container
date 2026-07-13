@@ -96,16 +96,22 @@ struct AddSiteSheet: View {
         Form {
             Section("WordPress version") {
                 Picker("WordPress", selection: $wpVersion) {
-                    ForEach(WordPressImageCatalog.wordPressVersions, id: \.self) { v in
+                    ForEach(vm.versionMatrix.wordPressVersions, id: \.self) { v in
                         Text(v == "latest" ? "Latest" : v).tag(v)
+                    }
+                }
+                .onChange(of: wpVersion) { _, newWP in
+                    // Keep the PHP pick valid for the newly-chosen WP series.
+                    if !vm.versionMatrix.isValid(wp: newWP, php: php) {
+                        php = vm.versionMatrix.defaultPHP(for: newWP)
                     }
                 }
             }
             Section("PHP version") {
                 Picker("PHP", selection: $php) {
-                    ForEach(WordPressImageCatalog.phpVersions, id: \.self) { v in Text(v).tag(v) }
+                    ForEach(vm.versionMatrix.phpVersions(for: wpVersion), id: \.self) { v in Text(v).tag(v) }
                 }
-                if !WordPressImageCatalog.isKnownValid(wordpress: wpVersion, php: php) {
+                if !vm.versionMatrix.isValid(wp: wpVersion, php: php) {
                     Label("This combination may not be published on Docker Hub.", systemImage: "exclamationmark.triangle")
                         .font(.caption).foregroundStyle(.orange)
                 }

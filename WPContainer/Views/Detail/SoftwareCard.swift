@@ -16,6 +16,19 @@ struct SoftwareCard: View {
     private var resultingTag: String { WordPressImageCatalog.imageTag(wordpress: wpVersion, php: php) }
     private var pendingChange: Bool { resultingTag != site.imageTag }
 
+    /// Picker options from the live matrix, always including the site's current
+    /// values so an off-matrix site still displays its own versions.
+    private var pickerWPVersions: [String] {
+        var vs = vm.versionMatrix.wordPressVersions
+        if !vs.contains(wpVersion) { vs.append(wpVersion) }
+        return vs
+    }
+    private var pickerPHPVersions: [String] {
+        var vs = vm.versionMatrix.phpVersions(for: wpVersion)
+        if !vs.contains(php) { vs.append(php) }
+        return vs
+    }
+
     var body: some View {
         SectionCard(title: "Software", systemImage: "shippingbox") {
             VStack(alignment: .leading, spacing: 14) {
@@ -55,20 +68,25 @@ struct SoftwareCard: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Picker("WordPress", selection: $wpVersion) {
-                    ForEach(WordPressImageCatalog.wordPressVersions, id: \.self) { v in
+                    ForEach(pickerWPVersions, id: \.self) { v in
                         Text(v == "latest" ? "Latest" : v).tag(v)
                     }
                 }
                 .controlSize(.small)
+                .onChange(of: wpVersion) { _, newWP in
+                    if !vm.versionMatrix.isValid(wp: newWP, php: php) {
+                        php = vm.versionMatrix.defaultPHP(for: newWP)
+                    }
+                }
                 Picker("PHP", selection: $php) {
-                    ForEach(WordPressImageCatalog.phpVersions, id: \.self) { v in
+                    ForEach(pickerPHPVersions, id: \.self) { v in
                         Text(v)
                             .tag(v)
                     }
                 }
                 .controlSize(.small)
             }
-            if !WordPressImageCatalog.isKnownValid(wordpress: wpVersion, php: php) {
+            if !vm.versionMatrix.isValid(wp: wpVersion, php: php) {
                 Label("This WP × PHP combination may not be published.", systemImage: "exclamationmark.triangle")
                     .font(.caption2).foregroundStyle(.orange)
             }

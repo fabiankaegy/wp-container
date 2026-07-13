@@ -48,6 +48,10 @@ public final class AppViewModel {
     public var presentingAddSite = false
     public var presentingNewEnv = false
 
+    /// WP × PHP version matrix for the setup pickers (PLAN.md §2k): starts from
+    /// the cached/static matrix and is refreshed from Docker Hub at launch.
+    public var versionMatrix: WordPressVersionMatrix = WordPressImageCatalog.fallbackMatrix
+
     @ObservationIgnored private var reconcileTask: Task<Void, Never>?
     @ObservationIgnored private var statusTask: Task<Void, Never>?
     @ObservationIgnored private var started = false
@@ -87,6 +91,14 @@ public final class AppViewModel {
         startReconcileLoop()
         // Adopt an already-running headless proxy, if any.
         proxyPort = ProxyControl.current()?.port
+        // Version pickers: show the cached matrix immediately, refresh from
+        // Docker Hub in the background (never blocks launch; offline keeps the
+        // cache/static fallback).
+        versionMatrix = await WordPressVersionCatalog.shared.cachedMatrix()
+        Task { [weak self] in
+            let fresh = await WordPressVersionCatalog.shared.matrix()
+            self?.versionMatrix = fresh
+        }
     }
 
     // MARK: - HTTPS / CA / agent tools (§2d/§2f)

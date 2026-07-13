@@ -125,6 +125,7 @@ private struct GeneralSettingsPane: View {
 // MARK: - Sites
 
 private struct SitesSettingsPane: View {
+    @Environment(AppViewModel.self) private var vm
     @AppStorage(AppSettings.defaultSitesRootKey) private var defaultSitesRoot = ""
     @AppStorage(AppSettings.defaultWordPressVersionKey) private var defaultWordPress = "latest"
     @AppStorage(AppSettings.defaultPHPVersionKey) private var defaultPHP = WordPressImageCatalog.defaultPHP
@@ -164,7 +165,7 @@ private struct SitesSettingsPane: View {
                     SettingRow(title: "WordPress version",
                                explanation: "Prefilled in the Add Site guide's version step.") {
                         Picker("", selection: $defaultWordPress) {
-                            ForEach(WordPressImageCatalog.wordPressVersions, id: \.self) { v in
+                            ForEach(vm.versionMatrix.wordPressVersions, id: \.self) { v in
                                 Text(v == "latest" ? "Latest" : v).tag(v)
                             }
                         }
@@ -174,12 +175,12 @@ private struct SitesSettingsPane: View {
                     SettingRow(title: "PHP version",
                                explanation: "Prefilled in the Add Site guide's version step.") {
                         Picker("", selection: $defaultPHP) {
-                            ForEach(WordPressImageCatalog.phpVersions, id: \.self) { v in Text(v).tag(v) }
+                            ForEach(vm.versionMatrix.phpVersions(for: defaultWordPress), id: \.self) { v in Text(v).tag(v) }
                         }
                         .labelsHidden().fixedSize()
                     }
 
-                    if !WordPressImageCatalog.isKnownValid(wordpress: defaultWordPress, php: defaultPHP) {
+                    if !vm.versionMatrix.isValid(wp: defaultWordPress, php: defaultPHP) {
                         Label("This WordPress × PHP combination may not be published on Docker Hub.",
                               systemImage: "exclamationmark.triangle")
                             .font(.caption).foregroundStyle(.orange)
