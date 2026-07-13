@@ -205,15 +205,32 @@ sites, containers, folders and store entries were deleted before finishing.
 
 ## Timings summary
 
-| Operation | Time |
-|---|---|
-| `create` (site, unstarted) | ~0.02s |
-| First `start` (incl. provisioning) | ~10.9s |
-| `worktree create` (parent running, live DB clone path) | ~12.7s |
-| `https enable` | ~1.5s |
-| `xdebug on` (image already built) | ~6.7s |
-| `elasticsearch on` | ~13.3s |
-| `create --multisite subdirectory` + `start` | ~10.8s |
+The "after issue #9" column was measured 2026-07-13 with the parallelized
+start path (concurrent image pulls + db/es/xdebug launch, wp gated only on IP
+assignment, TCP DB probe, 200ms→1s poll backoff) on fresh `perf-*` test sites
+(warm images, then deleted). "Serving" = first HTTP response on the site port;
+WordPress may answer its very first requests with the DB-retry page for
+≤~1s while mariadb finishes InnoDB init — first HTTP **200** is listed too.
+
+| Operation | Before | After issue #9 |
+|---|---|---|
+| `create` (site, unstarted) | ~0.02s | unchanged |
+| First `start` (incl. provisioning) | ~10.9s | ~7.4s (serving at ~3.9s; provisioning gates on the DB via TCP probe) |
+| `start` stopped→serving, plain site | ~6.6–8.0s | **2.1–3.0s** (first 200: 2.4–3.6s) |
+| `start` stopped→serving, xdebug+ES site | ~12.0–13.9s | **2.6–4.8s** (first 200: 3.1–5.7s; ES green ~5s later, ungated) |
+| Coupled `start` (parent + 1 worktree env) | sequential, ~2× single | **~3.5s total** (fully concurrent) |
+| `stop` (site, 3 containers) | ~2–3s | ~1.3s (concurrent stops) |
+| Status flip after action completes | up to 5s (reconcile tick) | immediate (StatusEvent stream; reconcile stays as ground-truth correction) |
+| `worktree create` (parent running, live DB clone path) | ~12.7s | ~8.8s |
+| `https enable` | ~1.5s | not re-measured (path untouched) |
+| `xdebug on` (image already built) | ~6.7s | not directly comparable (toggle = stop + start; see start rows) |
+| `elasticsearch on` | ~13.3s | ~7.4s (measured as the equivalent stop+start toggle on an ES site) |
+| `create --multisite subdirectory` + `start` | ~10.8s | not re-measured (same gated-provisioning path as first `start`) |
+
+Variance note: each `container image pull` of an already-present tag still
+costs ~0.9s of registry revalidation (now paid once, concurrently, instead of
+3–4× sequentially); a slow Docker Hub round-trip is the main source of the
+upper bounds above (e.g. the 4.8s ES-site start had a 3.1s images phase).
 
 ## Environment notes
 
@@ -290,7 +307,9 @@ green (`xcodegen && make build`, both schemes) after each fix.
   undeduped detached `Task`s; a fast double Start (or add-on toggle) runs two
   `startContainers`, the second failing on the `--name` collision. Self-heals via
   the 5s reconcile; surfaces a transient error, no corruption. *Proper fix:* an
-  in-flight guard keyed by instance id.
+  in-flight guard keyed by instance id. **FIXED (issue #5):** actor-held
+  `Set<UUID>` in `SiteLifecycle`; conflicting actions for a busy instance are
+  ignored, releases sit in `defer` so cancellation clears the guard.
 - **Proxy: routed-but-stopped site.** When a host maps to a known site whose
   container is down, the upstream connect fails and both sockets are cancelled —
   the client sees a connection reset rather than a friendly 502 (the 502 page is
@@ -317,5 +336,6 @@ the remainder are low-frequency edge cases that self-heal or fail safe.
 1. Allocate ports inside the locked `persistence.mutate` (kill the TOCTOU).
 2. Make `ProxyControl` liveness a real listen-probe, not just `kill(pid,0)`, and
    `release()` on app termination.
-3. Add an in-flight guard for per-instance lifecycle actions to make
-   double-start / rapid-toggle a no-op instead of a transient error.
+3. ~~Add an in-flight guard for per-instance lifecycle actions to make
+   double-start / rapid-toggle a no-op instead of a transient error.~~
+   DONE — issue #5.
