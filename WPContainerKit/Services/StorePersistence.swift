@@ -50,6 +50,34 @@ public actor StorePersistence {
         }
     }
 
+    /// Allocate a free port and let `reserve` record it into the envelope,
+    /// entirely inside the cross-process lock (fixes #3: allocating a port from
+    /// a snapshot read earlier, then writing later, lets two concurrent
+    /// creators both observe the same "free" port and collide). Because
+    /// `PortAllocator.firstFreePort` also bind-tests each candidate, the OS-level
+    /// "really free" guarantee is preserved while still holding the `flock`.
+    ///
+    /// `reserve` MUST record the port in `envelope` (append the new site/env —
+    /// or a placeholder that a follow-up `mutate` replaces) so the port is
+    /// visible as taken to the next locked reader; its return value is handed
+    /// back alongside the updated envelope. Returns nil — with nothing written —
+    /// only when no free port exists.
+    public func allocatePort<T: Sendable>(
+        from base: Int = PortAllocator.basePort,
+        reserve: @Sendable (Int, inout StoreEnvelope) -> T
+    ) throws -> (port: Int, value: T, envelope: StoreEnvelope)? {
+        try ensureDirectory()
+        return try withLock {
+            var envelope = (try? readUnlocked()) ?? StoreEnvelope()
+            let taken = Set(envelope.sites.map(\.port)).union(envelope.envs.map(\.port))
+            guard let port = PortAllocator.firstFreePort(from: base, excluding: taken) else { return nil }
+            let value = reserve(port, &envelope)
+            envelope.version = StoreEnvelope.currentVersion
+            try writeUnlocked(envelope)
+            return (port, value, envelope)
+        }
+    }
+
     // MARK: - Internals
 
     private func ensureDirectory() throws {

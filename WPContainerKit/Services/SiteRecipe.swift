@@ -156,8 +156,16 @@ public enum SiteRecipe {
 
     /// The nested shadowing mount for a worktree env's repo. Isolated here so
     /// Phase V/I can adjust the container-path convention.
+    ///
+    /// Defense-in-depth (#8): `.`/`..`/empty components are dropped so the
+    /// container path can never resolve outside `/var/www/html`, even for a
+    /// hand-edited store record with a traversal-laden rel path (creation
+    /// already rejects those via `WorktreeEnvService.isValidRepoRelPath`).
     public static func shadowMount(worktreePath: URL, repoRelPath: String) -> Mount {
-        let clean = repoRelPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let clean = repoRelPath
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .filter { $0 != ".." && $0 != "." }
+            .joined(separator: "/")
         return Mount(hostPath: worktreePath.path, containerPath: "/var/www/html/\(clean)")
     }
 
