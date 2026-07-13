@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.fabiankaegy.wpcontainer.hostshelper</string>
+    <!-- Path to the helper executable, relative to the app bundle root
+         (WPContainer.app/). Copied into Contents/MacOS by the app's build. -->
+    <key>BundleProgram</key>
+    <string>Contents/MacOS/wpc-hosts-helper</string>
+    <!-- The mach service clients connect to (NSXPCConnection, .privileged). -->
+    <key>MachServices</key>
+    <dict>
+        <key>com.fabiankaegy.wpcontainer.hostshelper</key>
+        <true/>
+    </dict>
+    <!-- Attributes the daemon to the app in System Settings > Login Items. -->
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>com.fabiankaegy.wpcontainer</string>
+    </array>
+</dict>
+</plist>

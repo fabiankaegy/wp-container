@@ -101,9 +101,31 @@ public enum HostsFileService {
     }
 
     /// Rewrite the managed block to exactly `domains` (the union across all
-    /// custom-domain sites) via ONE admin prompt. No-op when already up to date.
+    /// custom-domain sites). No-op when already up to date.
+    ///
+    /// Prefers the privileged `wpc-hosts-helper` when it is registered and
+    /// approved (SMAppService): that path uses the Touch ID-capable system
+    /// authorization dialog. If the helper is unavailable (not approved yet,
+    /// connection dropped, or an ad-hoc Debug build where it can't run) it falls
+    /// back to the legacy single `osascript … with administrator privileges`
+    /// prompt — behavior unchanged from before the helper existed.
     public static func apply(domains: [String]) async throws {
         if isUpToDate(domains: domains) { return }
+
+        if HostsHelperClient.isEnabled {
+            do {
+                try await HostsHelperClient.apply(domains: domains)
+                return
+            } catch HostsHelperClient.HelperError.cancelled {
+                throw HostsError.cancelled
+            } catch HostsHelperClient.HelperError.rejected(let msg) {
+                throw HostsError.adminFailed(msg)
+            } catch {
+                // .unavailable → the daemon isn't reachable; fall through to the
+                // legacy osascript path rather than blocking the user.
+            }
+        }
+
         let current = (try? String(contentsOfFile: hostsPath, encoding: .utf8)) ?? ""
         let updated = rewrite(current, domains: domains)
 
