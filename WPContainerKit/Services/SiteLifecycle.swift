@@ -60,6 +60,7 @@ public actor SiteLifecycle {
     /// emit `.running` — callers do that after any post-start provisioning.
     @discardableResult
     public func startContainers(_ inst: any RunnableInstance) async throws -> String {
+        let timer = PhaseTimer(inst.containerSlug)
         emit(inst.instanceID, .starting)
         do {
             try SiteFolders.ensure(for: inst)
@@ -70,21 +71,27 @@ public actor SiteLifecycle {
             // it here so it rides the SAME progress path as the base images —
             // the first wp-cli use on a php8.4 site pulls wordpress:cli-php8.4.
             try await cli.run(SiteRecipe.pullImageArgs(SiteRecipe.cliImage(for: inst)))
+            timer.mark("images")
             // First-ever start: pre-seed WordPress core into the mount (see
             // SiteRecipe.seedWordPressArgs). Gate on the absence of index.php.
             let indexPHP = inst.wordpressFolder.appendingPathComponent("index.php")
             if !FileManager.default.fileExists(atPath: indexPHP.path) {
                 try await cli.run(SiteRecipe.seedWordPressArgs(inst))
+                timer.mark("seed")
             }
             try await cli.run(SiteRecipe.runDatabaseArgs(inst))
+            timer.mark("db-run")
             try await waitForDatabase(inst)
+            timer.mark("db-ready")
             // The DB IP changes on every restart — re-inspect each start, never cache.
             let dbHost = try await resolveDatabaseHost(inst)
+            timer.mark("db-ip")
 
             // Elasticsearch sidecar (§2c): db → es → wp start order.
             var elasticsearchURL: String? = nil
             if inst.elasticsearchEnabled {
                 elasticsearchURL = try await startElasticsearch(inst)
+                timer.mark("es-green")
             }
 
             // Xdebug (§2c): swap in the derived image + pass the host gateway.
@@ -95,12 +102,15 @@ public actor SiteLifecycle {
                 // Gateway is the same across containers on the network; read it
                 // fresh from the already-running DB container (never hardcode).
                 xdebugClientHost = try await cli.gatewayAddress(of: inst.dbContainerName)
+                timer.mark("xdebug")
             }
 
             try await cli.run(SiteRecipe.runWordPressArgs(
                 inst, dbHost: dbHost, imageOverride: imageOverride,
                 xdebugClientHost: xdebugClientHost, elasticsearchURL: elasticsearchURL))
+            timer.mark("wp-run")
             try await waitForHTTP(inst)
+            timer.mark("http-ready")
             return dbHost
         } catch {
             emit(inst.instanceID, .error(Self.message(for: error)))
