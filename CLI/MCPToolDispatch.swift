@@ -29,6 +29,7 @@ enum MCPToolDispatch {
             case "xdebug_toggle":     return try await addonToggle(args, ctx: ctx, slug: scopedSlug, kind: .xdebug)
             case "elasticsearch_toggle": return try await addonToggle(args, ctx: ctx, slug: scopedSlug, kind: .elasticsearch)
             case "mailpit_toggle":    return try await mailpitToggle(args, ctx: ctx, slug: scopedSlug)
+            case "db_import":         return try await dbImport(args, ctx: ctx, slug: scopedSlug)
             default:
                 return MCPResult.failure("Unknown tool: \(params.name)")
             }
@@ -424,6 +425,101 @@ enum MCPToolDispatch {
             "restarted": restarted,
             "mailboxUrl": updated.mailboxURL?.absoluteString as Any? ?? NSNull(),
         ])
+    }
+
+    // MARK: - db_import (PLAN.md §2m)
+
+    /// Imports a `.sql`/`.sql.gz` dump into a site's database. Sites only (not
+    /// worktree environments) in v1. Auto-starts a stopped site (the kit never
+    /// starts containers itself) and persists the detected/overridden source
+    /// URL into `lastImportSourceURL` afterward (the kit doesn't write it).
+    /// No streaming progress over MCP — the progress callback is a no-op and
+    /// only the final summary (or a structured phaseFailed error) is returned.
+    private static func dbImport(_ args: [String: Value], ctx: CLIContext, slug: String) async throws -> CallTool.Result {
+        guard let file = args["file"]?.stringValue else {
+            throw ToolError("bad_args", "`file` is required (absolute path to a .sql/.sql.gz dump).")
+        }
+        let targetSlug = args["site"]?.stringValue ?? slug
+        let envelope = try await ctx.load()
+        guard let site = envelope.sites.first(where: { $0.slug == targetSlug }) else {
+            if envelope.envs.contains(where: { $0.envSlug == targetSlug }) {
+                throw ToolError("unsupported_target", "db_import targets sites only (not worktree environments) in this version.")
+            }
+            throw ToolError("site_not_found", "No site with slug \(targetSlug).")
+        }
+
+        let mediaArg = args["media"]?.stringValue ?? "remote"
+        let media: DBImportMediaOption
+        switch mediaArg {
+        case "remote": media = .remote
+        case "skip": media = .skip
+        case "copy":
+            guard let mediaPath = args["media_path"]?.stringValue else {
+                throw ToolError("bad_args", "media=\"copy\" requires media_path.")
+            }
+            media = .copy(from: URL(fileURLWithPath: (mediaPath as NSString).expandingTildeInPath))
+        default:
+            throw ToolError("bad_args", "media must be \"remote\", \"skip\", or \"copy\".")
+        }
+
+        let options = DBImportOptions(
+            scrub: args["scrub"]?.boolValue ?? true,
+            allowedEmails: args["allowed_emails"]?.arrayValue?.compactMap { $0.stringValue } ?? [],
+            allowedDomains: args["allowed_domains"]?.arrayValue?.compactMap { $0.stringValue } ?? [],
+            media: media,
+            createAdmin: args["create_admin"]?.boolValue ?? true,
+            sourceURLOverride: args["source_url"]?.stringValue
+        )
+
+        // Auto-start (mirrors the CLI surface): the kit throws .siteNotRunning
+        // rather than starting containers itself.
+        let running = await ctx.runningContainerNames()
+        if !running.contains(site.wpContainerName) {
+            let provisioned = try await ctx.lifecycle.startSite(site)
+            if provisioned != site.provisioned {
+                _ = try await ctx.persistence.mutate { env in
+                    if let i = env.sites.firstIndex(where: { $0.id == site.id }) { env.sites[i].provisioned = provisioned }
+                }
+            }
+        }
+
+        let dumpURL = URL(fileURLWithPath: (file as NSString).expandingTildeInPath)
+        let importer = DatabaseImportService(cli: ctx.cli, lifecycle: ctx.lifecycle)
+        do {
+            let summary = try await importer.importDatabase(into: site, dump: dumpURL, options: options) { _ in
+                // No streaming progress over MCP — final result only.
+            }
+            if let detectedSource = summary.sourceURL {
+                _ = try? await ctx.persistence.mutate { env in
+                    if let i = env.sites.firstIndex(where: { $0.id == site.id }) { env.sites[i].lastImportSourceURL = detectedSource }
+                }
+            }
+            return MCPResult.json([
+                "site": site.slug,
+                "sourceURL": summary.sourceURL as Any? ?? NSNull(),
+                "localURL": summary.localURL,
+                "backupPath": summary.backupPath,
+                "usersScrubbed": summary.usersScrubbed,
+                "usersPreserved": summary.usersPreserved,
+                "commentsRemoved": summary.commentsRemoved,
+                "replacementsMade": summary.replacementsMade as Any? ?? NSNull(),
+                "mediaMode": summary.mediaMode,
+                "adminUser": summary.adminUser as Any? ?? NSNull(),
+                "adminPassword": summary.adminPassword as Any? ?? NSNull(),
+                "dumpSizeBytes": summary.dumpSizeBytes,
+            ])
+        } catch let dbError as DatabaseImportError {
+            if case .phaseFailed(let phase, let short, let full, let rolledBack) = dbError {
+                return MCPResult.json([
+                    "error": "import_failed",
+                    "phase": phase.rawValue,
+                    "short": short,
+                    "full": full,
+                    "rolledBack": rolledBack,
+                ], isError: true)
+            }
+            throw ToolError("import_failed", dbError.description)
+        }
     }
 
     // MARK: - Small utilities
