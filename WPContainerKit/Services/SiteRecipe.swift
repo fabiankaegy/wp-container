@@ -352,6 +352,75 @@ public enum SiteRecipe {
         return args
     }
 
+    /// `wp db export <containerPath> --single-transaction` — export to a FILE
+    /// inside the mount rather than stdout, so a large export is never
+    /// buffered through a Swift `String` (used by the database importer's
+    /// pre-import safety backup and its rollback re-stage, PLAN.md §2m).
+    public static func wpDBExportToFileArgs(_ inst: any RunnableInstance, dbHost: String, containerPath: String) -> [String] {
+        wpProxyArgs(inst, dbHost: dbHost, wpArgs: ["db", "export", containerPath, "--single-transaction"])
+    }
+
+    // MARK: - Database importer (PLAN.md §2m)
+
+    /// `wp db import <containerPath>` — the import step. `containerPath` is the
+    /// staged dump's path as seen INSIDE the container (under the site's
+    /// `wordpress/` mount, e.g. `/var/www/html/.wpc-import/dump.sql`).
+    public static func wpDBImportArgs(_ inst: any RunnableInstance, dbHost: String, containerPath: String) -> [String] {
+        wpProxyArgs(inst, dbHost: dbHost, wpArgs: ["db", "import", containerPath])
+    }
+
+    /// `wp option get <option>` — used to read the imported dump's `home` URL.
+    public static func wpOptionGetArgs(_ inst: any RunnableInstance, dbHost: String, option: String) -> [String] {
+        wpProxyArgs(inst, dbHost: dbHost, wpArgs: ["option", "get", option])
+    }
+
+    /// `wp search-replace <source> <target> --all-tables --precise` — the URL
+    /// migration step.
+    public static func wpSearchReplaceArgs(_ inst: any RunnableInstance, dbHost: String, source: String, target: String) -> [String] {
+        wpProxyArgs(inst, dbHost: dbHost, wpArgs: ["search-replace", source, target, "--all-tables", "--precise"])
+    }
+
+    /// `wp db query "<sql>"` — arbitrary parameterized-by-string SQL (the scrub
+    /// step). `skipColumnNames` drops the header row for scalar `COUNT(*)` reads.
+    public static func wpDBQueryArgs(_ inst: any RunnableInstance, dbHost: String, sql: String,
+                                     skipColumnNames: Bool = false) -> [String] {
+        var wpArgs = ["db", "query", sql]
+        if skipColumnNames { wpArgs.append("--skip-column-names") }
+        return wpProxyArgs(inst, dbHost: dbHost, wpArgs: wpArgs)
+    }
+
+    /// `wp user get <user>` — existence check (non-zero exit ⇒ absent). Use
+    /// `ContainerCLI.runCapturing` so a missing user doesn't throw.
+    public static func wpUserGetArgs(_ inst: any RunnableInstance, dbHost: String, user: String) -> [String] {
+        wpProxyArgs(inst, dbHost: dbHost, wpArgs: ["user", "get", user])
+    }
+
+    /// `wp user create <adminUser> <adminEmail> --role=administrator --user_pass=<adminPassword>`
+    /// — the importer's "Local admin" step when the login doesn't already exist.
+    public static func wpUserCreateAdminArgs(_ inst: any RunnableInstance, dbHost: String) -> [String] {
+        wpProxyArgs(inst, dbHost: dbHost, wpArgs: [
+            "user", "create", adminUser, adminEmail,
+            "--role=administrator", "--user_pass=\(adminPassword)",
+        ])
+    }
+
+    /// `wp user update <adminUser> --user_pass=<adminPassword>` — reset the
+    /// local admin's password when the imported dump's login already exists.
+    public static func wpUserUpdateAdminPasswordArgs(_ inst: any RunnableInstance, dbHost: String) -> [String] {
+        wpProxyArgs(inst, dbHost: dbHost, wpArgs: ["user", "update", adminUser, "--user_pass=\(adminPassword)"])
+    }
+
+    /// `wp user set-role <adminUser> administrator` — ensure the role even if
+    /// the imported dump's `admin` login existed with a different role.
+    public static func wpUserSetRoleAdminArgs(_ inst: any RunnableInstance, dbHost: String) -> [String] {
+        wpProxyArgs(inst, dbHost: dbHost, wpArgs: ["user", "set-role", adminUser, "administrator"])
+    }
+
+    /// `wp cache flush`.
+    public static func wpCacheFlushArgs(_ inst: any RunnableInstance, dbHost: String) -> [String] {
+        wpProxyArgs(inst, dbHost: dbHost, wpArgs: ["cache", "flush"])
+    }
+
     // MARK: - Stop / delete
     public static func stopArgs(_ containerName: String) -> [String] { ["stop", containerName] }
     public static func deleteArgs(_ containerName: String) -> [String] { ["delete", containerName] }
