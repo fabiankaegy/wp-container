@@ -87,5 +87,18 @@ enum MCPTools {
         Tool(name: "mailpit_toggle",
              description: "Enable or disable the per-site Mailpit email catcher. When on, all outgoing WordPress mail is captured by Mailpit (SMTP) instead of being sent; browse or read it via its web UI + REST API (GET <mailboxUrl>/api/v1/messages). Writes/removes the wpc-mailpit mu-plugin and restarts the site to apply when running. The mailbox URL is returned here and in get_site_info.",
              inputSchema: obj(["enabled": bool("Turn Mailpit on (true) or off (false).")], required: ["enabled"])),
+        Tool(name: "db_import",
+             description: "Import a .sql/.sql.gz dump into a site's database: safety backup (one command away from undone) → import → URL migration (source detected from the dump's `home` option, or source_url) → optional scrub of personal data (users/comments/admin email) → media handling (remote proxy mu-plugin, folder copy, or skip) → optional local admin/password login. Auto-starts the site if it isn't running. On failure the pre-import backup is automatically re-imported (rollback) before the error is returned. Sites only (not worktree environments) in this version. No streaming progress — returns the final summary.",
+             inputSchema: obj([
+                "site": str("Site slug (defaults to the scoped site)."),
+                "file": str("Absolute path to a .sql or .sql.gz dump file."),
+                "scrub": bool("Scrub personal data after import (default true)."),
+                "allowed_emails": strArray("Email addresses to preserve as-is when scrubbing."),
+                "allowed_domains": strArray("Email domains to preserve as-is when scrubbing."),
+                "media": str("Media handling: \"remote\" (default), \"skip\", or \"copy\" (requires media_path)."),
+                "media_path": str("Local uploads folder to copy from; required when media=\"copy\"."),
+                "create_admin": bool("Create/reset the local admin/password login after import (default true)."),
+                "source_url": str("Trust this URL as the dump's source instead of the detected `home` option."),
+             ], required: ["file"])),
     ]
 }
