@@ -30,6 +30,7 @@ public final class AppViewModel {
     @ObservationIgnored let ca: CertificateAuthority
     @ObservationIgnored let httpsIntegration: HTTPSIntegration
     @ObservationIgnored let proxy: HTTPSProxy
+    @ObservationIgnored let dbImporter: DatabaseImportService
     @ObservationIgnored let notifications = NotificationService.shared
 
     /// Instances whose start/stop status notifications are suppressed because an
@@ -53,6 +54,15 @@ public final class AppViewModel {
     /// presentation from anywhere.
     public var presentingAddSite = false
     public var presentingNewEnv = false
+    public var presentingImportDB = false
+    /// A dump file dropped on the site detail pane (§2m drag & drop) — set just
+    /// before `presentingImportDB` so the sheet opens pre-filled with it.
+    public var pendingImportDump: URL?
+
+    /// Whether the pre-import database backup was successfully restored after
+    /// the last failed `importDatabase` call — nil when the last failure (if
+    /// any) wasn't a database import. Read alongside `lastError`/`lastErrorDetail`.
+    public var lastImportRolledBack: Bool?
 
     /// WP × PHP version matrix for the setup pickers (PLAN.md §2k): starts from
     /// the cached/static matrix and is refreshed from Docker Hub at launch.
@@ -75,6 +85,7 @@ public final class AppViewModel {
         self.ca = ca
         self.httpsIntegration = HTTPSIntegration(cli: cli, ca: ca)
         self.proxy = HTTPSProxy(ca: ca)
+        self.dbImporter = DatabaseImportService(cli: cli, lifecycle: lifecycle)
         self.store = SiteStore()
     }
 
@@ -203,6 +214,72 @@ public final class AppViewModel {
                     }
                 } catch { lastError = SiteLifecycleErrorText(error) }
             }
+        }
+    }
+
+    // MARK: - Database importer (PLAN.md §2m)
+
+    /// A step surfaced by `importDatabase` to the sheet: either the pseudo-step
+    /// of starting a stopped site (never emitted by the kit — `DatabaseImportService`
+    /// never starts sites itself) or one of the kit's own pipeline phases.
+    public enum DBImportStep: Sendable, Equatable {
+        case startingSite
+        case phase(DBImportPhase)
+    }
+
+    /// Runs the full database-import pipeline for `site`, starting the site
+    /// first (with a visible pseudo-step) if it isn't already running — the kit
+    /// layer never does this itself (PLAN.md §2m / `DatabaseImportError.siteNotRunning`).
+    /// On success, persists the dump's detected source URL onto the site record
+    /// (the kit doesn't write it). On failure, `lastError`/`lastErrorDetail`/
+    /// `lastImportRolledBack` are populated for the sheet's failure view.
+    @discardableResult
+    public func importDatabase(
+        into site: Site,
+        dump: URL,
+        options: DBImportOptions,
+        onStep: @escaping @Sendable (DBImportStep) -> Void
+    ) async -> DBImportSummary? {
+        lastError = nil
+        lastErrorDetail = nil
+        lastImportRolledBack = nil
+
+        var current = store.site(id: site.id) ?? site
+        if !current.status.isRunning {
+            onStep(.startingSite)
+            do {
+                let provisioned = try await lifecycle.startSite(current)
+                if provisioned != current.provisioned {
+                    current.provisioned = provisioned
+                    await store.upsertSite(current)
+                }
+            } catch {
+                lastError = "Couldn't start the site: \(SiteLifecycleErrorText(error))"
+                return nil
+            }
+        }
+
+        do {
+            let summary = try await dbImporter.importDatabase(into: current, dump: dump, options: options) { phase in
+                Task { @MainActor in onStep(.phase(phase)) }
+            }
+            if let sourceURL = summary.sourceURL, sourceURL != current.lastImportSourceURL {
+                current.lastImportSourceURL = sourceURL
+                await store.upsertSite(current)
+            }
+            return summary
+        } catch let error as DatabaseImportError {
+            if case .phaseFailed(_, let short, let full, let rolledBack) = error {
+                lastError = short
+                lastErrorDetail = full
+                lastImportRolledBack = rolledBack
+            } else {
+                lastError = error.description
+            }
+            return nil
+        } catch {
+            lastError = SiteLifecycleErrorText(error)
+            return nil
         }
     }
 

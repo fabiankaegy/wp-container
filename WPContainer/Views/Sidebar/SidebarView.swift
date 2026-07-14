@@ -365,6 +365,11 @@ struct SidebarSiteRow: View {
             vm.selection = site.id
             vm.presentingNewEnv = true
         }
+        Button("Import Database…", systemImage: "cylinder.split.1x2") {
+            vm.selection = site.id
+            vm.pendingImportDump = nil
+            vm.presentingImportDB = true
+        }
 
         Divider()
 
