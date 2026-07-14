@@ -474,6 +474,15 @@ staged files are always cleaned up (defer), and `.wpc-import/` is transient.
 (warn like wp-scrubber), media *download* from the source site (proxy mu-plugin
 covers the dev need without gigabytes on disk).
 
+**Status: shipped** (kit `258aee1`, CLI/MCP `a073393`, app `84f03f9`). Verified
+end to end against the built CLI on real containers via
+`scripts/validate-db-import.sh` — full pipeline (backup → import → URL
+migration → scrub with an email/domain allowlist → remote-media mu-plugin →
+local admin), the auto-rollback-on-failure path (a deliberately corrupted
+dump), and the fast argument-validation cases. 24/24 assertions passed, no
+code changes were needed. A full import of a small (~38KB) dump takes ~20s;
+site create+start+auto-provision another ~10s.
+
 ## 3. App architecture (MVVM, Swift 6 concurrency)
 
 ```
