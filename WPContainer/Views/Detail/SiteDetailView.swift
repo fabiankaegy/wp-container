@@ -11,6 +11,8 @@ struct SiteDetailView: View {
     @State private var tab: DetailTab = .overview
     @State private var confirmingDelete = false
     @State private var trashFolder = true
+    /// Whether a dragged file is currently hovering the pane (§2m drag & drop).
+    @State private var importDropTargeted = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -34,6 +36,35 @@ struct SiteDetailView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+        // Drop a .sql/.sql.gz dump anywhere on the pane to open the import
+        // sheet pre-filled with it (PLAN.md §2m).
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let dump = urls.first(where: DumpFile.isDumpFile) else { return false }
+            vm.selection = site.id
+            vm.pendingImportDump = dump
+            vm.presentingImportDB = true
+            return true
+        } isTargeted: { importDropTargeted = $0 }
+        .overlay {
+            if importDropTargeted {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Theme.accent.opacity(0.10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(Theme.accent, style: StrokeStyle(lineWidth: 2, dash: [8]))
+                    )
+                    .overlay {
+                        Label("Drop to import database", systemImage: "arrow.down.doc.fill")
+                            .font(.headline)
+                            .foregroundStyle(Theme.accent)
+                            .padding(14)
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .allowsHitTesting(false)
+                    .padding(8)
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: importDropTargeted)
     }
 
     // MARK: Tab content
@@ -122,6 +153,10 @@ struct SiteDetailView: View {
             actionButton("Finder", "folder") { SystemActions.revealInFinder(site.path) }
             actionButton("Terminal", "terminal") { SystemActions.openTerminal(at: site.path, pathPrepend: site.path) }
             OpenInButton(site: site)
+            actionButton("Import DB", "cylinder.split.1x2") {
+                vm.pendingImportDump = nil
+                vm.presentingImportDB = true
+            }
             Spacer()
         }
     }

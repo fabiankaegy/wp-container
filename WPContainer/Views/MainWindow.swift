@@ -31,6 +31,11 @@ struct MainWindow: View {
                 NewBranchEnvSheet(site: site)
             }
         }
+        .sheet(isPresented: $vm.presentingImportDB, onDismiss: { vm.pendingImportDump = nil }) {
+            if let site = vm.selectedSite {
+                ImportDatabaseSheet(site: site, initialDump: vm.pendingImportDump)
+            }
+        }
     }
 
     // MARK: Floating light panel
