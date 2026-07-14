@@ -50,6 +50,13 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     /// The doc filename the agent-tools block was written into (AGENTS.md or
     /// CLAUDE.md).
     public var agentToolsDoc: String?
+    /// The source URL detected (or overridden) during the last Database
+    /// Importer run (PLAN.md §2m) — the `home` option value read from the
+    /// imported dump right after `wp db import`, or the caller's override. Powers
+    /// the "Load from source site" remote-media mu-plugin (`RemoteMediaService`),
+    /// which needs a known source host to rewrite missing upload URLs against.
+    /// nil until a database has ever been imported into this site.
+    public var lastImportSourceURL: String?
 
     /// Runtime-derived; NOT persisted.
     public var status: SiteStatus = .stopped
@@ -60,6 +67,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         case agentToolsRoot, agentToolsDoc
         case cpuLimit, memoryLimitMB
         case mailpitEnabled, mailpitPort
+        case lastImportSourceURL
     }
 
     public init(
@@ -84,6 +92,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         networkType: NetworkType = .none,
         agentToolsRoot: String? = nil,
         agentToolsDoc: String? = nil,
+        lastImportSourceURL: String? = nil,
         status: SiteStatus = .stopped
     ) {
         self.id = id
@@ -107,6 +116,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.networkType = networkType
         self.agentToolsRoot = agentToolsRoot
         self.agentToolsDoc = agentToolsDoc
+        self.lastImportSourceURL = lastImportSourceURL
         self.status = status
     }
 
@@ -137,6 +147,8 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.networkType = (try? c.decodeIfPresent(NetworkType.self, forKey: .networkType)) ?? .none
         self.agentToolsRoot = try? c.decodeIfPresent(String.self, forKey: .agentToolsRoot)
         self.agentToolsDoc = try? c.decodeIfPresent(String.self, forKey: .agentToolsDoc)
+        // Absent in stores written before the Database Importer (§2m).
+        self.lastImportSourceURL = try? c.decodeIfPresent(String.self, forKey: .lastImportSourceURL)
     }
 
     // MARK: Derived paths

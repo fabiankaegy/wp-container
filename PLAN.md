@@ -14,7 +14,7 @@ site folder.
 
 ## 1. Environment facts (verified on this machine)
 
-- macOS 27.0, Apple Silicon (arm64)
+- macOS 26.0, Apple Silicon (arm64)
 - `container` CLI **1.1.0** at `/usr/local/bin/container`, system service **running**
   (`container system status` → running; appRoot: `~/Library/Application Support/com.apple.container/`)
 - Xcode 26.6, Swift 6.3.3
@@ -28,7 +28,7 @@ site folder.
 
 ## 2. Product decisions
 
-- **App name:** WP Container. Repo/folder name: `wp-container`. Bundle id `com.fabiankaegy.wpcontainer`. Deployment target **macOS 27 only** — free to use the newest SwiftUI/Liquid Glass APIs, no availability checks for anything ≤ 27.
+- **App name:** WP Container. Repo/folder name: `wp-container`. Bundle id `com.fabiankaegy.wpcontainer`. Deployment target **macOS 26** (matches Apple `container`'s own minimum) — no availability checks for anything ≤ 26; APIs newer than 26 need an `if #available` gate.
 - **App Sandbox OFF** (the app shells out to `/usr/local/bin/container` and manages
   arbitrary site folders). Ad-hoc code signing (`CODE_SIGN_IDENTITY=-`) for local use.
 - **Per-site layout on disk** (default root `~/WP Container Sites/<slug>/`, user-overridable
@@ -404,6 +404,75 @@ row. The list mirrors sidebar grouping order but flat/compact. App keeps running
   now". Note: the create+start hints (seed/db/install) remain time-based
   approximations — lifecycle emits no sub-step events, so fully honest labels for
   the xdebug-image build / ES boot would need a lifecycle event refactor (future).
+
+## 2m. Database importer (drop-in .sql → scrub → media → local admin)
+
+Bring a production/staging database into a local site in one guided flow. Kit-first
+design: `DatabaseImportService` in WPContainerKit does everything; app sheet, CLI
+command and MCP tool are thin surfaces over it (same as Mailpit/§2e).
+
+**Input.** A `.sql` or `.sql.gz` dump, via drag & drop onto the site detail pane /
+the import sheet's dropzone, or a file picker, or a CLI path argument. `.sql.gz`
+is decompressed on the host (`gzip -dc`) first. The dump is staged INSIDE the
+site's `wordpress/` mount (e.g. `wordpress/.wpc-import/dump.sql`) so the one-shot
+`wordpress:cli` container can see it at `/var/www/html/.wpc-import/dump.sql`;
+staged files are always cleaned up (defer), and `.wpc-import/` is transient.
+
+**Pipeline (phases, each surfaced as progress):**
+1. *Preflight* — site must be running (DB reachable); otherwise the service
+   starts it (same coupled-start used elsewhere). Verify dump size vs free disk.
+2. *Safety backup* — `wp db export` to `<site>/.backups/pre-import-<timestamp>.sql`
+   so a failed/regretted import is one command away from undone. On any later
+   phase failing, offer/perform rollback (re-import the backup).
+3. *Import* — `wp db import /var/www/html/.wpc-import/dump.sql`.
+4. *URL migration* — read the imported `home` option (`wp option get home`),
+   that's the **source URL**; run `wp search-replace <source> <local-url>
+   --all-tables --precise` (+ `wp cache flush`). Source URL is remembered on the
+   site record (`lastImportSourceURL`) — it powers remote media (below).
+5. *Scrub (optional, default ON)* — wp-scrubber-inspired
+   (https://github.com/10up/wp-scrubber), implemented as parameterized SQL via
+   `wp db query` (prefix from `wp db prefix`), no plugin installed:
+   - `users`: `user_pass` → random (MD5(UUID()) — legacy hash, unusable, rehashed
+     by WP if ever logged in), `user_email` → `user<ID>@example.com`,
+     `display_name` → `User <ID>`, `user_activation_key` → ''.
+   - `usermeta`: blank `first_name`, `last_name`, `nickname`, `description`,
+     delete `session_tokens`.
+   - `comments` + `commentmeta`: emptied (TRUNCATE), `posts.comment_count` → 0.
+   - `options`: `admin_email` → `admin@example.com`, delete
+     `new_admin_email` if present.
+   - Allowlist: emails/domains to preserve (UI text field / `--allowed-emails`,
+     `--allowed-domains`), matching wp-scrubber's flags.
+6. *Media handling (user choice, asked in the flow):*
+   - **Load from source site** (default when a source URL was detected): write a
+     tiny mu-plugin `wp-content/mu-plugins/wpc-remote-media.php` that filters
+     upload URLs to the source host when the file doesn't exist locally
+     (BE-Media-from-Production style). Removable via the same flow/settings.
+   - **Copy from folder…**: user picks a local `uploads` folder; it's copied
+     (APFS clonefile) into `wp-content/uploads`.
+   - **Skip**: do nothing (broken images accepted).
+7. *Local admin (optional, default ON)* — after scrubbing: create-or-update
+   `admin`/`password` (`wp user create admin admin@localhost.local
+   --role=administrator --user_pass=password`, or `wp user update` + ensure
+   administrator role if the login exists). Runs last so the scrubber can't
+   touch it.
+8. *Finish* — `wp cache flush`, delete staged dump, report summary (counts:
+   users scrubbed, comments removed, URL pairs replaced, admin credentials).
+
+**Surfaces.**
+- *App:* "Import Database…" in the site ActionBar overflow + sidebar context
+  menu + drag & drop of a .sql/.sql.gz file onto the site detail pane. Sheet =
+  small wizard: file (dropzone/picker) → options (scrub toggle + allowlist,
+  media choice, admin toggle, detected/overridable source URL) → live phase
+  progress → summary/error with "Roll back" on failure.
+- *CLI:* `wp-container db import <site> <file> [--no-scrub] [--allowed-emails …]
+  [--allowed-domains …] [--media remote|skip|copy --media-path …] [--no-admin]
+  [--json]` (grouped `db` subcommand leaves room for `db export`).
+- *MCP:* `db_import` tool (same options, JSON summary) — agents can seed a site
+  from a dump unattended.
+
+**Non-goals (v1):** multisite-aware scrubbing beyond the base tables, dumps >2GB
+(warn like wp-scrubber), media *download* from the source site (proxy mu-plugin
+covers the dev need without gigabytes on disk).
 
 ## 3. App architecture (MVVM, Swift 6 concurrency)
 
