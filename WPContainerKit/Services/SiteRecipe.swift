@@ -204,6 +204,25 @@ public enum SiteRecipe {
         return args
     }
 
+    // MARK: - Loopback hosts (in-guest /etc/hosts → host gateway)
+    /// `container exec` args that append an /etc/hosts line inside the running
+    /// wp container mapping the instance's public hostnames to the host gateway,
+    /// so WordPress loopback requests (wp-cron spawn, Site Health checks, REST
+    /// self-calls) resolve in-guest and traverse the host proxy exactly like a
+    /// browser. Without this the site's own hostname is unresolvable inside the
+    /// container and every loopback fails. Containers are ephemeral (`--rm`), so
+    /// this runs on every start; the grep guard keeps it idempotent anyway.
+    /// Returns nil when there is nothing to map (wildcards can't live in a
+    /// hosts file and are dropped).
+    public static func injectLoopbackHostsArgs(_ inst: any RunnableInstance,
+                                               gateway: String) -> [String]? {
+        let hosts = inst.loopbackHosts.filter { !$0.isEmpty && !$0.contains("*") }
+        guard !hosts.isEmpty else { return nil }
+        let line = "\(gateway) \(hosts.joined(separator: " "))"
+        return ["exec", inst.wpContainerName, "sh", "-c",
+                "grep -qxF '\(line)' /etc/hosts || echo '\(line)' >> /etc/hosts"]
+    }
+
     /// The nested shadowing mount for a worktree env's repo. Isolated here so
     /// Phase V/I can adjust the container-path convention.
     ///

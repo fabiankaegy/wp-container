@@ -207,4 +207,12 @@ extension Site: RunnableInstance {
     public var displayName: String { name }
     public var isProvisioned: Bool { provisioned }
     public var extraMounts: [Mount] { [] }
+    /// `<slug>.localhost` plus any custom domain. Subdomain-multisite wildcards
+    /// are omitted — /etc/hosts can't express them; subsite loopbacks would
+    /// need per-subsite entries (acceptable gap, matches the proxy SAN story).
+    public var loopbackHosts: [String] {
+        var hosts = [localhostHost]
+        if let d = customDomain, !d.isEmpty { hosts.append(d.lowercased()) }
+        return hosts
+    }
 }
