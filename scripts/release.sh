@@ -148,6 +148,12 @@ rm -f "$DMG"
 hdiutil create -volname "WP Container" -srcfolder "$STAGE" \
   -fs HFS+ -format UDZO -imagekey zlib-level=9 -ov "$DMG" >/dev/null
 rm -rf "$STAGE"
+# Codesign the DMG itself so Gatekeeper has a primary signature to assess when
+# the user opens the downloaded image, alongside the notarization ticket stapled
+# below. Without this, `spctl --assess --type open` reports "no usable signature"
+# for the DMG even though the contained app is notarized. Must happen BEFORE
+# notarization (signing mutates the image, which would invalidate a prior staple).
+codesign --force "${TS[@]}" --sign "$SIGN_IDENTITY" "$DMG"
 
 # ---- CLI zip -----------------------------------------------------------------
 log "Building CLI zip"
