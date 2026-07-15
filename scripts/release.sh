@@ -165,10 +165,10 @@ sudo=""
 [ -w "$PREFIX" ] || sudo="sudo"
 $sudo install -m 0755 "$HERE/wp-container" "$PREFIX/wp-container"
 $sudo ln -sf "$PREFIX/wp-container" "$PREFIX/wpc"
-# Writes the global `wp` router binary (no shell edits). Run `wp-container setup
-# wp` afterwards to put it first on PATH so plain `wp` inside a site works.
-"$PREFIX/wp-container" setup wp --install-binary
 echo "Installed wp-container (+ wpc) to $PREFIX."
+# The global `wp` router is per-user: it lives under your Application Support dir
+# and prepends a block to ~/.zshrc, so it must be enabled unprivileged (never
+# under sudo, which would resolve to root's home). Run it yourself:
 echo "Run 'wp-container setup wp' to enable the global 'wp' router inside sites."
 INSTALL
 chmod +x "$CLIZIP_STAGE/install.sh"
@@ -177,9 +177,9 @@ WP Container CLI $VERSION
 
 Contents:
   wp-container   the CLI binary (Developer ID / ad-hoc signed, hardened runtime)
-  install.sh     installs it to /usr/local/bin, adds a 'wpc' symlink, and writes
-                 the global 'wp' router (which is generated at install time and
-                 points at the installed wp-container).
+  install.sh     installs it to /usr/local/bin and adds a 'wpc' symlink. The
+                 global 'wp' router is enabled separately (per-user) by running
+                 'wp-container setup wp' — see below.
 
 Install:
   ./install.sh

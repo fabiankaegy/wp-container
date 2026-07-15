@@ -13,9 +13,20 @@ import Foundation
 public enum WPCLIShim {
     public static let containerBinary = ContainerCLI.defaultBinaryPath
     public static let cliPath = "/usr/local/bin/wp-container"
-    /// Dedicated dir the global router lives in (kept separate so a single PATH
-    /// prepend exposes only our `wp`, never shadowing other tools).
-    public static let routerDir = "/usr/local/bin/wp-container-bin"
+    /// Dedicated dir the global router lives in. Under the app's per-user data
+    /// dir (`~/Library/Application Support/WPContainer/bin`) — NOT `/usr/local/bin`
+    /// — so the unsandboxed GUI app, running as the user, can write it without
+    /// root (writing into root-owned `/usr/local/bin` failed with EACCES). Kept
+    /// as its own dir so a single PATH prepend exposes only our `wp`, never
+    /// shadowing other tools.
+    public static var routerDir: String {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
+        return appSupport
+            .appendingPathComponent("WPContainer", isDirectory: true)
+            .appendingPathComponent("bin", isDirectory: true)
+            .path
+    }
     public static var routerPath: String { "\(routerDir)/wp" }
 
     /// Bumped whenever the shim body format changes so stale shims auto-refresh

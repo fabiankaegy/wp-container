@@ -28,11 +28,12 @@ build-cli: generate
 install-cli: build-cli
 	install -m 0755 "$(PRODUCTS)/wp-container" "$(PREFIX)/wp-container"
 	ln -sf "$(PREFIX)/wp-container" "$(PREFIX)/wpc"
-	@# Write the global `wp` router binary (no shell edits). Run
-	@# `wp-container setup wp` (or the app's toggle) to put it first on PATH.
-	"$(PREFIX)/wp-container" setup wp --install-binary
 	@echo "Installed wp-container (+ wpc symlink) to $(PREFIX)"
-	@echo "Global wp router staged; run 'wp-container setup wp' to enable plain 'wp' inside sites."
+	@# The global `wp` router is per-user (it lives under the user's Application
+	@# Support dir and prepends a block to ~/.zshrc), so it must NOT be installed
+	@# here — this target typically runs under sudo, which would resolve to root's
+	@# home. Run 'wp-container setup wp' (or the app's toggle) as your user.
+	@echo "Run 'wp-container setup wp' (unprivileged) or use the app toggle to enable plain 'wp' inside sites."
 
 # Confirms the marketing version is identical in the Swift source of truth and
 # project.yml. Run by `make release`; handy on its own before tagging.
