@@ -47,6 +47,11 @@ public protocol RunnableInstance: Sendable {
     var mailpitEnabled: Bool { get }
     /// The localhost port the Mailpit web UI is published on (issue #10).
     var mailpitPort: Int? { get }
+    /// Public hostnames (no wildcards) that must resolve to the HOST from
+    /// inside the wp container, so WordPress loopback requests (wp-cron spawn,
+    /// Site Health checks, REST self-calls) reach the host proxy exactly like a
+    /// browser does. Injected into the container's /etc/hosts on every start.
+    var loopbackHosts: [String] { get }
 }
 
 public extension RunnableInstance {
@@ -84,4 +89,7 @@ public extension RunnableInstance {
     }
     /// The proxy hostname for the mailbox (`<slug>-mail.localhost`, issue #10).
     var mailboxHost: String { "\(containerSlug)-mail.localhost" }
+    /// Default loopback set: the `<containerSlug>.localhost` proxy hostname.
+    /// Site overrides this to add its custom domain.
+    var loopbackHosts: [String] { ["\(containerSlug).localhost"] }
 }

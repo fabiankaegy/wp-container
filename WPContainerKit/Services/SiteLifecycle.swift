@@ -152,6 +152,13 @@ public actor SiteLifecycle {
                 xdebugClientHost: xdebugClientHost, elasticsearchURL: elasticsearchURL,
                 mailpitHost: mailpitHost))
             timer.mark("wp-run")
+            // Make the site's own hostnames resolvable in-guest (→ host proxy)
+            // so WordPress loopbacks work. Best-effort: a failure degrades to
+            // the old fail-fast loopback, never blocks the start.
+            if let gateway, let hostsArgs = SiteRecipe.injectLoopbackHostsArgs(inst, gateway: gateway) {
+                _ = try? await cli.run(hostsArgs)
+                timer.mark("loopback-hosts")
+            }
             try await waitForHTTP(inst)
             timer.mark("http-ready")
             return dbHost
