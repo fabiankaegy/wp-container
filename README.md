@@ -118,7 +118,7 @@ Sites are provisioned automatically (no install wizard) and log in with
 
 ## Requirements
 
-- macOS 27 (Apple Silicon)
+- macOS 26 (Apple Silicon)
 - [Apple `container`](https://github.com/apple/container) ≥ 1.1.0 (`brew install container`
   or the release installer); the app offers to start its system service
 - Xcode 26+ and [XcodeGen](https://github.com/yonaskolb/XcodeGen) to build from source
