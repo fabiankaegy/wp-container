@@ -34,7 +34,12 @@ public final class HTTPSProxy: @unchecked Sendable {
 
     private let ca: CertificateAuthority
     private let persistence: StorePersistence
-    private let queue = DispatchQueue(label: "dev.wpcontainer.httpsproxy", attributes: .concurrent)
+    private let cli = ContainerCLI()
+    /// Listener callbacks only. MUST be serial: Network.framework requires a
+    /// serial queue — on a concurrent queue NWConnection receive/send callbacks
+    /// can run out of order, which manifested as randomly truncated large
+    /// responses ("The network connection was lost" on multi-MB JS bundles).
+    private let queue = DispatchQueue(label: "dev.wpcontainer.httpsproxy.listener")
     private let stateLock = NSLock()
 
     /// A resolved routing entry: the upstream port plus the display metadata
@@ -44,17 +49,36 @@ public final class HTTPSProxy: @unchecked Sendable {
         /// Store slug usable with `wp-container start <slug>` (site or env slug).
         public let slug: String?
         public let displayName: String?
+        /// Container name (`wpc-<slug>-wp` / `-mail`) + in-guest port, so the
+        /// proxy can dial the container's vmnet IP directly. The published
+        /// `127.0.0.1:<port>` forwarder is a FALLBACK only: Apple `container`'s
+        /// forwarder discards in-flight data when the guest closes a connection
+        /// while the host-side reader lags (verified with a bare NWConnection
+        /// reader — slow reads via the forwarder lose the response tail, the
+        /// same reads against the container IP never do), which randomly
+        /// truncated multi-MB responses behind this proxy.
+        public let containerName: String?
+        public let containerPort: UInt16
 
-        public init(port: Int, slug: String? = nil, displayName: String? = nil) {
+        public init(port: Int, slug: String? = nil, displayName: String? = nil,
+                    containerName: String? = nil, containerPort: UInt16 = 80) {
             self.port = port
             self.slug = slug
             self.displayName = displayName
+            self.containerName = containerName
+            self.containerPort = containerPort
         }
     }
 
     private var listener: NWListener?
     private var httpListener: NWListener?
     private var hostMap: [String: Route] = [:]
+    /// `wpc-…` container name → current vmnet IP, refreshed alongside the host
+    /// map so upstream connections dial containers directly instead of the
+    /// lossy published-port forwarder (see `Route.containerName`). IPs churn on
+    /// every container start, so entries are only ever hints — a failed direct
+    /// dial invalidates its entry and falls back to the published port.
+    private var containerIPs: [String: String] = [:]
     private var refreshTask: Task<Void, Never>?
     private var _boundPort: UInt16?
     private var _boundHTTPPort: UInt16?
@@ -116,21 +140,27 @@ public final class HTTPSProxy: @unchecked Sendable {
     public static func routes(from envelope: StoreEnvelope) -> [String: Route] {
         var map: [String: Route] = [:]
         for site in envelope.sites {
-            let route = Route(port: site.port, slug: site.slug, displayName: site.name)
+            let route = Route(port: site.port, slug: site.slug, displayName: site.name,
+                              containerName: site.wpContainerName)
             map["\(site.slug).localhost"] = route
             if let domain = site.customDomain, !domain.isEmpty { map[domain.lowercased()] = route }
             // Mailpit web UI at <slug>-mail.localhost (issue #10).
             if site.mailpitEnabled, let mp = site.mailpitPort {
                 map["\(site.slug)-mail.localhost"] = Route(port: mp, slug: site.slug,
-                                                           displayName: "\(site.name) · Mailbox")
+                                                           displayName: "\(site.name) · Mailbox",
+                                                           containerName: site.mailContainerName,
+                                                           containerPort: UInt16(SiteRecipe.mailpitWebPort))
             }
         }
         for env in envelope.envs {
             map["\(env.envSlug).localhost"] = Route(port: env.port, slug: env.envSlug,
-                                                    displayName: "\(env.parentSlug) · \(env.branch)")
+                                                    displayName: "\(env.parentSlug) · \(env.branch)",
+                                                    containerName: env.wpContainerName)
             if env.mailpitEnabled, let mp = env.mailpitPort {
                 map["\(env.envSlug)-mail.localhost"] = Route(port: mp, slug: env.envSlug,
-                                                             displayName: "\(env.parentSlug) · \(env.branch) · Mailbox")
+                                                             displayName: "\(env.parentSlug) · \(env.branch) · Mailbox",
+                                                             containerName: env.mailContainerName,
+                                                             containerPort: UInt16(SiteRecipe.mailpitWebPort))
             }
         }
         return map
@@ -216,8 +246,25 @@ public final class HTTPSProxy: @unchecked Sendable {
             } catch { continue }
         }
 
+        // Warm the container-IP cache so even the first requests dial direct;
+        // the refresh loop keeps it current from here on.
+        await refreshContainerIPs()
+
         startRefreshLoop()
         return boundPort
+    }
+
+    /// One `container list` per cycle → name→IP map for every running
+    /// container. Failure leaves the previous cache in place (a stale hint is
+    /// self-healing via the failed-dial fallback; an emptied cache would demote
+    /// every request to the lossy forwarder).
+    private func refreshContainerIPs() async {
+        guard let records = try? await cli.list(all: false) else { return }
+        var ips: [String: String] = [:]
+        for record in records {
+            if let ip = record.ipAddress, !ip.isEmpty { ips[record.name] = ip }
+        }
+        stateLock.withLock { containerIPs = ips }
     }
 
     public func stop() {
@@ -271,6 +318,7 @@ public final class HTTPSProxy: @unchecked Sendable {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
                 guard let self else { return }
+                await self.refreshContainerIPs()
                 guard let env = try? await self.persistence.load() else { continue }
                 self.updateHostMap(routes: Self.routes(from: env))
                 let wanted = Set(Self.sanHosts(from: env))
@@ -291,12 +339,16 @@ public final class HTTPSProxy: @unchecked Sendable {
     // MARK: - Connection handling
 
     private func handle(inbound: NWConnection, forwardedProto: String) {
-        inbound.start(queue: queue)
-        readRequestHeader(from: inbound, accumulated: Data(), forwardedProto: forwardedProto)
+        // One serial queue per accepted connection (shared with its upstream):
+        // serial is a Network.framework requirement (see `queue`), per-pair so
+        // one slow client can't head-of-line-block every other connection.
+        let connQueue = DispatchQueue(label: "dev.wpcontainer.httpsproxy.conn")
+        inbound.start(queue: connQueue)
+        readRequestHeader(from: inbound, accumulated: Data(), forwardedProto: forwardedProto, on: connQueue)
     }
 
     /// Accumulate inbound bytes until the end of the HTTP header block (CRLFCRLF).
-    private func readRequestHeader(from inbound: NWConnection, accumulated: Data, forwardedProto: String) {
+    private func readRequestHeader(from inbound: NWConnection, accumulated: Data, forwardedProto: String, on connQueue: DispatchQueue) {
         inbound.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, isComplete, error in
             guard let self else { return }
             var buffer = accumulated
@@ -305,7 +357,7 @@ public final class HTTPSProxy: @unchecked Sendable {
             if let range = Self.headerTerminator(in: buffer) {
                 let headerData = buffer.subdata(in: buffer.startIndex..<range.lowerBound)
                 let bodyStart = buffer.subdata(in: range.upperBound..<buffer.endIndex)
-                self.route(inbound: inbound, rawHeader: headerData, bufferedBody: bodyStart, forwardedProto: forwardedProto)
+                self.route(inbound: inbound, rawHeader: headerData, bufferedBody: bodyStart, forwardedProto: forwardedProto, on: connQueue)
                 return
             }
             if error != nil || isComplete {
@@ -316,11 +368,11 @@ public final class HTTPSProxy: @unchecked Sendable {
                 inbound.cancel()
                 return
             }
-            self.readRequestHeader(from: inbound, accumulated: buffer, forwardedProto: forwardedProto)
+            self.readRequestHeader(from: inbound, accumulated: buffer, forwardedProto: forwardedProto, on: connQueue)
         }
     }
 
-    private func route(inbound: NWConnection, rawHeader: Data, bufferedBody: Data, forwardedProto: String) {
+    private func route(inbound: NWConnection, rawHeader: Data, bufferedBody: Data, forwardedProto: String, on connQueue: DispatchQueue) {
         guard let header = String(data: rawHeader, encoding: .utf8) else { inbound.cancel(); return }
         let lines = header.components(separatedBy: "\r\n")
         guard let requestLine = lines.first, !requestLine.isEmpty else { inbound.cancel(); return }
@@ -339,17 +391,52 @@ public final class HTTPSProxy: @unchecked Sendable {
             return bytes
         }()
 
-        // Connect explicitly and only forward once the upstream is READY: a
-        // known host whose containers are stopped must get the friendly
-        // "site is stopped" page (#6), not a raw connection reset. On
-        // 127.0.0.1 a refused connect surfaces as `.waiting(ECONNREFUSED)`
-        // (Network.framework treats it as transient and would retry forever),
-        // so `.waiting` is treated as down too — correct for localhost where a
-        // live listener accepts immediately.
-        let upstream = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: UInt16(target.port))!, using: .tcp)
+        // Prefer dialing the container's vmnet IP directly (forwarder bypass —
+        // see `Route.containerName`); the published `127.0.0.1:<port>` is the
+        // last-resort candidate so unknown-IP and stale-IP cases still work.
+        var candidates: [(host: String, port: UInt16)] = []
+        if let name = target.containerName,
+           let ip = stateLock.withLock({ containerIPs[name] }) {
+            candidates.append((ip, target.containerPort))
+        }
+        candidates.append(("127.0.0.1", UInt16(target.port)))
+        dial(candidates: candidates[...], inbound: inbound, upstreamBytes: upstreamBytes,
+             host: host, target: target, on: connQueue)
+    }
+
+    /// Try each upstream candidate in order; only when the LAST one (always the
+    /// published localhost port) is down does the friendly "site is stopped"
+    /// page (#6) go out. Connect explicitly and only forward once the upstream
+    /// is READY. On 127.0.0.1 a refused connect surfaces as
+    /// `.waiting(ECONNREFUSED)` (Network.framework treats it as transient and
+    /// would retry forever), so `.waiting` is treated as down — correct for
+    /// localhost where a live listener accepts immediately. A dead vmnet IP
+    /// instead just sits in `.preparing` while ARP times out, so every attempt
+    /// also carries a 2s deadline; a failed direct dial invalidates the IP hint
+    /// before falling through.
+    private func dial(candidates: ArraySlice<(host: String, port: UInt16)>,
+                      inbound: NWConnection, upstreamBytes: Data,
+                      host: String, target: Route, on connQueue: DispatchQueue) {
+        guard let candidate = candidates.first else {
+            sendHTMLResponse(to: inbound, status: "502 Bad Gateway",
+                             html: Self.stoppedSitePage(host: host, route: target))
+            return
+        }
+        let isDirect = candidates.count > 1
+        let upstream = NWConnection(host: NWEndpoint.Host(candidate.host),
+                                    port: NWEndpoint.Port(rawValue: candidate.port)!, using: .tcp)
         let decided = ResumeOnce()
+        let fail: @Sendable () -> Void = { [weak self] in
+            upstream.stateUpdateHandler = nil
+            upstream.cancel()
+            guard let self else { inbound.cancel(); return }
+            if isDirect, let name = target.containerName {
+                self.stateLock.withLock { _ = self.containerIPs.removeValue(forKey: name) }
+            }
+            self.dial(candidates: candidates.dropFirst(), inbound: inbound,
+                      upstreamBytes: upstreamBytes, host: host, target: target, on: connQueue)
+        }
         upstream.stateUpdateHandler = { [weak self] state in
-            guard let self else { return }
             switch state {
             case .ready:
                 guard decided.tryResume() else { return }
@@ -362,30 +449,63 @@ public final class HTTPSProxy: @unchecked Sendable {
                 })
             case .waiting, .failed:
                 guard decided.tryResume() else { return }
-                upstream.stateUpdateHandler = nil
-                upstream.cancel()
-                self.sendHTMLResponse(to: inbound, status: "502 Bad Gateway",
-                                      html: Self.stoppedSitePage(host: host, route: target))
+                fail()
             case .cancelled:
                 if decided.tryResume() { inbound.cancel() }
             default:
                 break
             }
         }
-        upstream.start(queue: queue)
+        connQueue.asyncAfter(deadline: .now() + 2) {
+            guard decided.tryResume() else { return }
+            fail()
+        }
+        upstream.start(queue: connQueue)
     }
 
-    /// One-directional pump: read from `source`, write to `destination`, tear
-    /// both down on EOF/error.
+    /// One-directional pump: read from `source`, write to `destination`.
+    ///
+    /// Two truncation hazards live here, both empirically observed as randomly
+    /// cut-off multi-MB responses ("The network connection was lost"):
+    ///
+    /// 1. OUR teardown: cancelling `destination` the moment `source` EOFs
+    ///    discards bytes still queued in the connection. So the final chunk is
+    ///    sent with `isComplete: true` (flush-then-FIN) and teardown of
+    ///    `destination` is gated on that send's completion, which on the
+    ///    (mandatory-serial) connection queue fires after all prior sends.
+    ///
+    /// 2. APPLE'S forwarder: the `container` published-port forwarder that
+    ///    upstream connections dial (`127.0.0.1:<port>`) drops its own buffered
+    ///    data if the guest closes while the host-side READER lags — verified
+    ///    with a bare NWConnection reader (slow reads via the forwarder lose
+    ///    the tail; the same reads against the container IP never do). Defense:
+    ///    read greedily — the next `receive` is armed immediately rather than
+    ///    chained off the send completion, so this proxy is never the slow
+    ///    reader. Buffering is bounded by response size, fine for local dev.
+    ///
+    /// Both constraints together force this shape: on EOF, enqueue the final
+    /// chunk as a flush-then-FIN (`isComplete: true`) and cancel ONLY `source`.
+    /// `destination` must NOT be cancelled here — not even from the final
+    /// send's `.contentProcessed` completion, which fires when the stack
+    /// ACCEPTS the bytes, not when they drain. Each connection is instead
+    /// cancelled by its OWN pump when its peer closes: the client reads the
+    /// full response (Content-Length/chunked framing tells it when), closes,
+    /// and that EOF drives the opposite pump's teardown. A client that never
+    /// closes leaks the pair until it does — acceptable for a local dev proxy,
+    /// and browsers/curl close promptly on `Connection: close` responses.
     private func relay(from source: NWConnection, to destination: NWConnection) {
         source.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { data, _, isComplete, error in
-            if let data, !data.isEmpty {
-                destination.send(content: data, completion: .contentProcessed { _ in })
-            }
+            let chunk = (data?.isEmpty == false) ? data : nil
             if isComplete || error != nil {
+                destination.send(content: chunk, contentContext: .finalMessage, isComplete: true,
+                                 completion: .idempotent)
                 source.cancel()
-                destination.cancel()
                 return
+            }
+            if let chunk {
+                destination.send(content: chunk, completion: .contentProcessed { err in
+                    if err != nil { source.cancel(); destination.cancel() }
+                })
             }
             self.relay(from: source, to: destination)
         }
