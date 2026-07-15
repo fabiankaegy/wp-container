@@ -28,14 +28,19 @@ public actor XdebugImageService {
         self.cli = cli
     }
 
+    /// Bump whenever `dockerfile(baseTag:)` changes: the version is part of the
+    /// derived tag, so cached images built from the old recipe stop matching
+    /// and `ensureImage` rebuilds instead of reusing a stale layer set.
+    static let recipeVersion = 2
+
     /// The derived image tag for a given base WordPress image tag, e.g.
-    /// `wordpress:6.8-php8.2-apache` → `wpc-wordpress-xdebug:6.8-php8.2-apache`.
+    /// `wordpress:6.8-php8.2-apache` → `wpc-wordpress-xdebug:v2-6.8-php8.2-apache`.
     public static func derivedTag(forBase baseTag: String) -> String {
         let ref = baseTag.hasPrefix("wordpress:")
             ? String(baseTag.dropFirst("wordpress:".count))
             : baseTag.replacingOccurrences(of: ":", with: "-")
         let safe = ref.isEmpty ? "latest" : ref
-        return "wpc-wordpress-xdebug:\(safe)"
+        return "wpc-wordpress-xdebug:v\(recipeVersion)-\(safe)"
     }
 
     /// Ensure the derived image for `baseTag` exists, building it if missing.
@@ -101,6 +106,13 @@ public actor XdebugImageService {
     }
 
     /// The exact validated Dockerfile (see `scripts/validate-addons.sh`).
+    ///
+    /// `mode=debug` + `start_with_request=trigger` (recipe v2): the old
+    /// `debug,develop` + `start_with_request=yes` combo taxed EVERY request —
+    /// develop-mode instrumentation plus a connect attempt to the (usually
+    /// absent) IDE on each page load. Trigger mode is free until a debug
+    /// session is requested via the standard `XDEBUG_SESSION`/`XDEBUG_TRIGGER`
+    /// cookie, query arg, or env var (browser "Xdebug helper" extensions set it).
     static func dockerfile(baseTag: String) -> String {
         """
         FROM \(baseTag)
@@ -109,8 +121,8 @@ public actor XdebugImageService {
             && docker-php-ext-enable xdebug
 
         RUN { \\
-            echo 'xdebug.mode=debug,develop'; \\
-            echo 'xdebug.start_with_request=yes'; \\
+            echo 'xdebug.mode=debug'; \\
+            echo 'xdebug.start_with_request=trigger'; \\
             echo 'xdebug.client_port=9003'; \\
             echo 'xdebug.client_host=${XDEBUG_CLIENT_HOST}'; \\
             echo 'xdebug.log_level=0'; \\

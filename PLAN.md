@@ -145,9 +145,10 @@ toggling while running offers "Restart now".
 
 **Xdebug**
 - The official wordpress image has no Xdebug → we build a derived image once per
-  base tag with `container build`: `wpc-wordpress-xdebug:<tag>` from a generated
-  Dockerfile (`FROM wordpress:<tag>` + `pecl install xdebug` + docker-php-ext-enable
-  + xdebug.ini: mode=debug,develop; start_with_request=yes; client_port=9003;
+  base tag with `container build`: `wpc-wordpress-xdebug:v<recipe>-<tag>` from a
+  generated Dockerfile (`FROM wordpress:<tag>` + `pecl install xdebug` + docker-php-ext-enable
+  + xdebug.ini: mode=debug; start_with_request=trigger — free until a debug session
+  is requested via XDEBUG_SESSION/XDEBUG_TRIGGER; client_port=9003;
   client_host=<host gateway IP as seen from the container — validated empirically>).
   Built lazily on first enable (with progress UI), cached in the image store.
 - Enabled site starts its WP container from the xdebug image (+`-e XDEBUG_MODE`).
