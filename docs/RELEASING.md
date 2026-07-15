@@ -179,8 +179,9 @@ stapling.
 7. Build `dist/WPContainer-<version>.dmg` with `hdiutil` — the app plus an
    `/Applications` symlink, volume name **"WP Container"**, compressed `UDZO`.
 8. Build `dist/wp-container-cli-<version>.zip` — the CLI binary, an `install.sh`
-   (installs to `/usr/local/bin`, adds the `wpc` symlink, and writes the global
-   `wp` router via `wp-container setup wp --install-binary`), and a `README.txt`.
+   (installs to `/usr/local/bin` and adds the `wpc` symlink; the per-user global
+   `wp` router is enabled separately by running `wp-container setup wp`), and a
+   `README.txt`.
 9. If a notary credential is available **and** the identity is real: `xcrun
    notarytool submit --wait` the `.dmg` (which notarizes the cdhashes of its
    contents), then `xcrun stapler staple` the `.dmg` and the standalone `.app`;
