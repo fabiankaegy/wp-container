@@ -220,8 +220,8 @@ RUN pecl install xdebug \
     && docker-php-ext-enable xdebug
 
 RUN { \
-    echo 'xdebug.mode=debug,develop'; \
-    echo 'xdebug.start_with_request=yes'; \
+    echo 'xdebug.mode=debug'; \
+    echo 'xdebug.start_with_request=trigger'; \
     echo 'xdebug.client_port=9003'; \
     echo 'xdebug.client_host=${XDEBUG_CLIENT_HOST}'; \
     echo 'xdebug.log_level=0'; \
