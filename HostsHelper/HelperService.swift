@@ -28,7 +28,10 @@ final class HelperService: NSObject, HostsHelperProtocol {
             let current = (try? String(contentsOfFile: Self.hostsPath, encoding: .utf8)) ?? ""
             let updated = try HostsBlockRewriter.rewrite(current, entries: entries)
             try Self.atomicWrite(updated, to: Self.hostsPath)
-            Self.flushDNS()
+            // Verify through mDNSResponder using one of the hostnames we just
+            // wrote (they all live in the same block, so one proves the file
+            // is being served).
+            Self.flushDNS(verifying: entries.first.flatMap { try? HostsBlockRewriter.hostname(fromEntry: $0) })
             reply(nil)
         } catch let error as HostsBlockRewriter.ValidationError {
             Self.log.error("rejected write: \(error.description, privacy: .public)")
@@ -45,11 +48,21 @@ final class HelperService: NSObject, HostsHelperProtocol {
             let current = (try? String(contentsOfFile: Self.hostsPath, encoding: .utf8)) ?? ""
             let updated = HostsBlockRewriter.removeBlock(current)
             try Self.atomicWrite(updated, to: Self.hostsPath)
-            Self.flushDNS()
+            // Nothing left in the block to verify against — a plain flush is
+            // all a removal needs.
+            Self.flushDNS(verifying: nil)
             reply(nil)
         } catch {
             reply("failed to update /etc/hosts: \(error.localizedDescription)")
         }
+    }
+
+    func repairDNSResolver(reply: @escaping @Sendable (String?) -> Void) {
+        // No authorization by design — see HostsHelperProtocol. The listener has
+        // already pinned the caller to our code-signing requirement.
+        Self.log.notice("repairDNSResolver: restarting mDNSResponder at client request")
+        Self.restartMDNSResponder()
+        reply(nil)
     }
 
     // MARK: - Authorization (verify, no interaction)
@@ -139,9 +152,38 @@ final class HelperService: NSObject, HostsHelperProtocol {
 
     // MARK: - DNS flush
 
-    static func flushDNS() {
+    /// Make freshly-written hosts entries visible to EVERY resolver path.
+    ///
+    /// The classic flush (`dscacheutil -flushcache` + SIGHUP) covers the libinfo
+    /// path, but mDNSResponder — the resolver Safari/CFNetwork use — can wedge
+    /// and stop serving `/etc/hosts` entries altogether, and SIGHUP does NOT
+    /// recover that state (observed 2026-07-16; only a full restart did). So
+    /// when a just-written hostname is supplied, confirm it actually resolves
+    /// through mDNSResponder and escalate to a full daemon restart (launchd
+    /// respawns it on demand) when it does not.
+    static func flushDNS(verifying host: String? = nil) {
         run("/usr/bin/dscacheutil", ["-flushcache"])
         run("/usr/bin/killall", ["-HUP", "mDNSResponder"])
+        guard let host else { return }
+        if MDNSHostCheck.resolvesToLoopback(host, timeout: 2.0) { return }
+
+        Self.log.error("mDNSResponder is not serving /etc/hosts (\(host, privacy: .public) unresolvable after SIGHUP); restarting it")
+        restartMDNSResponder()
+        // The restarted daemon comes up on demand; poll briefly so the outcome
+        // lands in the log either way.
+        let deadline = Date().addingTimeInterval(3.0)
+        while Date() < deadline {
+            if MDNSHostCheck.resolvesToLoopback(host, timeout: 1.0) {
+                Self.log.notice("mDNSResponder restart restored /etc/hosts resolution")
+                return
+            }
+            usleep(250_000)
+        }
+        Self.log.error("mDNSResponder still not serving /etc/hosts after restart — Safari resolution stays broken")
+    }
+
+    static func restartMDNSResponder() {
+        run("/usr/bin/killall", ["mDNSResponder"])
     }
 
     private static func run(_ launchPath: String, _ args: [String]) {

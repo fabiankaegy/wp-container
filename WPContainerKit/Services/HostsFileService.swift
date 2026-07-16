@@ -136,8 +136,13 @@ public enum HostsFileService {
         try updated.write(to: tmp, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: tmp) }
 
+        // Full mDNSResponder restart, not SIGHUP: HUP does not recover a wedged
+        // etc-hosts subsystem (Safari-only resolution failures — see
+        // MDNSHostCheck), and inside this single admin prompt there is no way to
+        // verify-and-escalate like the helper does. launchd respawns the daemon
+        // on demand, so the restart is a momentary cache flush at worst.
         let inner = "/bin/cp " + shellQuote(tmp.path) + " " + shellQuote(hostsPath)
-            + " && /usr/bin/dscacheutil -flushcache 2>/dev/null; /usr/bin/killall -HUP mDNSResponder 2>/dev/null; true"
+            + " && /usr/bin/dscacheutil -flushcache 2>/dev/null; /usr/bin/killall mDNSResponder 2>/dev/null; true"
         let script = "do shell script \"\(appleScriptEscape(inner))\" with administrator privileges"
         let result = try await ProcessRunner.run(executable: "/usr/bin/osascript", args: ["-e", script])
         if result.exitCode != 0 {

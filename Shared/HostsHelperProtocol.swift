@@ -43,23 +43,33 @@ public enum HostsHelperInfo {
         "anchor apple generic and certificate leaf[subject.OU] = \"6FUP592FJ4\""
 }
 
-/// The privileged operations the helper exposes over XPC. Exactly two mutating
-/// operations plus a version probe. Every mutating call carries an
-/// `AuthorizationExternalForm` (as `Data`) that the helper independently
-/// re-verifies against `authorizationRightName` before touching the file.
-/// `reply` returns `nil` on success or a human-readable error string on failure.
+/// The privileged operations the helper exposes over XPC. Two hosts-file
+/// mutations, a DNS-resolver repair, and a version probe. Every hosts-file
+/// mutation carries an `AuthorizationExternalForm` (as `Data`) that the helper
+/// independently re-verifies against `authorizationRightName` before touching
+/// the file. `reply` returns `nil` on success or a human-readable error string
+/// on failure.
 @objc public protocol HostsHelperProtocol {
     func writeHostsBlock(entries: [String],
                          authorization: Data,
                          reply: @escaping @Sendable (String?) -> Void)
     func removeHostsBlock(authorization: Data,
                           reply: @escaping @Sendable (String?) -> Void)
+    /// Restart mDNSResponder — the repair for a wedged etc-hosts subsystem,
+    /// where hosts entries resolve everywhere EXCEPT Safari/CFNetwork (see
+    /// `MDNSHostCheck`). Deliberately carries no authorization: restarting
+    /// Apple's DNS daemon is non-destructive and discloses nothing, launchd
+    /// respawns it on demand, and the listener already pins every client to our
+    /// code-signing requirement — while an auth prompt would defeat the point,
+    /// because the app calls this automatically when it detects the wedge.
+    func repairDNSResolver(reply: @escaping @Sendable (String?) -> Void)
     func helperVersion(reply: @escaping @Sendable (String) -> Void)
 }
 
 /// The helper's implementation version, returned by `helperVersion` and used as
-/// a reachability probe.
-public let hostsHelperVersion = "0.1.1"
+/// a reachability probe. Clients also gate calls the previous helper didn't
+/// implement (`repairDNSResolver`, added in 0.2.0) on it.
+public let hostsHelperVersion = "0.2.0"
 
 /// Install (idempotently) the custom authorization right into the policy
 /// database using `authRef`. Both the client (which holds an interactive ref)
