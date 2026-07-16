@@ -37,6 +37,15 @@ struct WPContainerApp: App {
             } else {
                 await vm.ensureProxyIfNeeded()
             }
+            // DNS health (2026-07-16): mDNSResponder can wedge and silently stop
+            // serving the /etc/hosts entries, which breaks custom domains ONLY
+            // in Safari/CFNetwork apps (Chrome and curl use libinfo and keep
+            // working). Verify every managed domain through the resolver path
+            // Safari uses and auto-restart the daemon via the privileged helper
+            // when needed. Logged, silent, off the main actor.
+            Task.detached(priority: .utility) {
+                _ = await DNSHealthService.checkAndRepair()
+            }
         }
     }
 

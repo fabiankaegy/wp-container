@@ -104,6 +104,28 @@ public enum HostsHelperClient {
         }
     }
 
+    /// Restart mDNSResponder via the helper — the repair for a wedged etc-hosts
+    /// subsystem where custom domains resolve everywhere except Safari/CFNetwork
+    /// (see `MDNSHostCheck`). Needs no user authorization (the operation is
+    /// non-destructive and the daemon pins our code signature), but does need a
+    /// helper that implements the call — older daemons are reported as
+    /// `.unavailable` via the version gate.
+    public static func repairDNSResolver() async throws {
+        let remote = try await reachableVersion()
+        guard remote == hostsHelperVersion else {
+            throw HelperError.unavailable("helper v\(remote) predates DNS repair (need v\(hostsHelperVersion))")
+        }
+        try await withConnection { (proxy, resumer: Resumer<Void>) in
+            proxy.repairDNSResolver { errString in
+                if let errString {
+                    resumer.resume(throwing: HelperError.rejected(errString))
+                } else {
+                    resumer.resume(returning: ())
+                }
+            }
+        }
+    }
+
     /// Probe reachability: connect and ask for the helper version. Throws
     /// `.unavailable` if the daemon can't be reached (e.g. not yet approved).
     @discardableResult
