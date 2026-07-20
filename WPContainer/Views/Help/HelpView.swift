@@ -16,7 +16,7 @@ struct HelpView: View {
     var body: some View {
         NavigationSplitView {
             List(HelpTopic.all, selection: $selection) { topic in
-                HelpTopicRow(topic: topic)
+                HelpTopicRow(topic: topic, isSelected: topic.id == selection)
                     .tag(topic.id)
             }
             .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 300)
@@ -34,16 +34,19 @@ struct HelpView: View {
 /// title, and a one-line summary.
 private struct HelpTopicRow: View {
     let topic: HelpTopic
+    /// When the row is selected the sidebar paints a filled accent background, so
+    /// the accent-on-accent icon would vanish — invert it to white in that state.
+    var isSelected: Bool = false
 
     var body: some View {
         HStack(spacing: 11) {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Theme.accent.opacity(0.14))
+                .fill(isSelected ? Color.white.opacity(0.22) : Theme.accent.opacity(0.14))
                 .frame(width: 30, height: 30)
                 .overlay {
                     Image(systemName: topic.icon)
                         .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Theme.accent)
+                        .foregroundStyle(isSelected ? Color.white : Theme.accent)
                 }
             VStack(alignment: .leading, spacing: 1) {
                 Text(topic.title)
@@ -77,6 +80,8 @@ private struct HelpDetailView: View {
             .padding(28)
             .frame(maxWidth: 720, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
+            // Let people copy any of the help text (commands, ports, URLs).
+            .textSelection(.enabled)
         }
         .navigationTitle(topic.title)
     }
@@ -96,7 +101,7 @@ private struct HelpDetailView: View {
                     .font(.system(.largeTitle, weight: .bold))
                     .lineLimit(2)
             }
-            Text(topic.intro)
+            Text(styledMarkdown(topic.intro))
                 .font(.title3)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -115,7 +120,7 @@ private struct HelpSectionCard: View {
         SectionCard(title: section.title) {
             VStack(alignment: .leading, spacing: 12) {
                 if let body = section.body {
-                    Text(body)
+                    Text(styledMarkdown(body))
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -154,7 +159,7 @@ private struct StepRow: View {
                 .foregroundStyle(Theme.accent)
                 .frame(width: 22, height: 22)
                 .background(Theme.accent.opacity(0.14), in: Circle())
-            Text(text)
+            Text(styledMarkdown(text))
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -172,7 +177,7 @@ private struct BulletRow: View {
                 .font(.system(size: 5))
                 .foregroundStyle(Theme.accent)
                 .padding(.top, 7)
-            Text(text)
+            Text(styledMarkdown(text))
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -189,7 +194,7 @@ private struct TipRow: View {
             Image(systemName: "lightbulb.fill")
                 .font(.callout)
                 .foregroundStyle(Theme.accent)
-            Text(text)
+            Text(styledMarkdown(text))
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -199,6 +204,35 @@ private struct TipRow: View {
         .background(Theme.accent.opacity(0.08),
                     in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
+}
+
+// MARK: - Inline Markdown
+
+/// Render a string as inline Markdown so backticked `code`, **bold**, and links
+/// display properly (help content lives in `String` properties, which `Text`
+/// otherwise shows verbatim). Inline-code runs additionally get an accent color
+/// and a subtle tinted background so backticked terms — commands, ports, paths —
+/// stand out. Falls back to plain text if the Markdown can't be parsed.
+func styledMarkdown(_ string: String) -> AttributedString {
+    var attributed: AttributedString
+    do {
+        attributed = try AttributedString(
+            markdown: string,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        )
+    } catch {
+        return AttributedString(string)
+    }
+    // Collect code-run ranges first, then style — mutating during iteration of
+    // `.runs` would invalidate it.
+    let codeRanges = attributed.runs
+        .filter { $0.inlinePresentationIntent?.contains(.code) == true }
+        .map(\.range)
+    for range in codeRanges {
+        attributed[range].foregroundColor = Theme.accent
+        attributed[range].backgroundColor = Theme.accent.opacity(0.12)
+    }
+    return attributed
 }
 
 #Preview {
