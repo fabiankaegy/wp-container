@@ -918,6 +918,33 @@ public final class AppViewModel {
         Task { await lifecycle.stopSiteWithEnvs(site, envs: store.envs(forSite: site.id)) }
     }
 
+    /// Whether anything this app started is currently running — the quit hook
+    /// uses this to terminate immediately when there's nothing to wind down.
+    public var hasRunningInstances: Bool {
+        store.sites.contains { $0.status.isRunning } || store.envs.contains { $0.status.isRunning }
+    }
+
+    /// Stop every running site (and its worktree envs) so that fully quitting the
+    /// app never leaves containers running in the background. Called from the
+    /// app's `applicationShouldTerminate` (which defers termination until this
+    /// returns). Stops run concurrently; also catches any orphan running env
+    /// whose parent site is already stopped.
+    public func stopAllForQuit() async {
+        let lifecycle = self.lifecycle
+        let runningSites = store.sites.filter { $0.status.isRunning }
+        let runningSiteIDs = Set(runningSites.map(\.id))
+        let orphanEnvs = store.envs.filter { $0.status.isRunning && !runningSiteIDs.contains($0.parentSiteID) }
+        let siteEnvs = runningSites.map { ($0, store.envs(forSite: $0.id)) }
+        await withTaskGroup(of: Void.self) { group in
+            for (site, envs) in siteEnvs {
+                group.addTask { await lifecycle.stopSiteWithEnvs(site, envs: envs) }
+            }
+            for env in orphanEnvs {
+                group.addTask { await lifecycle.stop(env) }
+            }
+        }
+    }
+
     public func deleteSite(_ site: Site, trashFolder: Bool) {
         Task {
             let childEnvs = store.envs(forSite: site.id)

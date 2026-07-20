@@ -3,12 +3,16 @@ import WPContainerKit
 
 @main
 struct WPContainerApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var viewModel: AppViewModel
 
     init() {
         AppSettings.registerDefaults()
         let vm = AppViewModel()
         _viewModel = State(initialValue: vm)
+        // Give the app delegate the shared view model so a full quit can stop
+        // every running site/env before the process exits.
+        appDelegate.viewModel = vm
         // Bootstrap at APP level, not window level: the menu bar extra must have
         // a loaded store + running reconcile loop even if the popover is opened
         // before the main window appears (or after it has been closed).
