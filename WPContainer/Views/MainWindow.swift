@@ -7,6 +7,11 @@ import WPContainerKit
 /// left free of controls so the window stays draggable there.
 struct MainWindow: View {
     @Environment(AppViewModel.self) private var vm
+    /// Sidebar width, persisted across launches (Finder-style). Clamped to
+    /// `[sidebarMin, sidebarMax]` by the drag handle.
+    @AppStorage("sidebarWidth") private var sidebarWidth: Double = 272
+    private let sidebarMin: Double = 220
+    private let sidebarMax: Double = 460
 
     var body: some View {
         @Bindable var vm = vm
@@ -15,7 +20,9 @@ struct MainWindow: View {
 
             HStack(spacing: 0) {
                 SidebarView()
-                    .frame(width: 272)
+                    .frame(width: sidebarWidth.clamped(to: sidebarMin...sidebarMax))
+
+                SidebarResizeHandle(width: $sidebarWidth, range: sidebarMin...sidebarMax)
 
                 panel
                     .padding(.top, 10)
@@ -113,5 +120,42 @@ struct MainWindow: View {
             .padding(16)
             .transition(.move(edge: .top).combined(with: .opacity))
         }
+    }
+}
+
+// MARK: - Sidebar resize
+
+/// A thin, invisible drag gutter between the sidebar and the content panel that
+/// resizes the sidebar (Finder-style), showing the horizontal-resize cursor on
+/// hover. The width lives in `@AppStorage` on `MainWindow`, so it persists.
+private struct SidebarResizeHandle: View {
+    @Binding var width: Double
+    let range: ClosedRange<Double>
+    /// Sidebar width captured at drag start, so the drag is relative to it.
+    @State private var startWidth: Double?
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.clear)
+            .frame(width: 6)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { value in
+                        let base = startWidth ?? width
+                        if startWidth == nil { startWidth = width }
+                        width = (base + value.translation.width).clamped(to: range)
+                    }
+                    .onEnded { _ in startWidth = nil }
+            )
+    }
+}
+
+private extension Double {
+    func clamped(to range: ClosedRange<Double>) -> Double {
+        min(max(self, range.lowerBound), range.upperBound)
     }
 }
