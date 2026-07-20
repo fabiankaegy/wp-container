@@ -108,6 +108,11 @@ public actor SiteLifecycle {
             // PHP overrides folder (50 MB upload limits) — must exist before
             // the wp `container run` bind-mounts it.
             try PHPConfService.ensure(for: inst)
+            // Magic-login auto_prepend handler (issue #13) lives in the same
+            // mounted php/ folder, so every started site/env has one-time login
+            // active with no lazy step. Also sheds the legacy in-tree mu-plugin
+            // written by earlier builds.
+            try MagicLoginService.ensurePrepend(for: inst)
 
             // Pull every needed image CONCURRENTLY (issue #9). A pull of an
             // already-present tag is a ~1s registry revalidation; they used to
