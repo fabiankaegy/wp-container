@@ -121,7 +121,8 @@ public actor SiteLifecycle {
                 MailpitService.removeHandler(phpConfFolder: inst.phpConfFolder)
             }
             MailpitService.cleanupLegacyMuPlugin(wordpressFolder: inst.wordpressFolder)
-            RemoteMediaService.cleanupLegacyMuPlugin(wordpressFolder: inst.wordpressFolder)
+            RemoteMediaService.cleanupLegacyMuPlugin(wordpressFolder: inst.wordpressFolder,
+                                                     phpConfFolder: inst.phpConfFolder)
 
             // Pull every needed image CONCURRENTLY (issue #9). A pull of an
             // already-present tag is a ~1s registry revalidation; they used to

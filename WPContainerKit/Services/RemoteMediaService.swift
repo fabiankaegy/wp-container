@@ -45,9 +45,17 @@ public enum RemoteMediaService {
     }
 
     /// Shed the legacy in-tree mu-plugin from pre-#13 builds when it is ours
-    /// (marker match) — never a user's own same-named file. Runs on every start.
-    public static func cleanupLegacyMuPlugin(wordpressFolder: URL) {
-        PrependService.removeIfMarked(wordpressFolder.appendingPathComponent(legacyMuPluginRelPath), marker: marker)
+    /// (marker match) — never a user's own same-named file. Its body is plain-hook
+    /// PHP from the same template, so it works unchanged as a prepend.d handler:
+    /// relocate it (preserving the imported source URL) unless a handler already
+    /// exists, then remove the in-tree copy. Runs on every start.
+    public static func cleanupLegacyMuPlugin(wordpressFolder: URL, phpConfFolder: URL) {
+        let legacy = wordpressFolder.appendingPathComponent(legacyMuPluginRelPath)
+        guard let text = try? String(contentsOf: legacy, encoding: .utf8), text.contains(marker) else { return }
+        if !isHandlerPresent(phpConfFolder: phpConfFolder) {
+            try? PrependService.writeHandler(phpConfFolder: phpConfFolder, name: handlerFileName, contents: text)
+        }
+        try? FileManager.default.removeItem(at: legacy)
     }
 
     /// PHP single-quoted string escape for templating the source URL in — the
