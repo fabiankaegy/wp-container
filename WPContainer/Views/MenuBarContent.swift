@@ -110,6 +110,9 @@ struct MenuBarContent: View {
             Button("Open WP Container") { focusMainWindow(select: nil) }
                 .buttonStyle(.link)
             Spacer()
+            Button("Help") { openWindow(id: "help") }
+                .buttonStyle(.link)
+                .foregroundStyle(.secondary)
             Button("Quit") { NSApplication.shared.terminate(nil) }
                 .buttonStyle(.link)
                 .foregroundStyle(.secondary)
