@@ -386,6 +386,16 @@ public enum SiteRecipe {
                                    mailpitHost: String? = nil) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
         if let mailpitHost { args += ["-e", "WPC_MAILPIT_HOST=\(mailpitHost)"] }
+        // Mount the managed php/ overrides + scan dir so a one-shot wp-cli picks
+        // up the same auto_prepend runtime handlers as the long-lived container
+        // (issue #13) — e.g. `wp eval` that sends mail still hits Mailpit, and
+        // remote-media URL rewrites apply. Conditional on the folder existing so
+        // it stays deterministic before a site's first start (the folder is
+        // created then); the login handler is naturally inert in the cli SAPI.
+        if FileManager.default.fileExists(atPath: inst.phpConfFolder.path) {
+            args += ["-v", "\(inst.phpConfFolder.path):\(phpConfContainerPath)",
+                     "-e", "PHP_INI_SCAN_DIR=\(phpDefaultConfDir):\(phpConfContainerPath)"]
+        }
         args += [cliImage(for: inst), "wp"]
         args += wpArgs
         return args

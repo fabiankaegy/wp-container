@@ -18,6 +18,7 @@ struct WPContainerCLI: AsyncParsableCommand {
             DeleteCommand.self,
             WorktreeCommand.self,
             WPCommand.self,
+            LoginCommand.self,
             MCPCommand.self,
             AgentToolsCommand.self,
             ShimCommand.self,
@@ -107,6 +108,7 @@ private func humanText(_ error: Error) -> String {
     if let e = error as? LifecycleError { return e.description }
     if let e = error as? GitError { return e.description }
     if let e = error as? WorktreeError { return e.description }
+    if let e = error as? MagicLoginError { return e.description }
     return "\(error)"
 }
 

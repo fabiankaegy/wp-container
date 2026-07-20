@@ -519,7 +519,7 @@ public actor DatabaseImportService {
         switch media {
         case .remote:
             guard let sourceURL else { throw DatabaseImportError.sourceURLRequired }
-            try RemoteMediaService.writeMuPlugin(wordpressFolder: site.wordpressFolder, sourceBaseURL: sourceURL)
+            try RemoteMediaService.writeHandler(phpConfFolder: site.phpConfFolder, sourceBaseURL: sourceURL)
             return "remote"
         case .copy(let from):
             var isDir: ObjCBool = false

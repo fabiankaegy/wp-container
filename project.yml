@@ -61,8 +61,8 @@ targets:
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
         PRODUCT_NAME: WPContainerKit
-        MARKETING_VERSION: "0.1.7"
-        CURRENT_PROJECT_VERSION: "8"
+        MARKETING_VERSION: "0.1.8"
+        CURRENT_PROJECT_VERSION: "9"
         SKIP_INSTALL: "YES"
 
   # SwiftUI application.
@@ -102,8 +102,8 @@ targets:
       base:
         PRODUCT_NAME: WPContainer
         PRODUCT_BUNDLE_IDENTIFIER: com.fabiankaegy.wpcontainer
-        MARKETING_VERSION: "0.1.7"
-        CURRENT_PROJECT_VERSION: "8"
+        MARKETING_VERSION: "0.1.8"
+        CURRENT_PROJECT_VERSION: "9"
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
@@ -132,8 +132,8 @@ targets:
       base:
         PRODUCT_NAME: wp-container
         PRODUCT_BUNDLE_IDENTIFIER: com.fabiankaegy.wpcontainer.cli
-        MARKETING_VERSION: "0.1.7"
-        CURRENT_PROJECT_VERSION: "8"
+        MARKETING_VERSION: "0.1.8"
+        CURRENT_PROJECT_VERSION: "9"
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
 
@@ -154,8 +154,8 @@ targets:
       base:
         PRODUCT_NAME: wpc-hosts-helper
         PRODUCT_BUNDLE_IDENTIFIER: com.fabiankaegy.wpcontainer.hostshelper
-        MARKETING_VERSION: "0.1.7"
-        CURRENT_PROJECT_VERSION: "8"
+        MARKETING_VERSION: "0.1.8"
+        CURRENT_PROJECT_VERSION: "9"
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: minimal
         SWIFT_OBJC_BRIDGING_HEADER: HostsHelper/HostsHelper-Bridging.h
