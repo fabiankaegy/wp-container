@@ -58,7 +58,14 @@ struct WPContainerApp: App {
             MainWindow()
                 .environment(viewModel)
                 .frame(minWidth: 880, minHeight: 560)
-                .task { await viewModel.onAppear() } // idempotent belt-and-braces
+                .task {
+                    await viewModel.onAppear() // idempotent belt-and-braces
+                    // One-time offer to install the CLI, once the window is up and
+                    // the environment is ready (never over the onboarding screen).
+                    if viewModel.systemStatus?.isReady == true {
+                        viewModel.maybeOfferCLIInstall()
+                    }
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)

@@ -20,6 +20,9 @@ enum AppSettings {
     static let defaultWPDebugKey = "defaultWPDebug"
     static let defaultScriptDebugKey = "defaultScriptDebug"
     static let defaultGlobalWPRouterKey = "defaultGlobalWPRouter"
+    /// Whether the one-time "install the command-line tool?" offer has been shown.
+    /// Defaults FALSE (absent → not yet offered), so it fires once and never nags.
+    static let didOfferCLIInstallKey = "didOfferCLIInstall"
 
     // Defaults.
     static var showDockIcon: Bool {
@@ -51,6 +54,14 @@ enum AppSettings {
     static var defaultWPDebug: Bool { UserDefaults.standard.bool(forKey: defaultWPDebugKey) }
     static var defaultScriptDebug: Bool { UserDefaults.standard.bool(forKey: defaultScriptDebugKey) }
     static var defaultGlobalWPRouter: Bool { UserDefaults.standard.bool(forKey: defaultGlobalWPRouterKey) }
+
+    /// One-time gate for the first-run CLI-install offer (see
+    /// `AppViewModel.maybeOfferCLIInstall`). Not registered as a default — absent
+    /// reads as false (not yet offered).
+    static var didOfferCLIInstall: Bool {
+        get { UserDefaults.standard.bool(forKey: didOfferCLIInstallKey) }
+        set { UserDefaults.standard.set(newValue, forKey: didOfferCLIInstallKey) }
+    }
 
     /// Register defaults for keys whose ABSENT value must not read as false.
     /// Call once, as early as possible.
