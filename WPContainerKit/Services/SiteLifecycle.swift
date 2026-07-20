@@ -108,11 +108,20 @@ public actor SiteLifecycle {
             // PHP overrides folder (50 MB upload limits) — must exist before
             // the wp `container run` bind-mounts it.
             try PHPConfService.ensure(for: inst)
-            // Magic-login auto_prepend handler (issue #13) lives in the same
-            // mounted php/ folder, so every started site/env has one-time login
-            // active with no lazy step. Also sheds the legacy in-tree mu-plugin
-            // written by earlier builds.
-            try MagicLoginService.ensurePrepend(for: inst)
+            // Managed runtime PHP handlers (issue #13) live in php/prepend.d,
+            // loaded by a single master auto_prepend — never in the project tree.
+            // Ensure the loader, keep the always-on magic-login handler current,
+            // sync the Mailpit handler to its enabled state, and shed any legacy
+            // in-tree mu-plugins left by pre-#13 builds (even when now disabled).
+            try PrependService.ensure(for: inst)
+            try MagicLoginService.ensureLoginHandler(for: inst)
+            if inst.mailpitEnabled {
+                try MailpitService.writeHandler(phpConfFolder: inst.phpConfFolder)
+            } else {
+                MailpitService.removeHandler(phpConfFolder: inst.phpConfFolder)
+            }
+            MailpitService.cleanupLegacyMuPlugin(wordpressFolder: inst.wordpressFolder)
+            RemoteMediaService.cleanupLegacyMuPlugin(wordpressFolder: inst.wordpressFolder)
 
             // Pull every needed image CONCURRENTLY (issue #9). A pull of an
             // already-present tag is a ~1s registry revalidation; they used to

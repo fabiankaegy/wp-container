@@ -101,7 +101,7 @@ struct MailpitCommand: AsyncParsableCommand {
             }
             let updated: Site
             if onOff.enabled {
-                try MailpitService.writeMuPlugin(wordpressFolder: site.wordpressFolder)
+                try MailpitService.writeHandler(phpConfFolder: site.phpConfFolder)
                 if site.mailpitPort == nil {
                     guard let (_, reservedSite, _) = try await ctx.persistence.allocatePort(reserve: { port, env -> Site? in
                         guard let i = env.sites.firstIndex(where: { $0.id == site.id }) else { return nil }
@@ -117,7 +117,7 @@ struct MailpitCommand: AsyncParsableCommand {
                     updated = env2.sites.first { $0.id == site.id } ?? site
                 }
             } else {
-                try? MailpitService.removeMuPlugin(wordpressFolder: site.wordpressFolder)
+                MailpitService.removeHandler(phpConfFolder: site.phpConfFolder)
                 let env2 = try await ctx.persistence.mutate { e in
                     if let i = e.sites.firstIndex(where: { $0.id == site.id }) { e.sites[i].mailpitEnabled = false }
                 }

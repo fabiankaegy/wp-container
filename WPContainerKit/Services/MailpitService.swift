@@ -1,32 +1,42 @@
 import Foundation
 
 /// Manages the WordPress side of the Mailpit email-catcher add-on (issue #10):
-/// a small marker-headed mu-plugin that reroutes all outgoing mail to the site's
+/// a small marker-headed handler that reroutes all outgoing mail to the site's
 /// Mailpit SMTP catcher via the `phpmailer_init` hook.
 ///
-/// WordPress core speaks no SMTP natively, so we drop a must-use plugin into
-/// `wp-content/mu-plugins/wpc-mailpit.php`. The plugin is static: it reads the
-/// mail container's IP from the `WPC_MAILPIT_HOST` env var, which the lifecycle
-/// re-injects at each start (container IPs churn per restart). Written on enable,
-/// removed on disable — the marker header makes both idempotent and lets us tell
-/// our file apart from a user's own mu-plugin.
+/// WordPress core speaks no SMTP natively, so we register a handler that hooks
+/// `phpmailer_init`. It used to live in `wp-content/mu-plugins/wpc-mailpit.php`,
+/// but that path can sit inside a user's tracked git repo and get committed by
+/// accident (issue #13). It now lives at `php/prepend.d/wpc-mailpit.php`, loaded
+/// by the shared master auto_prepend loader (`PrependService`) at
+/// `muplugins_loaded` — entirely OUTSIDE any project repo. The file is static:
+/// it reads the mail container's IP from the `WPC_MAILPIT_HOST` env var, which
+/// the lifecycle re-injects at each start (container IPs churn per restart).
+/// Written on enable, removed on disable — the marker header makes both
+/// idempotent and lets us tell our file apart from a user's own.
 public enum MailpitService {
-    /// Path of the managed mu-plugin, relative to a site's `wordpress/` folder.
-    public static let muPluginRelPath = "wp-content/mu-plugins/wpc-mailpit.php"
+    /// The handler filename inside `php/prepend.d/`.
+    public static let handlerFileName = "wpc-mailpit.php"
+
+    /// Legacy in-tree mu-plugin path (pre-#13), cleaned up on next start.
+    public static let legacyMuPluginRelPath = "wp-content/mu-plugins/wpc-mailpit.php"
 
     /// Unique marker in the file header, used to detect/remove only our file.
     static let marker = "WP Container: Mailpit mail routing (managed — do not edit)"
 
-    /// The mu-plugin body. Uses env-var indirection for the host so the file
-    /// itself never changes when the mail container's IP does.
+    /// The handler body. Runs at `muplugins_loaded` via the master loader; the
+    /// `phpmailer_init` hook fires far later (when mail is sent), so plain-hook
+    /// style is correct. Uses env-var indirection for the host so the file itself
+    /// never changes when the mail container's IP does.
     static let pluginContents = """
     <?php
     /*
      * \(marker)
      * Routes all outgoing WordPress mail to the site's Mailpit SMTP catcher.
-     * Added when Mailpit is enabled, removed when disabled. The host comes from
-     * the WPC_MAILPIT_HOST environment variable (the mail container's IP,
-     * re-injected by WP Container at every start).
+     * Added when Mailpit is enabled, removed when disabled. Loaded via the master
+     * auto_prepend loader (php/prepend.d). The host comes from the
+     * WPC_MAILPIT_HOST environment variable (the mail container's IP, re-injected
+     * by WP Container at every start).
      */
     add_action( 'phpmailer_init', function ( $phpmailer ) {
         $host = getenv( 'WPC_MAILPIT_HOST' );
@@ -45,31 +55,24 @@ public enum MailpitService {
     } );
     """
 
-    public static func muPluginURL(wordpressFolder: URL) -> URL {
-        wordpressFolder.appendingPathComponent(muPluginRelPath)
+    /// Whether our managed handler is present in `php/prepend.d/` (marker match).
+    public static func isHandlerPresent(phpConfFolder: URL) -> Bool {
+        PrependService.isHandlerPresent(phpConfFolder: phpConfFolder, name: handlerFileName, marker: marker)
     }
 
-    /// Whether our managed mu-plugin is present (matched by marker, so a
-    /// same-named user file is not misread as ours).
-    public static func isMuPluginPresent(wordpressFolder: URL) -> Bool {
-        let url = muPluginURL(wordpressFolder: wordpressFolder)
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return false }
-        return text.contains(marker)
+    /// Write the handler into `php/prepend.d/` (creating it as needed). Idempotent.
+    public static func writeHandler(phpConfFolder: URL) throws {
+        try PrependService.writeHandler(phpConfFolder: phpConfFolder, name: handlerFileName, contents: pluginContents)
     }
 
-    /// Write the mu-plugin (creating `mu-plugins/` as needed). Idempotent.
-    public static func writeMuPlugin(wordpressFolder: URL) throws {
-        let url = muPluginURL(wordpressFolder: wordpressFolder)
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
-                                                withIntermediateDirectories: true)
-        try pluginContents.write(to: url, atomically: true, encoding: .utf8)
+    /// Remove the handler, but only when it is ours (marker match). Idempotent.
+    public static func removeHandler(phpConfFolder: URL) {
+        PrependService.removeHandler(phpConfFolder: phpConfFolder, name: handlerFileName, marker: marker)
     }
 
-    /// Remove the mu-plugin, but only when it is ours (marker match). Idempotent;
-    /// a missing file or a user's own same-named file is left untouched.
-    public static func removeMuPlugin(wordpressFolder: URL) throws {
-        let url = muPluginURL(wordpressFolder: wordpressFolder)
-        guard isMuPluginPresent(wordpressFolder: wordpressFolder) else { return }
-        try FileManager.default.removeItem(at: url)
+    /// Shed the legacy in-tree mu-plugin from pre-#13 builds when it is ours
+    /// (marker match) — never a user's own same-named file. Runs on every start.
+    public static func cleanupLegacyMuPlugin(wordpressFolder: URL) {
+        PrependService.removeIfMarked(wordpressFolder.appendingPathComponent(legacyMuPluginRelPath), marker: marker)
     }
 }
