@@ -98,10 +98,12 @@ Sites are provisioned automatically (no install wizard) and log in with
   `login_link` / `create_user`.
 - **Agent-friendly login** — `wp-container login <site>` prints a one-time magic
   login link (single-use, 15-minute expiry) that opens straight into a logged-in
-  wp-admin — no `wp-login.php` form for agents to fumble. Implemented as a private
-  PHP `auto_prepend_file` handler in the site's `php/` folder, so it leaves
-  nothing in your project tree to accidentally commit. `--open` opens it, and the
-  `login_link` / `create_user` MCP tools expose the same for agents.
+  wp-admin — no `wp-login.php` form for agents to fumble. `--open` opens it, and
+  the `login_link` / `create_user` MCP tools expose the same for agents.
+- **Zero project-tree footprint** — all runtime PHP WP Container manages (magic
+  login, Mailpit mail routing, remote-media rewriting) loads via a single
+  `auto_prepend_file` in each site's private `php/` folder, never as a mu-plugin
+  under `wp-content/`, so nothing can be committed to your repo by accident.
 - **Trusted HTTPS** — mkcert-style local CA trusted per-user in the login keychain
   (**no admin password — Touch ID supported**); `https://<site>.localhost` (or your
   custom domain) served by a host-side TLS reverse proxy (443, Host-header routing).
