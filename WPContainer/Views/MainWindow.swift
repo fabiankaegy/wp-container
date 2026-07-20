@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import WPContainerKit
 
@@ -14,6 +15,9 @@ struct MainWindow: View {
     /// value on appear; committed back to it when the drag ends.
     @State private var sidebarWidth: Double = 272
     private let sidebarRange: ClosedRange<Double> = 220...460
+    /// The default width the divider snaps to (with a haptic tick) when dragged
+    /// within `snapDistance` points of it.
+    private let sidebarDefault: Double = 272
 
     var body: some View {
         @Bindable var vm = vm
@@ -24,7 +28,7 @@ struct MainWindow: View {
                 SidebarView()
                     .frame(width: sidebarWidth)
 
-                SidebarResizeHandle(width: $sidebarWidth, range: sidebarRange) {
+                SidebarResizeHandle(width: $sidebarWidth, range: sidebarRange, snapTo: sidebarDefault) {
                     persistedSidebarWidth = sidebarWidth
                 }
 
@@ -144,11 +148,19 @@ struct MainWindow: View {
 private struct SidebarResizeHandle: View {
     @Binding var width: Double
     let range: ClosedRange<Double>
+    /// Width the divider snaps to when dragged within `snapDistance` of it.
+    let snapTo: Double
     /// Called when the drag ends, to persist the final width.
     var onCommit: () -> Void
 
+    /// Half-width of the snap zone, in points, on either side of `snapTo`.
+    private let snapDistance: Double = 5
+
     /// Sidebar width captured at drag start; the drag is relative to it.
     @State private var startWidth: Double?
+    /// Whether the drag is currently held inside the snap zone — used to fire the
+    /// haptic exactly once per entry (not on every frame while snapped).
+    @State private var snapped = false
 
     var body: some View {
         Rectangle()
@@ -160,10 +172,24 @@ private struct SidebarResizeHandle: View {
                 DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
                         if startWidth == nil { startWidth = width }
-                        width = (startWidth! + value.translation.width).clamped(to: range)
+                        let raw = (startWidth! + value.translation.width).clamped(to: range)
+                        if abs(raw - snapTo) <= snapDistance {
+                            // Inside the snap zone: pin to the default width, and
+                            // give one alignment tick the first frame we enter.
+                            if !snapped {
+                                snapped = true
+                                NSHapticFeedbackManager.defaultPerformer
+                                    .perform(.alignment, performanceTime: .now)
+                            }
+                            width = snapTo
+                        } else {
+                            snapped = false
+                            width = raw
+                        }
                     }
                     .onEnded { _ in
                         startWidth = nil
+                        snapped = false
                         onCommit()
                     }
             )
