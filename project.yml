@@ -89,6 +89,15 @@ targets:
         codeSign: true
         copy:
           destination: executables
+      # Embed the wp-container CLI into Contents/MacOS so the app can install it
+      # into /usr/local/bin on demand (CLIToolInstaller). Same product shipped in
+      # the release CLI zip; copied (a tool, never linked) and code-signed.
+      - target: wp-container
+        link: false
+        embed: true
+        codeSign: true
+        copy:
+          destination: executables
     settings:
       base:
         PRODUCT_NAME: WPContainer
