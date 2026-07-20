@@ -149,13 +149,88 @@ else
 fi
 
 # ---- DMG ---------------------------------------------------------------------
-log "Building disk image"
+# Layout-aware build: render the backdrop, lay out the window with Finder on a
+# read-write image, then convert to the final compressed image. $DMG stays at
+# the same path so the codesign/notarize/staple steps below are unchanged.
+VOL_NAME="WP Container"
+BG_DIR="$ROOT/dmg"
+BG_1X="$BG_DIR/background.png"
+BG_2X="$BG_DIR/background@2x.png"
+
+log "Rendering DMG background (reproducible, CoreGraphics)"
+swift "$ROOT/scripts/make-dmg-background.swift" "$BG_1X" "$BG_2X" >/dev/null
+[ -f "$BG_1X" ] && [ -f "$BG_2X" ] || die "DMG background was not generated"
+
+log "Staging disk image contents"
 cp -R "$APP" "$STAGE/WPContainer.app"
 ln -s /Applications "$STAGE/Applications"
+mkdir -p "$STAGE/.background"
+cp "$BG_1X" "$STAGE/.background/background.png"
+cp "$BG_2X" "$STAGE/.background/background@2x.png"
+
 DMG="$DIST/WPContainer-$VERSION.dmg"
-rm -f "$DMG"
-hdiutil create -volname "WP Container" -srcfolder "$STAGE" \
-  -fs HFS+ -format UDZO -imagekey zlib-level=9 -ov "$DMG" >/dev/null
+RW_DMG="$DIST/.rw-$VERSION.dmg"          # temp read-write image (unique per version)
+rm -f "$DMG" "$RW_DMG"
+
+log "Creating read-write image"
+hdiutil create -volname "$VOL_NAME" -srcfolder "$STAGE" \
+  -fs HFS+ -format UDRW -ov "$RW_DMG" >/dev/null
+
+# Mount it, and guarantee we detach even on failure so a dangling mount can't
+# wedge the next run. DEV_NODE is set once attached; the trap is a no-op before.
+DEV_NODE=""
+detach_rw() { [ -n "$DEV_NODE" ] && hdiutil detach "$DEV_NODE" -force >/dev/null 2>&1 || true; }
+trap detach_rw EXIT
+
+log "Mounting read-write image"
+ATTACH_OUT="$(hdiutil attach "$RW_DMG" -readwrite -noverify -noautoopen -nobrowse)"
+DEV_NODE="$(printf '%s\n' "$ATTACH_OUT" | awk '/^\/dev\// {print $1; exit}')"
+MOUNT_DIR="$(printf '%s\n' "$ATTACH_OUT" | awk -F'\t' '/\/Volumes\// {print $NF; exit}')"
+[ -n "$DEV_NODE" ] || die "could not determine device node for $RW_DMG"
+[ -d "$MOUNT_DIR" ] || die "could not determine mount point for $RW_DMG"
+VOL_MOUNTED="$(basename "$MOUNT_DIR")"
+
+log "Laying out volume window with Finder"
+# Finder scripting needs an interactive GUI session; in a headless/CI context
+# this can fail — treat that as non-fatal so a valid (if plainly-laid-out) DMG
+# is still produced. Interactive runs get the designed backdrop + icon layout.
+if ! osascript <<APPLESCRIPT
+tell application "Finder"
+    tell disk "$VOL_MOUNTED"
+        open
+        set current view of container window to icon view
+        set toolbar visible of container window to false
+        set statusbar visible of container window to false
+        set the bounds of container window to {200, 120, 840, 520}
+        set theViewOptions to the icon view options of container window
+        set arrangement of theViewOptions to not arranged
+        set icon size of theViewOptions to 112
+        set text size of theViewOptions to 12
+        set background picture of theViewOptions to file ".background:background.png"
+        set position of item "WPContainer.app" of container window to {160, 200}
+        set position of item "Applications" of container window to {480, 200}
+        close
+        open
+        update without registering applications
+        delay 1
+    end tell
+end tell
+APPLESCRIPT
+then
+    warn "Finder layout step failed (headless session?). DMG will use the default"
+    warn "  icon layout; the .background image is still present on the volume."
+fi
+
+# Let Finder flush the .DS_Store to the volume before we detach.
+sync
+sleep 1
+
+log "Detaching and compressing to final image"
+hdiutil detach "$DEV_NODE" -force >/dev/null 2>&1 || true
+DEV_NODE=""                              # trap is now a no-op
+trap - EXIT
+hdiutil convert "$RW_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG" >/dev/null
+rm -f "$RW_DMG"
 rm -rf "$STAGE"
 # Codesign the DMG itself so Gatekeeper has a primary signature to assess when
 # the user opens the downloaded image, alongside the notarization ticket stapled
