@@ -22,6 +22,9 @@ public actor MultisiteService {
         // the config is correct regardless of what it could write to the mount.
         try injectConstants(site: site, installURL: installURL, subdomains: subdomains)
         try writeHtaccess(wordpressFolder: site.wordpressFolder, subdomains: subdomains)
+        // Raise the network upload cap (default 1500 KB) to match the PHP
+        // 50 MB limits — otherwise network sites stay capped at 1.5 MB.
+        try await cli.run(SiteRecipe.wpNetworkUploadCapArgs(site, dbHost: dbHost))
     }
 
     /// Inject/refresh the multisite constants in wp-config.php (idempotent).

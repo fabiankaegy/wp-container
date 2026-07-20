@@ -105,6 +105,9 @@ public actor SiteLifecycle {
         emit(inst.instanceID, .starting)
         do {
             try SiteFolders.ensure(for: inst)
+            // PHP overrides folder (50 MB upload limits) — must exist before
+            // the wp `container run` bind-mounts it.
+            try PHPConfService.ensure(for: inst)
 
             // Pull every needed image CONCURRENTLY (issue #9). A pull of an
             // already-present tag is a ~1s registry revalidation; they used to
