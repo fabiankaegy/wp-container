@@ -768,7 +768,8 @@ public final class AppViewModel {
     public func createAndStartSite(name: String, parentFolder: URL? = nil, imageTag: String = SiteRecipe.defaultWordPressImage,
                                    phpVersion: String? = nil, groupID: UUID? = nil,
                                    networkType: NetworkType = .none, customDomain: String? = nil,
-                                   xdebugEnabled: Bool = false, elasticsearchEnabled: Bool = false) async -> Site? {
+                                   xdebugEnabled: Bool = false, elasticsearchEnabled: Bool = false,
+                                   httpsEnabled: Bool = false, wpDebug: Bool = false, scriptDebug: Bool = false) async -> Site? {
         guard let site = await createSite(name: name, parentFolder: parentFolder, imageTag: imageTag, phpVersion: phpVersion,
                                           groupID: groupID, networkType: networkType, customDomain: customDomain,
                                           xdebugEnabled: xdebugEnabled, elasticsearchEnabled: elasticsearchEnabled) else {
@@ -780,12 +781,27 @@ public final class AppViewModel {
         suppressStatusNotify.insert(site.id)
         do {
             let provisioned = try await lifecycle.startSite(site)
-            if provisioned != site.provisioned {
-                var updated = site
-                updated.provisioned = provisioned
-                await store.upsertSite(updated)
+            var updated = site
+            updated.provisioned = provisioned
+            // Apply New Site Defaults (Settings → Sites) now that wp-config.php and
+            // the DB exist. Only ever turns things ON — an unchecked default leaves
+            // WordPress' own value untouched. New sites only.
+            if wpDebug { try? WPConfigService.setBoolConstant("WP_DEBUG", true, wordpressFolder: site.wordpressFolder) }
+            if scriptDebug { try? WPConfigService.setBoolConstant("SCRIPT_DEBUG", true, wordpressFolder: site.wordpressFolder) }
+            if httpsEnabled {
+                do {
+                    try await httpsIntegration.enable(updated)
+                    updated.httpsEnabled = true
+                    await refreshProxyRouting()
+                } catch { lastError = SiteLifecycleErrorText(error) }
             }
-            notifications.notifySiteCreated(name: site.name, url: site.url, faviconFolder: site.wordpressFolder)
+            await store.upsertSite(updated)
+            // Install the global wp router once, if the default is on and it isn't
+            // already active. Idempotent and reversible from a site's Integrations
+            // settings; guarded so it never fights a user who removed it and the
+            // preference is off.
+            if AppSettings.defaultGlobalWPRouter, !globalWPInstalled { setGlobalWP(enabled: true) }
+            notifications.notifySiteCreated(name: updated.name, url: updated.url, faviconFolder: updated.wordpressFolder)
         } catch {
             let text = SiteLifecycleErrorText(error)
             lastError = text

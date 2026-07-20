@@ -291,6 +291,10 @@ private struct SitesSettingsPane: View {
     @AppStorage(AppSettings.defaultWordPressVersionKey) private var defaultWordPress = "latest"
     @AppStorage(AppSettings.defaultPHPVersionKey) private var defaultPHP = WordPressImageCatalog.defaultPHP
     @AppStorage(ExternalEditors.targetKey) private var openInTarget = OpenInTarget.siteFolder.rawValue
+    @AppStorage(AppSettings.defaultHTTPSKey) private var defaultHTTPS = true
+    @AppStorage(AppSettings.defaultWPDebugKey) private var defaultWPDebug = true
+    @AppStorage(AppSettings.defaultScriptDebugKey) private var defaultScriptDebug = true
+    @AppStorage(AppSettings.defaultGlobalWPRouterKey) private var defaultGlobalWPRouter = true
 
     @State private var choosingFolder = false
 
@@ -350,6 +354,25 @@ private struct SitesSettingsPane: View {
                             ForEach(OpenInTarget.allCases) { t in Text(t.label).tag(t.rawValue) }
                         }
                         .labelsHidden().fixedSize()
+                    }
+
+                    Divider().opacity(0.5)
+
+                    SettingRow(title: "Enable HTTPS",
+                               explanation: "New sites serve over https://<slug>.localhost through the local proxy, with the certificate trusted automatically.") {
+                        Toggle("", isOn: $defaultHTTPS).labelsHidden().toggleStyle(.switch)
+                    }
+                    SettingRow(title: "WP_DEBUG",
+                               explanation: "Turn on WordPress debug mode in new sites' wp-config.php.") {
+                        Toggle("", isOn: $defaultWPDebug).labelsHidden().toggleStyle(.switch)
+                    }
+                    SettingRow(title: "SCRIPT_DEBUG",
+                               explanation: "Load unminified core CSS/JS in new sites' wp-config.php.") {
+                        Toggle("", isOn: $defaultScriptDebug).labelsHidden().toggleStyle(.switch)
+                    }
+                    SettingRow(title: "Global wp router",
+                               explanation: "When you create a site, install the global wp router (once) so plain `wp` inside any site folder runs containerized wp-cli. Adds a PATH line to ~/.zshrc; remove it anytime from a site's Integrations settings.") {
+                        Toggle("", isOn: $defaultGlobalWPRouter).labelsHidden().toggleStyle(.switch)
                     }
 
                     if !vm.versionMatrix.isValid(wp: defaultWordPress, php: defaultPHP) {
