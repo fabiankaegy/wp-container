@@ -9,10 +9,12 @@ struct LoginCommand: AsyncParsableCommand {
         commandName: "login",
         abstract: "Print a one-time browser login link (magic link) for a site.",
         discussion: """
-        Drops the wpc-magic-login mu-plugin into the target and mints a single-use \
-        token whose SHA-256 hash is stored in the `wpc_magic_login` option. Opening \
-        the printed URL in a browser starts a logged-in wp-admin session — no \
-        wp-login.php form. The link expires in 15 minutes and works exactly once.
+        Mints a single-use token whose SHA-256 hash is stored in the \
+        `wpc_magic_login` option; a private PHP auto_prepend handler (kept in the \
+        site's mounted php/ folder, never in the project tree) validates it. \
+        Opening the printed URL in a browser starts a logged-in wp-admin session \
+        — no wp-login.php form. The link expires in 15 minutes and works exactly \
+        once. A site started before magic-login support needs one restart.
         """
     )
     @Argument(help: "Site slug or env slug.") var target: String
@@ -37,14 +39,21 @@ struct LoginCommand: AsyncParsableCommand {
             var mailHost: String? = nil
             if inst.mailpitEnabled { mailHost = (try? await ctx.cli.ipAddress(of: inst.mailContainerName)) ?? nil }
 
-            try MagicLoginService.ensureMuPlugin(for: inst)
+            // The site is running (dbHost resolved). If the handler wasn't already
+            // active, this running container predates it — a restart is required
+            // for the link to work.
+            let alreadyActive = try MagicLoginService.ensurePrepend(for: inst)
+            let warning = alreadyActive ? nil :
+                "This site was started before magic-login support; restart it for the link to work: wp-container stop \(target) && wp-container start \(target)"
             let link = try await MagicLoginService.issueLoginLink(for: inst, publicURL: publicURL, dbHost: dbHost,
                                                                  cli: ctx.cli, user: user, mailpitHost: mailHost)
             if output.json {
-                emitLine(CLIJSON.string(link))
+                emitLine(CLIJSON.string(LoginLinkOutput(url: link.url.absoluteString, user: link.user,
+                                                        expiresAt: link.expiresAt, warning: warning)))
             } else {
                 emitLine(link.url.absoluteString)
                 emitLine("One-time link for \(link.user); expires in 15 minutes. Open it in a browser for a logged-in wp-admin session.")
+                if let warning { emitLine("warning: \(warning)") }
             }
             if open {
                 let p = Process()
@@ -57,4 +66,13 @@ struct LoginCommand: AsyncParsableCommand {
             throw failCommand(error, json: output.json)
         }
     }
+}
+
+/// `wp-container login --json` payload: the link plus an optional stale-container
+/// warning (omitted when the handler was already active).
+private struct LoginLinkOutput: Encodable {
+    let url: String
+    let user: String
+    let expiresAt: Date
+    let warning: String?
 }

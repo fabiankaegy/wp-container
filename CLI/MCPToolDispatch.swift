@@ -197,17 +197,23 @@ enum MCPToolDispatch {
         let user = args["user"]?.stringValue ?? SiteRecipe.adminUser
         var mailHost: String? = nil
         if site.mailpitEnabled { mailHost = (try? await ctx.cli.ipAddress(of: site.mailContainerName)) ?? nil }
-        try MagicLoginService.ensureMuPlugin(for: site)
+        // The site is running (dbHost resolved). If the handler wasn't already
+        // active this container predates it and must be restarted.
+        let alreadyActive = try MagicLoginService.ensurePrepend(for: site)
         do {
             let link = try await MagicLoginService.issueLoginLink(for: site, publicURL: site.url, dbHost: host,
                                                                  cli: ctx.cli, user: user, mailpitHost: mailHost)
             let iso = ISO8601DateFormatter().string(from: link.expiresAt)
-            return MCPResult.json([
+            var payload: [String: Any] = [
                 "url": link.url.absoluteString,
                 "user": link.user,
                 "expiresAt": iso,
                 "note": "One-time link, expires in 15 minutes. Open in a browser to get a logged-in wp-admin session.",
-            ])
+            ]
+            if !alreadyActive {
+                payload["warning"] = "This site was started before magic-login support; restart it (site_restart) for the link to work."
+            }
+            return MCPResult.json(payload)
         } catch let e as MagicLoginError {
             throw ToolError("user_not_found", e.description)
         }
