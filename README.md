@@ -94,7 +94,12 @@ Sites are provisioned automatically (no install wizard) and log in with
   the bundled MCP stdio server (`wp-container mcp --site <slug>`) exposes 18 tools
   in the spirit of [10up/localwp-agent-tools](https://github.com/10up/localwp-agent-tools):
   `wp_cli`, log readers, `wp-config` editing, site info/health, start/stop/status,
-  `list_sites`, `worktree_*`, plus `xdebug_toggle` / `elasticsearch_toggle`.
+  `list_sites`, `worktree_*`, `xdebug_toggle` / `elasticsearch_toggle`, plus
+  `login_link` / `create_user`.
+- **Agent-friendly login** — `wp-container login <site>` prints a one-time magic
+  login link (single-use, 15-minute expiry) that opens straight into a logged-in
+  wp-admin — no `wp-login.php` form for agents to fumble. `--open` opens it, and
+  the `login_link` / `create_user` MCP tools expose the same for agents.
 - **Trusted HTTPS** — mkcert-style local CA trusted per-user in the login keychain
   (**no admin password — Touch ID supported**); `https://<site>.localhost` (or your
   custom domain) served by a host-side TLS reverse proxy (443, Host-header routing).
