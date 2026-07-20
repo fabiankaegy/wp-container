@@ -17,6 +17,8 @@ enum MCPToolDispatch {
             case "read_wp_config":    return try await readWPConfig(ctx: ctx, slug: scopedSlug)
             case "edit_wp_config":    return try await editWPConfig(args, ctx: ctx, slug: scopedSlug)
             case "get_site_info":     return try await getSiteInfo(ctx: ctx, slug: scopedSlug)
+            case "login_link":        return try await loginLink(args, ctx: ctx, slug: scopedSlug)
+            case "create_user":       return try await createUser(args, ctx: ctx, slug: scopedSlug)
             case "site_health_check": return try await siteHealthCheck(ctx: ctx, slug: scopedSlug)
             case "site_start":        return try await siteStart(ctx: ctx, slug: scopedSlug)
             case "site_stop":         return try await siteStop(ctx: ctx, slug: scopedSlug)
@@ -176,6 +178,7 @@ enum MCPToolDispatch {
             "mailboxUrl": site.mailboxURL?.absoluteString as Any? ?? NSNull(),
             "db": ["name": SiteRecipe.dbName, "user": SiteRecipe.dbUser, "password": SiteRecipe.dbPassword],
             "admin": ["user": SiteRecipe.adminUser, "password": SiteRecipe.adminPassword],
+            "loginHint": "Use the login_link tool for a one-time browser login URL instead of the wp-login form.",
         ]
         if isUp, let host = try? await dbHost(for: site, ctx: ctx) {
             let plugins = try? await ctx.cli.runCapturing(SiteRecipe.wpProxyArgs(site, dbHost: host, wpArgs: ["plugin", "list", "--status=active", "--field=name"]))
@@ -184,6 +187,64 @@ enum MCPToolDispatch {
             payload["activeTheme"] = (theme?.stdout ?? "").split(separator: "\n").map(String.init).first ?? NSNull()
         }
         return MCPResult.json(payload)
+    }
+
+    // MARK: - Login / users (issue #13)
+
+    private static func loginLink(_ args: [String: Value], ctx: CLIContext, slug: String) async throws -> CallTool.Result {
+        let site = try await resolveSite(slug, ctx: ctx)
+        let host = try await dbHost(for: site, ctx: ctx)
+        let user = args["user"]?.stringValue ?? SiteRecipe.adminUser
+        var mailHost: String? = nil
+        if site.mailpitEnabled { mailHost = (try? await ctx.cli.ipAddress(of: site.mailContainerName)) ?? nil }
+        try MagicLoginService.ensureMuPlugin(for: site)
+        do {
+            let link = try await MagicLoginService.issueLoginLink(for: site, publicURL: site.url, dbHost: host,
+                                                                 cli: ctx.cli, user: user, mailpitHost: mailHost)
+            let iso = ISO8601DateFormatter().string(from: link.expiresAt)
+            return MCPResult.json([
+                "url": link.url.absoluteString,
+                "user": link.user,
+                "expiresAt": iso,
+                "note": "One-time link, expires in 15 minutes. Open in a browser to get a logged-in wp-admin session.",
+            ])
+        } catch let e as MagicLoginError {
+            throw ToolError("user_not_found", e.description)
+        }
+    }
+
+    private static func createUser(_ args: [String: Value], ctx: CLIContext, slug: String) async throws -> CallTool.Result {
+        guard let user = args["user"]?.stringValue, let email = args["email"]?.stringValue else {
+            throw ToolError("bad_args", "`user` and `email` are required.")
+        }
+        let role = args["role"]?.stringValue ?? "administrator"
+        let password = args["password"]?.stringValue ?? randomPassword()
+        let site = try await resolveSite(slug, ctx: ctx)
+        let host = try await dbHost(for: site, ctx: ctx)
+        // Detect an existing login up front for a clear, actionable error.
+        let existing = try await ctx.cli.runCapturing(SiteRecipe.wpProxyArgs(site, dbHost: host, wpArgs: ["user", "get", user, "--field=user_login"]))
+        if existing.exitCode == 0 {
+            throw ToolError("user_exists", "A user '\(user)' already exists. Use login_link to log in as them, or pick another login.")
+        }
+        let result = try await ctx.cli.runCapturing(SiteRecipe.wpProxyArgs(site, dbHost: host, wpArgs: [
+            "user", "create", user, email, "--role=\(role)", "--user_pass=\(password)",
+        ]))
+        guard result.exitCode == 0 else {
+            throw ToolError("create_failed", result.stderr.isEmpty ? result.stdout : result.stderr)
+        }
+        return MCPResult.json([
+            "user": user,
+            "email": email,
+            "role": role,
+            "password": password,
+        ])
+    }
+
+    /// 20-char URL-safe random password for `create_user` when none is supplied.
+    private static func randomPassword() -> String {
+        let alphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789")
+        var rng = SystemRandomNumberGenerator()
+        return String((0..<20).map { _ in alphabet[Int.random(in: 0..<alphabet.count, using: &rng)] })
     }
 
     private static func siteHealthCheck(ctx: CLIContext, slug: String) async throws -> CallTool.Result {
