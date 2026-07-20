@@ -117,6 +117,14 @@ HELPER="$APP/Contents/MacOS/wpc-hosts-helper"
 log "Signing embedded privileged helper (wpc-hosts-helper)"
 codesign --force --options runtime "${TS[@]}" --sign "$SIGN_IDENTITY" "$HELPER"
 
+# Sign the embedded wp-container CLI too (same reason: codesign does not
+# recursively sign nested Mach-O in Contents/MacOS). The app installs this on
+# demand via CLIToolInstaller, so it must carry its own valid signature.
+EMBEDDED_CLI="$APP/Contents/MacOS/wp-container"
+[ -x "$EMBEDDED_CLI" ] || die "embedded CLI not found at $EMBEDDED_CLI (build did not embed it)"
+log "Signing embedded wp-container CLI"
+codesign --force --options runtime "${TS[@]}" --sign "$SIGN_IDENTITY" "$EMBEDDED_CLI"
+
 log "Signing WPContainer.app"
 codesign --force --options runtime "${TS[@]}" --sign "$SIGN_IDENTITY" "$APP"
 
@@ -124,6 +132,7 @@ codesign --force --options runtime "${TS[@]}" --sign "$SIGN_IDENTITY" "$APP"
 log "Verifying signatures"
 codesign --verify --deep --strict --verbose=2 "$APP"    || die "app failed codesign --verify"
 codesign --verify --strict --verbose=2         "$HELPER" || die "embedded helper failed codesign --verify"
+codesign --verify --strict --verbose=2         "$EMBEDDED_CLI" || die "embedded CLI failed codesign --verify"
 codesign --verify --strict --verbose=2         "$CLI"   || die "cli failed codesign --verify"
 
 log "Gatekeeper assessment (spctl)"

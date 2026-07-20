@@ -127,6 +127,8 @@ private struct GeneralSettingsPane: View {
                 }
             }
 
+            CLIToolsSettingsSection()
+
             HostsHelperSettingsSection()
         }
         .task { authStatus = await NotificationService.shared.authorizationStatus() }
@@ -191,6 +193,83 @@ private struct GeneralSettingsPane: View {
 // MARK: - Custom domains (Touch ID hosts helper, §2f-bis)
 
 /// Registration UI for the privileged `wpc-hosts-helper`. When enabled, custom
+/// Install the bundled `wp-container` command-line tool (+ `wpc` alias) into
+/// `/usr/local/bin` with one admin prompt. It's symlinked to the app's embedded
+/// binary, so it tracks app updates automatically.
+private struct CLIToolsSettingsSection: View {
+    @State private var state: CLIToolInstaller.State = .notInstalled
+    @State private var working = false
+    @State private var error: String?
+
+    var body: some View {
+        SectionCard(title: "Command-Line Tools", systemImage: "terminal") {
+            VStack(alignment: .leading, spacing: 10) {
+                SettingRow(title: "wp-container CLI",
+                           explanation: "Install the `wp-container` command (and its `wpc` alias) into /usr/local/bin so you can script sites and branch environments from Terminal — and drive the app from AI agents over MCP. It's symlinked to this app, so it stays in sync with updates.") {
+                    control
+                }
+                statusLabel
+                if let error {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .task { state = CLIToolInstaller.currentState() }
+    }
+
+    @ViewBuilder private var control: some View {
+        HStack(spacing: 8) {
+            if working {
+                ProgressView().controlSize(.small)
+            }
+            switch state {
+            case .notInstalled:
+                Button("Install…") { run { try await CLIToolInstaller.install() } }
+                    .disabled(working)
+            case .outdated:
+                Button("Update…") { run { try await CLIToolInstaller.install() } }
+                    .disabled(working)
+            case .installed:
+                Button("Uninstall…") { run { try await CLIToolInstaller.uninstall() } }
+                    .disabled(working)
+            }
+        }
+    }
+
+    @ViewBuilder private var statusLabel: some View {
+        switch state {
+        case .installed:
+            Label("Installed at \(CLIToolInstaller.cliPath).", systemImage: "checkmark.seal.fill")
+                .font(.caption).foregroundStyle(.green)
+        case .outdated:
+            Label("An older or external wp-container is on your PATH — update it to point at this app.",
+                  systemImage: "arrow.triangle.2.circlepath")
+                .font(.caption).foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        case .notInstalled:
+            Text("Not installed. Installing needs your administrator password once.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Run a privileged action, then refresh state. A cancelled auth dialog is
+    /// silent (the user chose to back out); other failures surface inline.
+    private func run(_ action: @escaping () async throws -> Void) {
+        working = true
+        error = nil
+        Task {
+            do { try await action() }
+            catch CLIToolInstaller.InstallError.cancelled { /* user backed out */ }
+            catch { self.error = "\(error)" }
+            state = CLIToolInstaller.currentState()
+            working = false
+        }
+    }
+}
+
 /// domain changes rewrite `/etc/hosts` behind the Touch ID-capable system
 /// authorization dialog instead of the osascript password prompt. Registration
 /// needs a one-time user approval in System Settings > Login Items — reaching
