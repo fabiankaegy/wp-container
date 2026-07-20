@@ -15,13 +15,14 @@ public enum AgentToolsService {
     public static let cliPath = "/usr/local/bin/wp-container"
 
     /// Canonical MCP tool names (single source of truth shared with the server
-    /// and the doc so they never drift). 18 tools (PLAN.md §2c added two).
+    /// and the doc so they never drift). 20 tools (issue #13 added two).
     public static let mcpToolNames: [String] = [
         "wp_cli", "read_error_log", "read_access_log", "wp_debug_toggle",
         "read_wp_config", "edit_wp_config", "get_site_info", "site_health_check",
         "site_start", "site_stop", "site_restart", "site_status", "list_sites",
         "worktree_create", "worktree_list", "worktree_delete",
         "xdebug_toggle", "elasticsearch_toggle",
+        "login_link", "create_user",
     ]
 
     public static let defaultDocName = "AGENTS.md"
@@ -194,6 +195,7 @@ public enum AgentToolsService {
 
         - **Site URL:** \(site.url.absoluteString)
         - **WP Admin:** \(site.wpAdminURL.absoluteString) — user `\(SiteRecipe.adminUser)`, password `\(SiteRecipe.adminPassword)`
+        - **Browser login:** run `wpc login \(site.slug)` for a one-time magic login link (or the `login_link` MCP tool) — avoids the wp-login form.
         - **WordPress root:** `\(site.wordpressFolder.path)`
 
         ## Running wp-cli

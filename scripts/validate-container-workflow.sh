@@ -286,6 +286,111 @@ LOGIN_CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${WP_PORT}
 if [[ "$LOGIN_CODE" == "200" ]]; then pass "wp-login.php serves HTTP 200"; else fail "wp-login.php returned $LOGIN_CODE"; fi
 
 # ----------------------------------------------------------------------------
+# 8b. Magic login link (issue #13): master auto_prepend + prepend.d, ZERO project files
+# ----------------------------------------------------------------------------
+step "8b. Magic login link (one-time browser login, php/prepend.d loader)"
+# Mirrors what WP Container ships WITHOUT touching the project tree: a single
+# master wpc-prepend.php (the only auto_prepend_file, via wpc-prepend.ini)
+# registers a pre-initialized muplugins_loaded hook that includes every
+# php/prepend.d/*.php. The magic-login handler is one such plain-hook file. All
+# of this lives in the private php/ folder (sibling of wordpress/), mounted at
+# /usr/local/etc/php/wpc-conf.d — never inside wp-content. PHP reads its ini set
+# only at startup, so it takes effect on the NEXT container start (--rm). Uses
+# raw primitives (this harness never touches the store).
+LOGIN_PHP_DIR="${SITE_DIR}/php"
+mkdir -p "${LOGIN_PHP_DIR}/prepend.d"
+cat > "${LOGIN_PHP_DIR}/wpc-prepend.php" <<'PHP'
+<?php
+/* WP Container: master auto_prepend loader (managed) */
+if ( ! function_exists( 'wpc_prepend_load_handlers' ) ) {
+    function wpc_prepend_load_handlers() {
+        foreach ( glob( __DIR__ . '/prepend.d/*.php' ) ?: array() as $wpc_handler ) {
+            include_once $wpc_handler;
+        }
+    }
+}
+$GLOBALS['wp_filter']['muplugins_loaded'][0]['wpc_prepend'] = array(
+    'function'      => 'wpc_prepend_load_handlers',
+    'accepted_args' => 1,
+);
+PHP
+cat > "${LOGIN_PHP_DIR}/wpc-prepend.ini" <<'INI'
+; WP Container: auto_prepend loader (managed)
+auto_prepend_file = "/usr/local/etc/php/wpc-conf.d/wpc-prepend.php"
+INI
+cat > "${LOGIN_PHP_DIR}/prepend.d/wpc-login.php" <<'PHP'
+<?php
+/* WP Container: Magic Login handler (managed) */
+add_action( 'init', function () {
+    if ( empty( $_GET['wpc_login'] ) ) { return; }
+    $token  = (string) wp_unslash( $_GET['wpc_login'] );
+    $stored = get_option( 'wpc_magic_login' );
+    delete_option( 'wpc_magic_login' );
+    $fail = static function () { wp_safe_redirect( add_query_arg( 'wpc_login_failed', '1', wp_login_url() ) ); exit; };
+    if ( ! is_string( $stored ) || '' === $stored ) { $fail(); }
+    $data = json_decode( $stored, true );
+    if ( ! is_array( $data ) || empty( $data['hash'] ) || empty( $data['user'] ) || empty( $data['expires'] ) ) { $fail(); }
+    if ( time() > (int) $data['expires'] ) { $fail(); }
+    if ( ! hash_equals( (string) $data['hash'], hash( 'sha256', $token ) ) ) { $fail(); }
+    $user = get_user_by( 'login', (string) $data['user'] );
+    if ( ! $user ) { $fail(); }
+    wp_set_current_user( $user->ID );
+    wp_set_auth_cookie( $user->ID, true );
+    wp_safe_redirect( admin_url() );
+    exit;
+} );
+PHP
+pass "wrote master wpc-prepend.php + ini and prepend.d/wpc-login.php into php/"
+
+# NO managed handler may appear inside the project tree (wp-content/mu-plugins).
+if [[ ! -e "${SITE_DIR}/wordpress/wp-content/mu-plugins/wpc-magic-login.php" \
+   && ! -e "${SITE_DIR}/wordpress/wp-content/mu-plugins/wpc-mailpit.php" \
+   && ! -e "${SITE_DIR}/wordpress/wp-content/mu-plugins/wpc-remote-media.php" ]]; then
+  pass "no managed mu-plugins under wp-content/mu-plugins (zero project-tree footprint)"
+else
+  fail "a managed handler leaked into wp-content/mu-plugins (must stay in php/prepend.d)"
+fi
+
+LOGIN_TOKEN=$(openssl rand -hex 32)
+LOGIN_HASH=$(printf '%s' "$LOGIN_TOKEN" | shasum -a 256 | awk '{print $1}')
+LOGIN_EXPIRES=$(( $(date +%s) + 900 ))
+LOGIN_JSON="{\"hash\":\"${LOGIN_HASH}\",\"user\":\"admin\",\"expires\":${LOGIN_EXPIRES}}"
+"$CONTAINER_BIN" run --rm \
+  -v "${SITE_DIR}/wordpress:/var/www/html" \
+  -e WORDPRESS_DB_HOST="$DB_IP" -e WORDPRESS_DB_USER=wordpress -e WORDPRESS_DB_PASSWORD=wordpress -e WORDPRESS_DB_NAME=wordpress \
+  wordpress:cli wp option update wpc_magic_login "$LOGIN_JSON" >/dev/null
+pass "stored wpc_magic_login option (sha256 of a 32-byte token, 15-min expiry)"
+
+# Restart WP WITH the php/ mount + PHP_INI_SCAN_DIR so the new ini is read at
+# PHP startup (fresh start, mirroring SiteRecipe.runWordPressArgs).
+"$CONTAINER_BIN" stop "$WP_NAME" >/dev/null 2>&1 || true
+sleep 1
+"$CONTAINER_BIN" run -d --rm --name "$WP_NAME" \
+  --label "$LABEL_SITE" \
+  -v "${SITE_DIR}/wordpress:/var/www/html" \
+  -v "${SITE_DIR}/php:/usr/local/etc/php/wpc-conf.d" \
+  -e PHP_INI_SCAN_DIR="/usr/local/etc/php/conf.d:/usr/local/etc/php/wpc-conf.d" \
+  -p "127.0.0.1:${WP_PORT}:80" \
+  -e WORDPRESS_DB_HOST="$DB_IP" -e WORDPRESS_DB_USER=wordpress -e WORDPRESS_DB_PASSWORD=wordpress -e WORDPRESS_DB_NAME=wordpress \
+  wordpress:latest >/dev/null
+wait_for_http "http://127.0.0.1:${WP_PORT}" 60 >/dev/null
+pass "WP restarted with php/ auto_prepend handler active"
+
+LOGIN_HEADERS=$(curl -si "http://127.0.0.1:${WP_PORT}/?wpc_login=${LOGIN_TOKEN}")
+if grep -qi 'Set-Cookie: wordpress_logged_in' <<<"$LOGIN_HEADERS" && grep -qiE 'Location:.*wp-admin' <<<"$LOGIN_HEADERS"; then
+  pass "magic link set a wordpress_logged_in cookie and redirected to wp-admin"
+else
+  fail "magic link did not log in (expected wordpress_logged_in cookie + wp-admin redirect)"
+fi
+
+REPLAY_HEADERS=$(curl -si "http://127.0.0.1:${WP_PORT}/?wpc_login=${LOGIN_TOKEN}")
+if grep -qi 'Set-Cookie: wordpress_logged_in' <<<"$REPLAY_HEADERS"; then
+  fail "magic link logged in a SECOND time (single-use option was not consumed)"
+else
+  pass "magic link is single-use — replay did not log in (option consumed on first use)"
+fi
+
+# ----------------------------------------------------------------------------
 # 9. Stop / restart persistence
 # ----------------------------------------------------------------------------
 step "9. Stop + fresh restart, verify persistence (no reinstall)"

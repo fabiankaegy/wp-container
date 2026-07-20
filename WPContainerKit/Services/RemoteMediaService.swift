@@ -1,55 +1,61 @@
 import Foundation
 
 /// Manages the WordPress side of the Database Importer's "Load from source
-/// site" media option (PLAN.md §2m): a small marker-headed mu-plugin that
+/// site" media option (PLAN.md §2m): a small marker-headed handler that
 /// rewrites upload URLs to the dump's source host whenever the local file is
 /// missing (BE-Media-from-Production style), so an imported site doesn't show
 /// broken images without copying/downloading the full uploads folder.
 ///
-/// Modeled exactly on `MailpitService`: written into
-/// `wp-content/mu-plugins/wpc-remote-media.php` when the user picks this
-/// option, removed when they disable it or pick a different one. The marker
-/// header makes both idempotent and lets us tell our file apart from a user's
-/// own mu-plugin. Unlike Mailpit's static file, the source base URL varies per
-/// import, so the contents are templated at write time (no env-var
-/// indirection needed — remote media doesn't need to react to a churning
-/// per-start IP the way the mail container does).
+/// Modeled on `MailpitService`: it used to live in
+/// `wp-content/mu-plugins/wpc-remote-media.php`, but that path can sit inside a
+/// user's tracked git repo and get committed by accident (issue #13). It now
+/// lives at `php/prepend.d/wpc-remote-media.php`, loaded by the shared master
+/// auto_prepend loader (`PrependService`) at `muplugins_loaded` — entirely
+/// OUTSIDE any project repo. Written when the user picks this option, removed
+/// when they disable it or pick a different one. The marker header makes both
+/// idempotent and lets us tell our file apart from a user's own. Unlike Mailpit's
+/// static file, the source base URL varies per import, so the contents are
+/// templated at write time.
 public enum RemoteMediaService {
-    /// Path of the managed mu-plugin, relative to a site's `wordpress/` folder.
-    public static let muPluginRelPath = "wp-content/mu-plugins/wpc-remote-media.php"
+    /// The handler filename inside `php/prepend.d/`.
+    public static let handlerFileName = "wpc-remote-media.php"
+
+    /// Legacy in-tree mu-plugin path (pre-#13), cleaned up on next start.
+    public static let legacyMuPluginRelPath = "wp-content/mu-plugins/wpc-remote-media.php"
 
     /// Unique marker in the file header, used to detect/remove only our file.
     static let marker = "WP Container: Remote media from production (managed — do not edit)"
 
-    public static func muPluginURL(wordpressFolder: URL) -> URL {
-        wordpressFolder.appendingPathComponent(muPluginRelPath)
+    /// Whether our managed handler is present in `php/prepend.d/` (marker match).
+    public static func isHandlerPresent(phpConfFolder: URL) -> Bool {
+        PrependService.isHandlerPresent(phpConfFolder: phpConfFolder, name: handlerFileName, marker: marker)
     }
 
-    /// Whether our managed mu-plugin is present (matched by marker, so a
-    /// same-named user file is not misread as ours).
-    public static func isMuPluginPresent(wordpressFolder: URL) -> Bool {
-        let url = muPluginURL(wordpressFolder: wordpressFolder)
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return false }
-        return text.contains(marker)
+    /// Write the handler into `php/prepend.d/` (creating it as needed), templating
+    /// `sourceBaseURL` (e.g. `https://staging.example.com`) into it. Idempotent —
+    /// a re-run (a later import from a different source) overwrites our own copy.
+    public static func writeHandler(phpConfFolder: URL, sourceBaseURL: String) throws {
+        try PrependService.writeHandler(phpConfFolder: phpConfFolder, name: handlerFileName,
+                                        contents: pluginContents(sourceBaseURL: sourceBaseURL))
     }
 
-    /// Write the mu-plugin (creating `mu-plugins/` as needed), templating
-    /// `sourceBaseURL` (e.g. `https://staging.example.com`) into it.
-    /// Idempotent — a re-run (e.g. a later import from a different source)
-    /// simply overwrites our own previous copy with the new base URL.
-    public static func writeMuPlugin(wordpressFolder: URL, sourceBaseURL: String) throws {
-        let url = muPluginURL(wordpressFolder: wordpressFolder)
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
-                                                withIntermediateDirectories: true)
-        try pluginContents(sourceBaseURL: sourceBaseURL).write(to: url, atomically: true, encoding: .utf8)
+    /// Remove the handler, but only when it is ours (marker match). Idempotent.
+    public static func removeHandler(phpConfFolder: URL) {
+        PrependService.removeHandler(phpConfFolder: phpConfFolder, name: handlerFileName, marker: marker)
     }
 
-    /// Remove the mu-plugin, but only when it is ours (marker match). Idempotent;
-    /// a missing file or a user's own same-named file is left untouched.
-    public static func removeMuPlugin(wordpressFolder: URL) throws {
-        let url = muPluginURL(wordpressFolder: wordpressFolder)
-        guard isMuPluginPresent(wordpressFolder: wordpressFolder) else { return }
-        try FileManager.default.removeItem(at: url)
+    /// Shed the legacy in-tree mu-plugin from pre-#13 builds when it is ours
+    /// (marker match) — never a user's own same-named file. Its body is plain-hook
+    /// PHP from the same template, so it works unchanged as a prepend.d handler:
+    /// relocate it (preserving the imported source URL) unless a handler already
+    /// exists, then remove the in-tree copy. Runs on every start.
+    public static func cleanupLegacyMuPlugin(wordpressFolder: URL, phpConfFolder: URL) {
+        let legacy = wordpressFolder.appendingPathComponent(legacyMuPluginRelPath)
+        guard let text = try? String(contentsOf: legacy, encoding: .utf8), text.contains(marker) else { return }
+        if !isHandlerPresent(phpConfFolder: phpConfFolder) {
+            try? PrependService.writeHandler(phpConfFolder: phpConfFolder, name: handlerFileName, contents: text)
+        }
+        try? FileManager.default.removeItem(at: legacy)
     }
 
     /// PHP single-quoted string escape for templating the source URL in — the
@@ -58,12 +64,12 @@ public enum RemoteMediaService {
         s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
     }
 
-    /// The mu-plugin body. No PHP namespace (keeps templating/escaping simple
-    /// and avoids `\`-heavy namespace-qualified callback strings); functions
-    /// are prefixed `wpc_remote_media_` instead to stay out of the way of a
-    /// site's own code, and `function_exists`/`defined` guards make repeated
-    /// loads (e.g. from a `wp-cli` one-shot container reusing the same mount)
-    /// harmless.
+    /// The handler body. No PHP namespace (keeps templating/escaping simple and
+    /// avoids `\`-heavy namespace-qualified callback strings); functions are
+    /// prefixed `wpc_remote_media_` instead to stay out of the way of a site's
+    /// own code, and `function_exists`/`defined` guards make repeated loads
+    /// harmless. Runs at `muplugins_loaded` via the master loader; the filters it
+    /// registers fire during rendering, so plain-hook style is correct.
     static func pluginContents(sourceBaseURL: String) -> String {
         let escaped = phpEscape(sourceBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
         return """
@@ -74,8 +80,9 @@ public enum RemoteMediaService {
          * on disk, redirect those URLs to the source site instead of showing a
          * broken image (BE-Media-from-Production style). Added by the Database
          * Importer when "Load from source site" is chosen; removed when
-         * disabled or replaced. The source base URL is templated in at write
-         * time by WP Container — this file is otherwise static.
+         * disabled or replaced. Loaded via the master auto_prepend loader
+         * (php/prepend.d). The source base URL is templated in at write time by
+         * WP Container — this file is otherwise static.
          */
 
         if ( ! defined( 'WPC_REMOTE_MEDIA_SOURCE_BASE_URL' ) ) {

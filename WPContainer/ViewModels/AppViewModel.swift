@@ -183,7 +183,7 @@ public final class AppViewModel {
         Task {
             var updated = site
             if enabled {
-                try? MailpitService.writeMuPlugin(wordpressFolder: site.wordpressFolder)
+                try? MailpitService.writeHandler(phpConfFolder: site.phpConfFolder)
                 if site.mailpitPort == nil {
                     // Reserve the mailbox web port inside the locked mutation.
                     let result = await store.allocatePort { port, env -> Site? in
@@ -202,7 +202,7 @@ public final class AppViewModel {
                     await store.upsertSite(updated)
                 }
             } else {
-                try? MailpitService.removeMuPlugin(wordpressFolder: site.wordpressFolder)
+                MailpitService.removeHandler(phpConfFolder: site.phpConfFolder)
                 updated.mailpitEnabled = false
                 await store.upsertSite(updated)
             }
