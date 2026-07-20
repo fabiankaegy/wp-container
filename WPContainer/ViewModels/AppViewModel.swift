@@ -837,7 +837,7 @@ public final class AppViewModel {
     /// Awaitable worktree-env creation for the "New Branch Environment" sheet:
     /// returns the created (already-started) env so the sheet can show its URL,
     /// or nil on failure (error surfaced via `lastError`).
-    public func createEnvAwaiting(parent: Site, repoRelPath: String, branch: String, from: String? = nil) async -> WorktreeEnv? {
+    public func createEnvAwaiting(parent: Site, repoRelPath: String, branch: String, from: String? = nil, provision: Bool = true) async -> WorktreeEnv? {
         // Allocate the port AND reserve the env descriptor in ONE locked store
         // mutation (#3 follow-up) — same pattern the CLI/MCP worktree-create use.
         // The reserved record keeps the final env's UUID so `upsertEnv` (success)
@@ -854,7 +854,7 @@ public final class AppViewModel {
         do {
             let env = try await worktrees.create(parent: parent, parentIsRunning: parent.status.isRunning,
                                                  repoRelPath: repoRelPath, branch: branch, from: from,
-                                                 port: reserved.port, reserved: reserved)
+                                                 port: reserved.port, reserved: reserved, provision: provision)
             await store.upsertEnv(env)
             notifications.notifyEnvReady(branch: env.branch, parent: parent.name,
                                          url: env.localURL, faviconFolder: env.wordpressFolder)
@@ -939,7 +939,7 @@ public final class AppViewModel {
 
     // MARK: - Worktree env actions
 
-    public func createEnv(parent: Site, repoRelPath: String, branch: String, from: String? = nil) {
+    public func createEnv(parent: Site, repoRelPath: String, branch: String, from: String? = nil, provision: Bool = true) {
         Task {
             // Port + env reservation in one locked mutation (#3 follow-up).
             guard let (_, reserved) = await store.allocatePort(reserve: { port, envelope in
@@ -953,7 +953,7 @@ public final class AppViewModel {
             do {
                 let env = try await worktrees.create(parent: parent, parentIsRunning: parentRunning,
                                                      repoRelPath: repoRelPath, branch: branch, from: from,
-                                                     port: reserved.port, reserved: reserved)
+                                                     port: reserved.port, reserved: reserved, provision: provision)
                 await store.upsertEnv(env)
                 notifications.notifyEnvReady(branch: env.branch, parent: parent.name,
                                              url: env.localURL, faviconFolder: env.wordpressFolder)

@@ -42,6 +42,7 @@ public enum WorktreeError: Error, Sendable, CustomStringConvertible {
         if let e = error as? LifecycleError { return e.description }
         if let e = error as? GitError { return e.description }
         if let e = error as? WorktreeError { return e.description }
+        if let e = error as? SiteFoldersError { return e.description }
         return "\(error)"
     }
 }
@@ -124,6 +125,11 @@ public actor WorktreeEnvService {
     ///     `descriptor(parent:repoRelPath:branch:port:)` (#3), pass it so the
     ///     final env keeps that identity (same UUID → the caller's replace-in-
     ///     store is a simple swap).
+    ///   - provision: when true (default), seed the freshly-checked-out worktree
+    ///     with the parent's gitignored runtime deps (Composer `vendor/`, built
+    ///     assets, provisioned mu-plugins/plugins) so the env boots into a
+    ///     working site with no manual `composer install`/`npm run build`
+    ///     preamble (issue #14). Pass false for a bare checkout.
     public func create(
         parent: Site,
         parentIsRunning: Bool,
@@ -131,7 +137,8 @@ public actor WorktreeEnvService {
         branch: String,
         from: String?,
         port: Int,
-        reserved: WorktreeEnv? = nil
+        reserved: WorktreeEnv? = nil,
+        provision: Bool = true
     ) async throws -> WorktreeEnv {
         let fm = FileManager.default
         // Reject `..`-laden rel paths outright (#8): the shadow mount would
@@ -159,6 +166,14 @@ public actor WorktreeEnvService {
             try fm.createDirectory(at: parent.worktreesFolder, withIntermediateDirectories: true)
             try await git.worktreeAdd(repo: repoURL, path: worktreePath, branch: branch,
                                       createIfMissing: true, from: from)
+
+            // 1b. Seed the checkout with the parent's gitignored runtime deps so
+            // the shadow-mounted worktree isn't missing vendor/, built assets, or
+            // provisioned plugins and the env boots into a working site (#14).
+            // --ignore-existing keeps the branch's tracked files untouched.
+            if provision {
+                try await SiteFolders.seedIgnoredRuntimeDeps(from: repoURL, into: worktreePath)
+            }
 
             // 2. Clone site files (APFS CoW).
             try fm.createDirectory(at: envPath, withIntermediateDirectories: true)
