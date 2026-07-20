@@ -55,6 +55,8 @@ public final class AppViewModel {
     public var presentingAddSite = false
     public var presentingNewEnv = false
     public var presentingImportDB = false
+    /// Drives the one-time first-run offer to install the `wp-container` CLI.
+    public var presentingCLIInstallOffer = false
     /// A dump file dropped on the site detail pane (§2m drag & drop) — set just
     /// before `presentingImportDB` so the sheet opens pre-filled with it.
     public var pendingImportDump: URL?
@@ -958,6 +960,20 @@ public final class AppViewModel {
             for env in orphanEnvs {
                 group.addTask { await lifecycle.stop(env) }
             }
+        }
+    }
+
+    /// First-run offer to install the `wp-container` CLI. Fires at most once
+    /// (guarded by `AppSettings.didOfferCLIInstall`): if the CLI is embedded but
+    /// not yet installed, present the offer sheet; if it's already installed (or
+    /// this build has no embedded CLI), just record that we've considered it so
+    /// the offer never appears. Users can always (re)install from Settings.
+    public func maybeOfferCLIInstall() {
+        guard !AppSettings.didOfferCLIInstall else { return }
+        guard CLIToolInstaller.embeddedCLIURL != nil else { return } // dev build w/o embed
+        AppSettings.didOfferCLIInstall = true
+        if CLIToolInstaller.currentState() == .notInstalled {
+            presentingCLIInstallOffer = true
         }
     }
 

@@ -36,6 +36,9 @@ struct MainWindow: View {
                 ImportDatabaseSheet(site: site, initialDump: vm.pendingImportDump)
             }
         }
+        .sheet(isPresented: $vm.presentingCLIInstallOffer) {
+            CLIInstallOfferSheet()
+        }
     }
 
     // MARK: Floating light panel
