@@ -7,11 +7,13 @@ import WPContainerKit
 /// left free of controls so the window stays draggable there.
 struct MainWindow: View {
     @Environment(AppViewModel.self) private var vm
-    /// Sidebar width, persisted across launches (Finder-style). Clamped to
-    /// `[sidebarMin, sidebarMax]` by the drag handle.
-    @AppStorage("sidebarWidth") private var sidebarWidth: Double = 272
-    private let sidebarMin: Double = 220
-    private let sidebarMax: Double = 460
+    /// Persisted sidebar width (written only when a drag ends, never per-frame —
+    /// per-frame UserDefaults writes are a big cause of resize stutter).
+    @AppStorage("sidebarWidth") private var persistedSidebarWidth: Double = 272
+    /// Live width driving the layout during a drag. Seeded from the persisted
+    /// value on appear; committed back to it when the drag ends.
+    @State private var sidebarWidth: Double = 272
+    private let sidebarRange: ClosedRange<Double> = 220...460
 
     var body: some View {
         @Bindable var vm = vm
@@ -20,9 +22,11 @@ struct MainWindow: View {
 
             HStack(spacing: 0) {
                 SidebarView()
-                    .frame(width: sidebarWidth.clamped(to: sidebarMin...sidebarMax))
+                    .frame(width: sidebarWidth)
 
-                SidebarResizeHandle(width: $sidebarWidth, range: sidebarMin...sidebarMax)
+                SidebarResizeHandle(width: $sidebarWidth, range: sidebarRange) {
+                    persistedSidebarWidth = sidebarWidth
+                }
 
                 panel
                     .padding(.top, 10)
@@ -30,6 +34,7 @@ struct MainWindow: View {
                     .padding(.bottom, 10)
             }
         }
+        .onAppear { sidebarWidth = persistedSidebarWidth.clamped(to: sidebarRange) }
         .sheet(isPresented: $vm.presentingAddSite) {
             AddSiteSheet()
         }
@@ -125,31 +130,42 @@ struct MainWindow: View {
 
 // MARK: - Sidebar resize
 
-/// A thin, invisible drag gutter between the sidebar and the content panel that
-/// resizes the sidebar (Finder-style), showing the horizontal-resize cursor on
-/// hover. The width lives in `@AppStorage` on `MainWindow`, so it persists.
+/// A thin drag gutter between the sidebar and the content panel that resizes the
+/// sidebar the way the system does. Two things make it smooth:
+///
+/// 1. The drag is measured in the **global** coordinate space. Measuring in the
+///    handle's own space feeds back on itself — the handle moves as the sidebar
+///    resizes, distorting `translation` and making the drag stutter/oscillate.
+/// 2. `width` is a lightweight `@State` on `MainWindow`; the value is only
+///    persisted to `UserDefaults` when the drag ends (via `onCommit`), so there
+///    are no synchronous defaults writes mid-drag.
+///
+/// The native column-resize pointer shows on hover via `.pointerStyle`.
 private struct SidebarResizeHandle: View {
     @Binding var width: Double
     let range: ClosedRange<Double>
-    /// Sidebar width captured at drag start, so the drag is relative to it.
+    /// Called when the drag ends, to persist the final width.
+    var onCommit: () -> Void
+
+    /// Sidebar width captured at drag start; the drag is relative to it.
     @State private var startWidth: Double?
 
     var body: some View {
         Rectangle()
             .fill(Color.clear)
-            .frame(width: 6)
+            .frame(width: 8)
             .contentShape(Rectangle())
-            .onHover { inside in
-                if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
-            }
+            .pointerStyle(.columnResize)
             .gesture(
-                DragGesture(minimumDistance: 1)
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
-                        let base = startWidth ?? width
                         if startWidth == nil { startWidth = width }
-                        width = (base + value.translation.width).clamped(to: range)
+                        width = (startWidth! + value.translation.width).clamped(to: range)
                     }
-                    .onEnded { _ in startWidth = nil }
+                    .onEnded { _ in
+                        startWidth = nil
+                        onCommit()
+                    }
             )
     }
 }
