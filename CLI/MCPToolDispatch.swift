@@ -289,6 +289,7 @@ enum MCPToolDispatch {
         }
         let parentSlug = args["site"]?.stringValue ?? slug
         let from = args["from"]?.stringValue
+        let provision = args["provision"]?.boolValue ?? true
         let envelope = try await ctx.load()
         guard let parent = envelope.sites.first(where: { $0.slug == parentSlug }) else {
             throw ToolError("site_not_found", "No site with slug \(parentSlug).")
@@ -308,7 +309,7 @@ enum MCPToolDispatch {
         do {
             env = try await ctx.worktrees.create(parent: parent, parentIsRunning: running.contains(parent.wpContainerName),
                                                  repoRelPath: repo, branch: branch, from: from,
-                                                 port: reserved.port, reserved: reserved)
+                                                 port: reserved.port, reserved: reserved, provision: provision)
             _ = try await ctx.persistence.mutate { store in
                 store.envs.removeAll { $0.id == env.id }
                 store.envs.append(env)

@@ -16,6 +16,7 @@ struct NewBranchEnvSheet: View {
     @State private var branch = ""
     @State private var fromRef = ""
     @State private var knownBranches: [String] = []
+    @State private var provision = true
 
     @State private var phase: Phase = .idle
     @State private var errorText: String?
@@ -102,11 +103,19 @@ struct NewBranchEnvSheet: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
+            Section {
+                Toggle("Seed runtime dependencies", isOn: $provision)
+                    .disabled(phase == .working)
+                Text("Copies the parent's gitignored deps (vendor/, built assets, provisioned plugins) into the checkout so the env boots into a working site. Turn off for a bare checkout.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if phase == .working {
                 Section {
                     HStack(spacing: 10) {
                         ProgressView().controlSize(.small)
-                        Text("Cloning site files, database, and starting containers… (~5s)")
+                        Text(provision
+                             ? "Cloning site files & database, seeding runtime deps, and starting containers…"
+                             : "Cloning site files, database, and starting containers… (~5s)")
                             .font(.callout).foregroundStyle(.secondary)
                     }
                 }
@@ -212,7 +221,8 @@ struct NewBranchEnvSheet: View {
         let from = fromRef.trimmingCharacters(in: .whitespaces)
         let env = await vm.createEnvAwaiting(parent: site, repoRelPath: repo.relativePath,
                                              branch: branch.trimmingCharacters(in: .whitespaces),
-                                             from: from.isEmpty ? nil : from)
+                                             from: from.isEmpty ? nil : from,
+                                             provision: provision)
         if let env {
             createdEnv = env
             phase = .done
