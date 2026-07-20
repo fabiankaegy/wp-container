@@ -8,19 +8,14 @@ import Security
 /// Design constraint — ZERO footprint in the project tree. An earlier version
 /// dropped a mu-plugin into `wp-content/mu-plugins/`, but that path can sit
 /// inside a user's tracked git repo (e.g. when the repo *is* `wp-content`) and
-/// get committed by accident. A single-file bind mount nested inside the
-/// `wordpress/` mount was rejected too: Apple `container` materializes a
-/// zero-byte placeholder on the HOST at the mount point, which is equally
-/// committable.
+/// get committed by accident.
 ///
-/// Instead the handler lives in the per-instance `php/` folder (`inst.phpConfFolder`,
-/// a sibling of `wordpress/`, already bind-mounted at `/usr/local/etc/php/wpc-conf.d`
-/// and activated via `PHP_INI_SCAN_DIR`) — entirely OUTSIDE any project repo. A
-/// managed `wpc-login.ini` sets `auto_prepend_file` to `wpc-login-prepend.php`,
-/// which returns immediately on every normal request and only bootstraps
-/// WordPress when the `?wpc_login=` token is present. Because containers are
-/// `--rm` and PHP reads its ini set only at startup, a newly-added handler takes
-/// effect on the NEXT site start (see `ensurePrepend`'s stale-container return).
+/// The handler is now a normal `add_action('init', …)` file at
+/// `php/prepend.d/wpc-login.php`, loaded by the shared master auto_prepend loader
+/// (`PrependService`) at `muplugins_loaded` — entirely OUTSIDE any project repo.
+/// It is a no-op on every request except the single-use `?wpc_login=` redirect.
+/// Because containers are `--rm` and PHP reads its ini set only at startup, a
+/// newly-added handler takes effect on the NEXT site start (see `isLoginActive`).
 public enum MagicLoginService {
     /// The option the handler reads (SHA-256 hash + user + expiry).
     public static let optionName = "wpc_magic_login"
@@ -28,98 +23,76 @@ public enum MagicLoginService {
     /// Default link lifetime.
     public static let defaultTTL: TimeInterval = 15 * 60
 
-    /// Handler filenames inside an instance's `php/` folder.
-    static let prependFileName = "wpc-login-prepend.php"
-    static let iniFileName = "wpc-login.ini"
+    /// The handler filename inside `php/prepend.d/`.
+    static let handlerFileName = "wpc-login.php"
 
-    /// Markers used to detect our managed files for idempotent overwrite.
-    static let prependMarker = "WP Container: Magic Login auto_prepend handler (managed — do not edit)"
-    static let iniMarker = "; WP Container: Magic Login (managed — do not edit)"
+    /// Marker used to detect our managed handler for idempotent overwrite.
+    static let handlerMarker = "WP Container: Magic Login handler (managed — do not edit)"
 
-    /// Legacy mu-plugin (pre-auto_prepend design) marker + relative path, cleaned
-    /// up by `ensurePrepend` so sites created by earlier builds shed the in-tree file.
+    /// Legacy files cleaned up by `ensureLoginHandler`: the in-tree mu-plugin
+    /// (first design) and the single-handler prepend file (second design).
     static let legacyMuPluginRelPath = "wp-content/mu-plugins/wpc-magic-login.php"
     static let legacyMuPluginMarker = "WP Container: Magic Login (managed — do not edit)"
+    static let legacyPrependFileName = "wpc-login-prepend.php"
+    static let legacyPrependMarker = "WP Container: Magic Login auto_prepend handler (managed — do not edit)"
 
-    /// The container-side absolute path of the prepend handler (the `php/` folder
-    /// is mounted at `SiteRecipe.phpConfContainerPath`).
-    static let prependContainerPath = "\(SiteRecipe.phpConfContainerPath)/\(prependFileName)"
-
-    /// The `auto_prepend_file` handler. Runs before every PHP entry point but
-    /// short-circuits unless the one-time login token is present, so normal
-    /// requests pay ~nothing and never bootstrap WordPress from here. Kept in its
-    /// own ini/file pair — `wpc-defaults.ini`'s user-ownership semantics stay untouched.
-    static let prependContents = """
+    /// The handler body. Runs at `muplugins_loaded` (via the master loader) with
+    /// WordPress bootstrapping normally, so it's a plain hook — no `wp-load`
+    /// require, no SAPI guard beyond the immediate no-op when the token is absent.
+    static let handlerContents = """
     <?php
     /*
-     * \(prependMarker)
-     * auto_prepend_file handler for WP Container's one-time browser login links
-     * (`wpc login`). Returns immediately on every request except the single-use
-     * ?wpc_login= redirect, which it validates against the \(optionName) option
-     * (deleted on every attempt) before starting a logged-in wp-admin session.
-     * Never echoes the token or the failure reason.
+     * \(handlerMarker)
+     * One-time browser login handler for WP Container (`wpc login`), loaded via
+     * the master auto_prepend loader at muplugins_loaded. No-op on every request
+     * except the single-use ?wpc_login= redirect, which it validates against the
+     * \(optionName) option (deleted on every attempt) before starting a
+     * logged-in wp-admin session. Never echoes the token or the failure reason.
      */
 
-    // wp-cli one-shot containers don't mount this ini, but guard anyway.
-    if ( PHP_SAPI === 'cli' ) {
-        return;
-    }
+    add_action( 'init', function () {
+        if ( empty( $_GET['wpc_login'] ) ) {
+            return;
+        }
 
-    // Every normal web request bails here — no WordPress bootstrap, no overhead.
-    if ( empty( $_GET['wpc_login'] ) ) {
-        return;
-    }
+        $token  = (string) wp_unslash( $_GET['wpc_login'] );
+        $stored = get_option( '\(optionName)' );
 
-    // Only now (token present) do we boot WordPress, so a fatal in wp-load can
-    // never white-screen a normal request.
-    require_once '/var/www/html/wp-load.php';
+        // Single use: always clear the stored token, whatever the outcome.
+        delete_option( '\(optionName)' );
 
-    $token  = (string) wp_unslash( $_GET['wpc_login'] );
-    $stored = get_option( '\(optionName)' );
+        $fail = static function () {
+            wp_safe_redirect( add_query_arg( 'wpc_login_failed', '1', wp_login_url() ) );
+            exit;
+        };
 
-    // Single use: always clear the stored token, whatever the outcome.
-    delete_option( '\(optionName)' );
+        if ( ! is_string( $stored ) || '' === $stored ) {
+            $fail();
+        }
 
-    $fail = static function () {
-        wp_safe_redirect( add_query_arg( 'wpc_login_failed', '1', wp_login_url() ) );
+        $data = json_decode( $stored, true );
+        if ( ! is_array( $data ) || empty( $data['hash'] ) || empty( $data['user'] ) || empty( $data['expires'] ) ) {
+            $fail();
+        }
+
+        if ( time() > (int) $data['expires'] ) {
+            $fail();
+        }
+
+        if ( ! hash_equals( (string) $data['hash'], hash( 'sha256', $token ) ) ) {
+            $fail();
+        }
+
+        $user = get_user_by( 'login', (string) $data['user'] );
+        if ( ! $user ) {
+            $fail();
+        }
+
+        wp_set_current_user( $user->ID );
+        wp_set_auth_cookie( $user->ID, true );
+        wp_safe_redirect( admin_url() );
         exit;
-    };
-
-    if ( ! is_string( $stored ) || '' === $stored ) {
-        $fail();
-    }
-
-    $data = json_decode( $stored, true );
-    if ( ! is_array( $data ) || empty( $data['hash'] ) || empty( $data['user'] ) || empty( $data['expires'] ) ) {
-        $fail();
-    }
-
-    if ( time() > (int) $data['expires'] ) {
-        $fail();
-    }
-
-    if ( ! hash_equals( (string) $data['hash'], hash( 'sha256', $token ) ) ) {
-        $fail();
-    }
-
-    $user = get_user_by( 'login', (string) $data['user'] );
-    if ( ! $user ) {
-        $fail();
-    }
-
-    wp_set_current_user( $user->ID );
-    wp_set_auth_cookie( $user->ID, true );
-    wp_safe_redirect( admin_url() );
-    exit;
-    """
-
-    /// Managed ini that wires the handler in via `auto_prepend_file`.
-    static let iniContents = """
-    \(iniMarker)
-    ; Managed by WP Container — enables the one-time magic-login handler (issue
-    ; #13). Loaded via PHP_INI_SCAN_DIR; refreshed on every site start. Do not
-    ; edit; separate from wpc-defaults.ini on purpose.
-    auto_prepend_file = "\(prependContainerPath)"
+    } );
     """
 
     /// A minted login link plus the user it logs in as and its expiry.
@@ -129,57 +102,36 @@ public enum MagicLoginService {
         public let expiresAt: Date
     }
 
-    public static func prependURL(phpConfFolder: URL) -> URL {
-        phpConfFolder.appendingPathComponent(prependFileName)
-    }
-    public static func iniURL(phpConfFolder: URL) -> URL {
-        phpConfFolder.appendingPathComponent(iniFileName)
-    }
-
-    /// Ensure the auto_prepend handler + its ini exist and are current in the
-    /// instance's `php/` folder (created if needed — it is bind-mounted, so it
-    /// MUST exist before `container run`). Also deletes the legacy in-tree
-    /// mu-plugin from earlier builds when it is ours (marker match). Idempotent:
-    /// rewrites only when the shipped content changed.
-    ///
-    /// Returns whether the handler was ALREADY active before this call (both
-    /// files present). `false` means a currently-running container predates the
-    /// handler and must be restarted for magic login to work (PHP reads its ini
-    /// set only at startup, and containers are `--rm`).
-    @discardableResult
-    public static func ensurePrepend(for inst: any RunnableInstance) throws -> Bool {
-        cleanupLegacyMuPlugin(wordpressFolder: inst.wordpressFolder)
-
-        let folder = inst.phpConfFolder
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let php = prependURL(phpConfFolder: folder)
-        let ini = iniURL(phpConfFolder: folder)
-        let existedBefore = FileManager.default.fileExists(atPath: php.path)
-            && FileManager.default.fileExists(atPath: ini.path)
-
-        try writeIfDiffers(prependContents, to: php)
-        try writeIfDiffers(iniContents, to: ini)
-        return existedBefore
+    /// Write (or refresh) the magic-login handler into `php/prepend.d/`, and shed
+    /// the legacy in-tree mu-plugin + first-gen single-handler prepend file when
+    /// they are ours (marker match). `PrependService.ensure(for:)` must run too
+    /// (they're both invoked from the start path). Idempotent.
+    public static func ensureLoginHandler(for inst: any RunnableInstance) throws {
+        cleanupLegacyFiles(for: inst)
+        try PrependService.writeHandler(phpConfFolder: inst.phpConfFolder, name: handlerFileName, contents: handlerContents)
     }
 
-    /// Remove the legacy `wp-content/mu-plugins/wpc-magic-login.php` if present
-    /// AND ours (marker match) — never touches a same-named user file.
-    static func cleanupLegacyMuPlugin(wordpressFolder: URL) {
-        let url = wordpressFolder.appendingPathComponent(legacyMuPluginRelPath)
-        guard let text = try? String(contentsOf: url, encoding: .utf8),
-              text.contains(legacyMuPluginMarker) else { return }
-        try? FileManager.default.removeItem(at: url)
+    /// Remove the legacy in-tree mu-plugin (marker-guarded) and the second-design
+    /// `wpc-login-prepend.php` (marker-guarded) — never a user's own file.
+    static func cleanupLegacyFiles(for inst: any RunnableInstance) {
+        PrependService.removeIfMarked(inst.wordpressFolder.appendingPathComponent(legacyMuPluginRelPath),
+                                      marker: legacyMuPluginMarker)
+        PrependService.removeIfMarked(inst.phpConfFolder.appendingPathComponent(legacyPrependFileName),
+                                      marker: legacyPrependMarker)
     }
 
-    private static func writeIfDiffers(_ contents: String, to url: URL) throws {
-        if let existing = try? String(contentsOf: url, encoding: .utf8), existing == contents { return }
-        try contents.write(to: url, atomically: true, encoding: .utf8)
+    /// Whether magic login is fully active for a (running) instance: the master
+    /// loader is ensured AND our handler file is present. `false` means a running
+    /// container predates it and must be restarted for the link to work.
+    public static func isLoginActive(for inst: any RunnableInstance) -> Bool {
+        PrependService.isEnsured(for: inst)
+            && PrependService.isHandlerPresent(phpConfFolder: inst.phpConfFolder, name: handlerFileName, marker: handlerMarker)
     }
 
     /// Mint a one-time login link for `user`: verifies the user exists, stores the
     /// token's SHA-256 hash (never the token) in the `wpc_magic_login` option via
     /// wp-cli, and returns `<publicURL>/?wpc_login=<token>` plus its expiry.
-    /// `ensurePrepend(for:)` must have run (and the site been started since) first.
+    /// `ensureLoginHandler(for:)` must have run (and the site been started since).
     public static func issueLoginLink(for inst: any RunnableInstance,
                                       publicURL: URL,
                                       dbHost: String,

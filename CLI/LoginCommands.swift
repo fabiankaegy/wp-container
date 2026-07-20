@@ -39,10 +39,12 @@ struct LoginCommand: AsyncParsableCommand {
             var mailHost: String? = nil
             if inst.mailpitEnabled { mailHost = (try? await ctx.cli.ipAddress(of: inst.mailContainerName)) ?? nil }
 
-            // The site is running (dbHost resolved). If the handler wasn't already
-            // active, this running container predates it — a restart is required
-            // for the link to work.
-            let alreadyActive = try MagicLoginService.ensurePrepend(for: inst)
+            // The site is running (dbHost resolved). Capture whether the handler
+            // was already active BEFORE ensuring; if not, this running container
+            // predates it and needs a restart for the link to work.
+            let alreadyActive = MagicLoginService.isLoginActive(for: inst)
+            try PrependService.ensure(for: inst)
+            try MagicLoginService.ensureLoginHandler(for: inst)
             let warning = alreadyActive ? nil :
                 "This site was started before magic-login support; restart it for the link to work: wp-container stop \(target) && wp-container start \(target)"
             let link = try await MagicLoginService.issueLoginLink(for: inst, publicURL: publicURL, dbHost: dbHost,

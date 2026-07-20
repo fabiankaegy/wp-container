@@ -199,7 +199,9 @@ enum MCPToolDispatch {
         if site.mailpitEnabled { mailHost = (try? await ctx.cli.ipAddress(of: site.mailContainerName)) ?? nil }
         // The site is running (dbHost resolved). If the handler wasn't already
         // active this container predates it and must be restarted.
-        let alreadyActive = try MagicLoginService.ensurePrepend(for: site)
+        let alreadyActive = MagicLoginService.isLoginActive(for: site)
+        try PrependService.ensure(for: site)
+        try MagicLoginService.ensureLoginHandler(for: site)
         do {
             let link = try await MagicLoginService.issueLoginLink(for: site, publicURL: site.url, dbHost: host,
                                                                  cli: ctx.cli, user: user, mailpitHost: mailHost)
@@ -457,7 +459,7 @@ enum MCPToolDispatch {
         let site = try await resolveSite(slug, ctx: ctx)
         let updated: Site
         if enabled {
-            try MailpitService.writeMuPlugin(wordpressFolder: site.wordpressFolder)
+            try MailpitService.writeHandler(phpConfFolder: site.phpConfFolder)
             if site.mailpitPort == nil {
                 guard let (_, reservedSite, _) = try await ctx.persistence.allocatePort(reserve: { port, env -> Site? in
                     guard let i = env.sites.firstIndex(where: { $0.id == site.id }) else { return nil }
@@ -473,7 +475,7 @@ enum MCPToolDispatch {
                 updated = env.sites.first { $0.id == site.id } ?? site
             }
         } else {
-            try? MailpitService.removeMuPlugin(wordpressFolder: site.wordpressFolder)
+            MailpitService.removeHandler(phpConfFolder: site.phpConfFolder)
             let env = try await ctx.persistence.mutate { e in
                 if let i = e.sites.firstIndex(where: { $0.id == site.id }) { e.sites[i].mailpitEnabled = false }
             }
