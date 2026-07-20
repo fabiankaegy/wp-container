@@ -71,6 +71,13 @@ struct WPContainerApp: App {
                 .environment(viewModel)
         }
 
+        // In-app feature guide, opened from Help → "WP Container Help". Its
+        // content is static so it needs no environment; single-instance window.
+        Window("WP Container Help", id: "help") {
+            HelpView()
+        }
+        .windowResizability(.contentMinSize)
+
         // Menu bar extra (PLAN.md §2h): a compact list of all sites + running
         // envs with inline start/stop. Keeps the app alive when the main window
         // is closed; Dock presence stays normal.
@@ -95,8 +102,14 @@ struct WPContainerApp: App {
 /// scope; each command flips a UI-intent flag or calls a lifecycle action.
 private struct AppCommands: Commands {
     let vm: AppViewModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
+        // Replace the default "WP Container Help" item so ⌘? opens our in-app guide.
+        CommandGroup(replacing: .help) {
+            Button("WP Container Help") { openWindow(id: "help") }
+                .keyboardShortcut("?", modifiers: .command)
+        }
         CommandGroup(replacing: .newItem) {
             Button("New Site…") { vm.presentingAddSite = true }
                 .keyboardShortcut("n", modifiers: .command)
