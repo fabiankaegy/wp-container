@@ -32,6 +32,16 @@ public enum SiteRecipe {
         ("PHP 8.1", "wordpress:php8.1-apache"),
     ]
 
+    // MARK: PHP overrides
+    /// Where an instance's `php/` overrides folder (see `PHPConfService`) is
+    /// mounted inside the wp container.
+    public static let phpConfContainerPath = "/usr/local/etc/php/wpc-conf.d"
+    /// The image's compiled-in ini scan dir. Setting `PHP_INI_SCAN_DIR`
+    /// REPLACES the default (it does not extend it), so this must be listed
+    /// explicitly — and first, so files in the overrides dir win conflicts
+    /// (later scan wins, including over the Xdebug derived image's ini).
+    static let phpDefaultConfDir = "/usr/local/etc/php/conf.d"
+
     // MARK: Database credentials
     public static let dbName = "wordpress"
     public static let dbUser = "wordpress"
@@ -137,6 +147,11 @@ public enum SiteRecipe {
         args += [
             "-p", "127.0.0.1:\(inst.port):80",
             "-v", "\(inst.wordpressFolder.path):/var/www/html",
+            // PHP overrides (50 MB upload limits, PHPConfService): mod_php
+            // reads PHP_INI_SCAN_DIR from the apache process environment, so
+            // the mounted ini applies without a derived image or a reload.
+            "-v", "\(inst.phpConfFolder.path):\(phpConfContainerPath)",
+            "-e", "PHP_INI_SCAN_DIR=\(phpDefaultConfDir):\(phpConfContainerPath)",
         ]
         // Worktree environments add a shadowing mount over the repo path.
         for mount in inst.extraMounts {
@@ -293,6 +308,18 @@ public enum SiteRecipe {
         ]
         if subdomains { args.append("--subdomains") }
         return args
+    }
+
+    /// The multisite network upload cap (`fileupload_maxk`, in KB). Defaults to
+    /// 1500 KB, which would keep network sites at 1.5 MB no matter what the
+    /// PHP limits say — raise it to match the 50 MB PHP limit (PHPConfService).
+    public static let multisiteUploadCapKB = 51200
+
+    /// `wp network meta update 1 fileupload_maxk <cap>` — raise the network
+    /// upload cap during multisite provisioning (§2j).
+    public static func wpNetworkUploadCapArgs(_ inst: any RunnableInstance, dbHost: String) -> [String] {
+        wpProxyArgs(inst, dbHost: dbHost,
+                    wpArgs: ["network", "meta", "update", "1", "fileupload_maxk", "\(multisiteUploadCapKB)"])
     }
 
     /// `wp site list --format=json` for the multisite subsites list (§2j).
