@@ -25,6 +25,10 @@ struct AddSiteSheet: View {
     @State private var customDomain = ""
     @State private var xdebug = false
     @State private var elasticsearch = false
+    // HTTPS + debug — prefilled from the app's New Site Defaults (Settings → Sites).
+    @State private var https = AppSettings.defaultHTTPS
+    @State private var wpDebug = AppSettings.defaultWPDebug
+    @State private var scriptDebug = AppSettings.defaultScriptDebug
 
     @State private var phase: Phase = .idle
     @State private var hintIndex = 0
@@ -146,6 +150,11 @@ struct AddSiteSheet: View {
                 Toggle("Xdebug (step debugging on 9003)", isOn: $xdebug)
                 Toggle("Elasticsearch (ElasticPress)", isOn: $elasticsearch)
             }
+            Section("HTTPS & Debugging") {
+                Toggle("Enable HTTPS (https://\(slug.isEmpty ? "site" : slug).localhost)", isOn: $https)
+                Toggle("WP_DEBUG", isOn: $wpDebug)
+                Toggle("SCRIPT_DEBUG", isOn: $scriptDebug)
+            }
         }
         .formStyle(.grouped)
     }
@@ -237,7 +246,8 @@ struct AddSiteSheet: View {
             name: name, parentFolder: parentFolder, imageTag: imageTag, phpVersion: "PHP \(php)",
             groupID: groupID, networkType: networkType,
             customDomain: domain.isEmpty ? nil : domain,
-            xdebugEnabled: xdebug, elasticsearchEnabled: elasticsearch)
+            xdebugEnabled: xdebug, elasticsearchEnabled: elasticsearch,
+            httpsEnabled: https, wpDebug: wpDebug, scriptDebug: scriptDebug)
 
         guard let site, vm.store.site(id: site.id)?.status.isRunning == true else {
             errorText = vm.lastError ?? "Could not create the site."

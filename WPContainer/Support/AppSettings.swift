@@ -14,6 +14,12 @@ enum AppSettings {
     static let defaultPHPVersionKey = "defaultPHPVersion"
     static let autoStartProxyKey = "autoStartProxy"
     static let notificationsEnabledKey = "notificationsEnabled"
+    // New-site defaults (all default TRUE via `registerDefaults()`): applied when
+    // the Add Site guide creates a site. Surfaced in Settings → Sites.
+    static let defaultHTTPSKey = "defaultHTTPS"
+    static let defaultWPDebugKey = "defaultWPDebug"
+    static let defaultScriptDebugKey = "defaultScriptDebug"
+    static let defaultGlobalWPRouterKey = "defaultGlobalWPRouter"
 
     // Defaults.
     static var showDockIcon: Bool {
@@ -38,12 +44,24 @@ enum AppSettings {
         UserDefaults.standard.bool(forKey: notificationsEnabledKey)
     }
 
+    // New-site defaults. All default TRUE via `registerDefaults()`; the Add Site
+    // guide seeds its toggles from these and `AppViewModel.createAndStartSite`
+    // applies them (HTTPS + debug constants per-site; the global wp router once).
+    static var defaultHTTPS: Bool { UserDefaults.standard.bool(forKey: defaultHTTPSKey) }
+    static var defaultWPDebug: Bool { UserDefaults.standard.bool(forKey: defaultWPDebugKey) }
+    static var defaultScriptDebug: Bool { UserDefaults.standard.bool(forKey: defaultScriptDebugKey) }
+    static var defaultGlobalWPRouter: Bool { UserDefaults.standard.bool(forKey: defaultGlobalWPRouterKey) }
+
     /// Register defaults for keys whose ABSENT value must not read as false.
     /// Call once, as early as possible.
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [
             autoStartProxyKey: true,
             notificationsEnabledKey: true,
+            defaultHTTPSKey: true,
+            defaultWPDebugKey: true,
+            defaultScriptDebugKey: true,
+            defaultGlobalWPRouterKey: true,
         ])
     }
 
