@@ -50,6 +50,11 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// can run out of order, which manifested as randomly truncated large
     /// responses ("The network connection was lost" on multi-MB JS bundles).
     private let queue = DispatchQueue(label: "dev.wpcontainer.httpsproxy.listener")
+    /// Serializes env-port reconciliation (issue #16 follow-through). Its own queue
+    /// for two reasons: the occupancy pre-check is a blocking connect, and `start()`
+    /// is frequently awaited from the MainActor — and it must not sit behind
+    /// `queue`, whose job is answering accepts on 443/80.
+    private let portQueue = DispatchQueue(label: "dev.wpcontainer.httpsproxy.ports")
     private let stateLock = NSLock()
 
     /// A resolved routing entry: the upstream port plus the display metadata
@@ -559,7 +564,14 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// Failure is always per-port and never fatal: a port we cannot take stays
     /// unbound and is retried on the next tick, while every other listener — and
     /// proxy startup itself — carries on.
+    ///
+    /// Hops to `portQueue` and returns immediately: `start()` is awaited from the
+    /// MainActor and the reconcile does blocking connects.
     private func syncEnvPortListeners() {
+        portQueue.async { [weak self] in self?.reconcileEnvPortListeners() }
+    }
+
+    private func reconcileEnvPortListeners() {
         let (desired, bound) = stateLock.withLock {
             (portMap, Set(envPortListeners.keys))
         }
@@ -702,6 +714,9 @@ public final class HTTPSProxy: @unchecked Sendable {
     ///
     /// Ordering and guards, all of them load-bearing:
     ///
+    /// - An env is skipped unless THIS proxy holds its `127.0.0.1:<port>` socket:
+    ///   without that, its traffic is invisible to us and a wake couldn't answer
+    ///   at the URL it advertises. See the guard for the transitional case.
     /// - ENVS FIRST, then sites. An env stop is followed by
     ///   `stopSharedDatabaseIfUnused` so the parent's ~470 MB DB VM is retired
     ///   too once nothing borrows it — without that, idling envs would reclaim
@@ -723,6 +738,19 @@ public final class HTTPSProxy: @unchecked Sendable {
         var stoppedAnEnv = false
         for env in envelope.envs {
             guard running.contains(env.wpContainerName) else { continue }
+            // An env is only idle-STOPPABLE while we own its port, because that
+            // ownership is the whole basis of the env clock being trustworthy: it
+            // is what makes browser traffic to `127.0.0.1:<port>` visible, and it
+            // is what lets the next request wake what we parked.
+            //
+            // The case this protects is the transition: an env container still
+            // running from a build that published its own port keeps serving
+            // through the forwarder, invisible to us — and it defaults to a
+            // 15-minute timeout it never asked for. Stopping it while somebody
+            // browsed it would be exactly the bug that made this feature opt-in in
+            // the first place. Skipping costs nothing: restart that env once and
+            // the proxy takes the socket, from which point the clock is honest.
+            guard ownsLoopbackPort(env.port) else { continue }
             let timeout = env.effectiveIdleStopMinutes
             guard timeout > 0 else { continue }
             guard idleMinutes(of: env.envSlug, persisted: env.lastActivityAt, now: now) >= Double(timeout) else { continue }
