@@ -256,4 +256,9 @@ extension WorktreeEnv: RunnableInstance {
     public var extraMounts: [Mount] {
         [SiteRecipe.shadowMount(worktreePath: worktreePath, repoRelPath: repoRelPath)]
     }
+    /// An env's wp container does NOT publish a host port (issue #16
+    /// follow-through). The reverse proxy binds `127.0.0.1:<port>` for it and
+    /// relays to the container's vmnet IP, which is what makes the env's ONE
+    /// advertised URL both idle-trackable and wakeable. See `publishesPort`.
+    public var publishesPort: Bool { false }
 }

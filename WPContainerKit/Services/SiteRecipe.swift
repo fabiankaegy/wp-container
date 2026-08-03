@@ -219,8 +219,15 @@ public enum SiteRecipe {
         var args = ["run", "-d", "--rm", "--name", inst.wpContainerName]
         args += resourceArgs(for: inst)
         args += labelArgs(for: inst)
+        // Publish the host port ONLY for instances that own it (sites). A worktree
+        // env deliberately publishes nothing: the reverse proxy binds
+        // `127.0.0.1:<env port>` itself and relays to this container's vmnet IP
+        // (issue #16 follow-through) — see `RunnableInstance.publishesPort`. The
+        // two must never both hold the socket, hence the single switch here.
+        if inst.publishesPort {
+            args += ["-p", "127.0.0.1:\(inst.port):80"]
+        }
         args += [
-            "-p", "127.0.0.1:\(inst.port):80",
             "-v", "\(inst.wordpressFolder.path):/var/www/html",
             // PHP overrides (50 MB upload limits, PHPConfService): mod_php
             // reads PHP_INI_SCAN_DIR from the apache process environment, so
@@ -285,6 +292,12 @@ public enum SiteRecipe {
     /// works without a uid override. SMTP stays on the container network (port
     /// 1025, reached by WordPress via the injected IP); only the web UI (8025)
     /// is published to `webPort` on localhost.
+    ///
+    /// Mailpit's web port stays PUBLISHED even for a worktree env, whose wp
+    /// container does not (issue #16 follow-through). Deliberate: mailbox traffic
+    /// is a handful of small requests, so the forwarder's lossiness never bites,
+    /// and the mailbox is never a wake trigger or an idle-clock signal — so
+    /// nothing would be gained by moving it behind a proxy-owned socket.
     public static func runMailpitArgs(_ inst: any RunnableInstance, webPort: Int) -> [String] {
         var args = ["run", "-d", "--rm", "--name", inst.mailContainerName]
         args += resourceArgs(for: inst)

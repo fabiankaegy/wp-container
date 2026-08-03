@@ -89,6 +89,22 @@ public protocol RunnableInstance: Sendable {
     /// Site Health checks, REST self-calls) reach the host proxy exactly like a
     /// browser does. Injected into the container's /etc/hosts on every start.
     var loopbackHosts: [String] { get }
+    /// Whether the wp container publishes `127.0.0.1:<port>:80` itself via Apple
+    /// `container`'s port forwarder (issue #16 follow-through).
+    ///
+    /// True for sites, FALSE for worktree envs: the HTTPS proxy binds each env's
+    /// `127.0.0.1:<port>` socket itself and relays to the container's vmnet IP.
+    /// Two things fall out of that, both the point of the exercise — every request
+    /// to the env's advertised URL becomes visible to the idle clock, and a parked
+    /// env wakes at the exact URL users already hold — plus a third that is pure
+    /// gain: env traffic stops crossing the lossy forwarder (see
+    /// `HTTPSProxy.Route.containerName` for what "lossy" means here).
+    ///
+    /// A protocol REQUIREMENT (with an extension default) rather than an
+    /// extension-only member: extension-only members dispatch STATICALLY, so an
+    /// override on `WorktreeEnv` would be invisible to `SiteRecipe`'s and
+    /// `SiteLifecycle`'s `any RunnableInstance` call sites.
+    var publishesPort: Bool { get }
 }
 
 public extension RunnableInstance {
@@ -149,4 +165,6 @@ public extension RunnableInstance {
     /// Default loopback set: the `<containerSlug>.localhost` proxy hostname.
     /// Site overrides this to add its custom domain.
     var loopbackHosts: [String] { ["\(containerSlug).localhost"] }
+    /// Default: the container publishes its own host port. `WorktreeEnv` opts out.
+    var publishesPort: Bool { true }
 }

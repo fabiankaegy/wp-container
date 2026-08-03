@@ -6,9 +6,18 @@ import Security
 /// TLS-terminating reverse proxy for trusted local HTTPS (PLAN.md §2f).
 ///
 /// Listens on 443 (falling back to 8443), terminates TLS with the CA's wildcard
-/// leaf identity, routes each request to `127.0.0.1:<site port>` by its `Host`
+/// leaf identity, routes each request to the site's container by its `Host`
 /// header, and injects `X-Forwarded-Proto: https` / `X-Forwarded-Host` so
-/// WordPress builds correct HTTPS URLs. Containers are never touched.
+/// WordPress builds correct HTTPS URLs.
+///
+/// SITE containers are never touched — they publish their own
+/// `127.0.0.1:<port>` and this proxy is purely additive in front of them.
+/// WORKTREE ENVS are different (issue #16 follow-through): their containers
+/// publish NOTHING, and this proxy binds `127.0.0.1:<env port>` itself, one
+/// loopback listener per env, relaying to the container's vmnet IP. That is what
+/// makes an env's single advertised URL observable by the idle clock and wakeable
+/// when parked — and it keeps env traffic off Apple's lossy port forwarder
+/// entirely. See `envPortListeners` / `RunnableInstance.publishesPort`.
 ///
 /// Deliberately simple and correct rather than clever: TLS in, one HTTP/1.1
 /// request per connection (we force `Connection: close`), a header rewrite at the
@@ -51,7 +60,9 @@ public final class HTTPSProxy: @unchecked Sendable {
         public let slug: String?
         public let displayName: String?
         /// Container name (`wpc-<slug>-wp` / `-mail`) + in-guest port, so the
-        /// proxy can dial the container's vmnet IP directly. The published
+        /// proxy can dial the container's vmnet IP directly. For an ENV this is the
+        /// ONLY upstream — its container publishes nothing and the proxy owns
+        /// `127.0.0.1:<port>` itself. For a site the published
         /// `127.0.0.1:<port>` forwarder is a FALLBACK only: Apple `container`'s
         /// forwarder discards in-flight data when the guest closes a connection
         /// while the host-side reader lags (verified with a bare NWConnection
@@ -94,6 +105,23 @@ public final class HTTPSProxy: @unchecked Sendable {
     private var listener: NWListener?
     private var httpListener: NWListener?
     private var hostMap: [String: Route] = [:]
+    /// `127.0.0.1:<port>` → route, for the ENV ports this proxy owns the socket
+    /// for (issue #16 follow-through). Derived from the same `routes(from:)`
+    /// values as `hostMap`, restricted to `isEnv && !isMailbox`: sites keep
+    /// publishing through Apple's forwarder, and an env's Mailpit web port stays
+    /// published too (see `SiteRecipe.runMailpitArgs`).
+    private var portMap: [UInt16: Route] = [:]
+    /// The live loopback listeners keyed by the port they hold. Managed by
+    /// `syncEnvPortListeners()` off the 3s refresh loop — NOT by `start()`/`stop()`
+    /// alone and deliberately NOT torn down by `reload()`: a cert re-issue happens
+    /// exactly when an env is created, and dropping every env's socket for the
+    /// duration of a TLS rebind would break the envs that are already running.
+    private var envPortListeners: [UInt16: NWListener] = [:]
+    /// Ports we have already complained about, so a bind that cannot succeed
+    /// (typically a PRE-UPGRADE env container still publishing the port through
+    /// the forwarder) logs once instead of every 3 seconds. Cleared when the port
+    /// finally binds, so a later regression is reported again.
+    private var portBindWarned: Set<UInt16> = []
     /// `wpc-…` container name → current vmnet IP, refreshed alongside the host
     /// map so upstream connections dial containers directly instead of the
     /// lossy published-port forwarder (see `Route.containerName`). IPs churn on
@@ -110,13 +138,17 @@ public final class HTTPSProxy: @unchecked Sendable {
     // MARK: Idle tracking (issue #16)
 
     /// Slug → when the proxy last resolved a route for it. Every HTTP request
-    /// already passes through `route(forHost:)`, which makes it the one free
-    /// instrumentation point for "is anybody using this environment?".
+    /// passes through `route(forHost:)` or `route(forPort:)`, both of which call
+    /// `touchLocked` — the one free instrumentation point for "is anybody using
+    /// this environment?".
     ///
-    /// IN-MEMORY, and only ever sees traffic THIS proxy routed. Work that reaches
-    /// an instance another way — `http://127.0.0.1:<port>` (which is how worktree
-    /// envs are advertised everywhere), wp-cli, MCP — is invisible here and is
-    /// covered by the persisted `lastActivityAt` stamp instead. See `IdlePolicy`.
+    /// IN-MEMORY, and only ever sees traffic THIS proxy routed. For an ENV that is
+    /// now everything a browser does, including requests to its advertised
+    /// `http://127.0.0.1:<port>` URL, because the proxy holds that socket itself.
+    /// For a SITE, whose container still publishes its own port, a request straight
+    /// to `127.0.0.1:<port>` bypasses us and is invisible here. Non-HTTP work
+    /// (wp-cli, MCP) is covered by the persisted `lastActivityAt` stamp in both
+    /// cases. See `IdlePolicy`.
     private var lastAccess: [String: Date] = [:]
     /// Slug → when the IP-refresh loop FIRST saw its wp container running.
     ///
@@ -193,29 +225,44 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// carry no display metadata, so the stopped-site page falls back to the
     /// hostname).
     public func updateHostMap(_ map: [String: Int]) {
-        stateLock.withLock { hostMap = map.mapValues { Route(port: $0) } }
+        updateHostMap(routes: map.mapValues { Route(port: $0) })
     }
 
-    /// Replace the full `<host> → route` table.
+    /// Replace the full `<host> → route` table, and with it the derived
+    /// `<env port> → route` table the proxy's own loopback listeners serve.
     public func updateHostMap(routes: [String: Route]) {
-        stateLock.withLock { hostMap = routes }
+        var ports: [UInt16: Route] = [:]
+        for route in routes.values where route.isEnv && !route.isMailbox {
+            guard let port = UInt16(exactly: route.port) else { continue }
+            ports[port] = route
+        }
+        stateLock.withLock { hostMap = routes; portMap = ports }
+    }
+
+    /// Stamp the route's slug as accessed NOW (issue #16). Caller MUST hold
+    /// `stateLock`.
+    ///
+    /// Shared by BOTH entry points — the Host-header lookup and the proxy-owned
+    /// env-port lookup — so a request on an env's `127.0.0.1:<port>` URL feeds the
+    /// idle clock exactly like one on `<slug>.localhost`. Keeping that in one place
+    /// is the whole reason this is factored out.
+    private func touchLocked(_ route: Route) {
+        if let slug = route.slug { lastAccess[slug] = Date() }
     }
 
     /// Route by an exact Host-header lookup, then fall back to stripping the
     /// leftmost label so subdomain-multisite subsites (`sub.<slug>.localhost`,
     /// `sub.mysite.local`) route to their network's port (PLAN.md §2i/§2j).
     ///
-    /// Also stamps the route's slug as accessed NOW (issue #16). This is the
-    /// single choke point every proxied request passes through — one call per
-    /// request, already inside the state lock — so last-access tracking is free
-    /// here and would need extra bookkeeping anywhere else.
+    /// Also stamps the route as accessed (issue #16) — one call per request,
+    /// already inside the state lock, so last-access tracking is free here.
     private func route(forHost host: String) -> Route? {
         // Strip any :port suffix and lowercase.
         var name = host.split(separator: ":").first.map { $0.lowercased() } ?? host.lowercased()
         return stateLock.withLock {
             while true {
                 if let route = hostMap[name] {
-                    if let slug = route.slug { lastAccess[slug] = Date() }
+                    touchLocked(route)
                     return route
                 }
                 guard let dot = name.firstIndex(of: ".") else { return nil }
@@ -224,6 +271,27 @@ public final class HTTPSProxy: @unchecked Sendable {
                 name = rest
             }
         }
+    }
+
+    /// Route a request by WHICH proxy-owned socket it arrived on — no Host
+    /// parsing at all, because the listener exists for exactly one env.
+    ///
+    /// nil only in the narrow window where the env was deleted from the store but
+    /// its listener hasn't been closed by the next refresh tick yet.
+    private func route(forPort port: UInt16) -> Route? {
+        stateLock.withLock {
+            guard let route = portMap[port] else { return nil }
+            touchLocked(route)
+            return route
+        }
+    }
+
+    /// Whether THIS proxy currently holds the `127.0.0.1:<port>` socket, i.e.
+    /// dialing it would land back in our own listener. Gates the loopback
+    /// fallback candidate in `dial`.
+    private func ownsLoopbackPort(_ port: Int) -> Bool {
+        guard let port = UInt16(exactly: port) else { return false }
+        return stateLock.withLock { envPortListeners[port] != nil }
     }
 
     /// Build a routing table from a store envelope: every site and env is
@@ -320,7 +388,7 @@ public final class HTTPSProxy: @unchecked Sendable {
                 let params = NWParameters(tls: tlsOptions)
                 params.allowLocalEndpointReuse = true
                 let listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: candidate)!)
-                try await startListener(listener, port: candidate, forwardedProto: "https")
+                try await startListener(listener, context: InboundContext(forwardedProto: "https"))
                 stateLock.withLock { _boundPort = candidate; self.listener = listener }
                 bound = candidate
                 break
@@ -338,15 +406,21 @@ public final class HTTPSProxy: @unchecked Sendable {
                 let params = NWParameters.tcp
                 params.allowLocalEndpointReuse = true
                 let listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: candidate)!)
-                try await startListener(listener, port: candidate, forwardedProto: "http")
+                try await startListener(listener, context: InboundContext(forwardedProto: "http"))
                 stateLock.withLock { _boundHTTPPort = candidate; self.httpListener = listener }
                 break
             } catch { continue }
         }
 
         // Warm the container-IP cache so even the first requests dial direct;
-        // the refresh loop keeps it current from here on.
+        // the refresh loop keeps it current from here on. MUST precede the env
+        // port listeners: once we hold an env's port there is no loopback
+        // fallback, so a request arriving before the first IP refresh would have
+        // no upstream candidate at all.
         await refreshContainerIPs()
+        // Take ownership of every current env's `127.0.0.1:<port>` socket. From
+        // here the refresh loop keeps the set in sync.
+        syncEnvPortListeners()
 
         startRefreshLoop()
         startIdleLoop()
@@ -355,8 +429,9 @@ public final class HTTPSProxy: @unchecked Sendable {
 
     /// One `container list` per cycle → name→IP map for every running
     /// container. Failure leaves the previous cache in place (a stale hint is
-    /// self-healing via the failed-dial fallback; an emptied cache would demote
-    /// every request to the lossy forwarder).
+    /// self-healing: a failed dial invalidates it). Emptying the cache instead
+    /// would demote every SITE request to the lossy forwarder and leave every ENV
+    /// request with no upstream candidate at all.
     private func refreshContainerIPs() async {
         guard let records = try? await cli.list(all: false) else { return }
         var ips: [String: String] = [:]
@@ -396,6 +471,24 @@ public final class HTTPSProxy: @unchecked Sendable {
     }
 
     public func stop() {
+        stopServing()
+        // Full teardown gives the env sockets back too — anything else would
+        // leave a dead process's ports held for the next owner.
+        let listeners = stateLock.withLock { () -> [NWListener] in
+            let all = Array(envPortListeners.values)
+            envPortListeners.removeAll()
+            portBindWarned.removeAll()
+            return all
+        }
+        listeners.forEach { $0.cancel() }
+    }
+
+    /// Tear down the shared 443/80 listeners and the background loops, leaving the
+    /// per-env loopback listeners alone. This — not `stop()` — is what `reload()`
+    /// uses: a reload is a TLS identity swap, and it is triggered by a SAN change,
+    /// i.e. precisely when an env was just created. Dropping every running env's
+    /// socket to re-import a certificate would be a self-inflicted outage.
+    private func stopServing() {
         refreshTask?.cancel(); refreshTask = nil
         idleTask?.cancel(); idleTask = nil
         stateLock.withLock {
@@ -413,11 +506,26 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// the cert swaps without an app restart. Returns the (possibly new) port.
     @discardableResult
     public func reload() async throws -> UInt16 {
-        stop()
+        stopServing()
         return try await start()
     }
 
-    private func startListener(_ listener: NWListener, port: UInt16, forwardedProto: String) async throws {
+    /// What an accepted connection already knows about its own destination.
+    private struct InboundContext: Sendable {
+        /// Value for the injected `X-Forwarded-Proto`.
+        let forwardedProto: String
+        /// Set only for a proxy-owned env port listener: the route is fixed by
+        /// WHICH socket the request arrived on, so the Host header is irrelevant
+        /// (and for an env it is `127.0.0.1:<port>`, which maps to nothing).
+        let pinnedPort: UInt16?
+
+        init(forwardedProto: String, pinnedPort: UInt16? = nil) {
+            self.forwardedProto = forwardedProto
+            self.pinnedPort = pinnedPort
+        }
+    }
+
+    private func startListener(_ listener: NWListener, context: InboundContext) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             let resumed = ResumeOnce()
             listener.stateUpdateHandler = { state in
@@ -433,10 +541,107 @@ public final class HTTPSProxy: @unchecked Sendable {
                 }
             }
             listener.newConnectionHandler = { [weak self] connection in
-                self?.handle(inbound: connection, forwardedProto: forwardedProto)
+                self?.handle(inbound: connection, context: context)
             }
             listener.start(queue: queue)
         }
+    }
+
+    // MARK: - Proxy-owned env ports (issue #16 follow-through)
+
+    /// Open/close loopback listeners so the bound set matches `portMap`.
+    ///
+    /// Called from `start()` and from every refresh tick, which makes envs
+    /// appearing and disappearing a non-event: a newly created env's port is
+    /// claimed within ~3s, and a deleted env's is released just as quickly.
+    /// Deliberately NOT part of `reload()` (see `stopServing()`).
+    ///
+    /// Failure is always per-port and never fatal: a port we cannot take stays
+    /// unbound and is retried on the next tick, while every other listener — and
+    /// proxy startup itself — carries on.
+    private func syncEnvPortListeners() {
+        let (desired, bound) = stateLock.withLock {
+            (portMap, Set(envPortListeners.keys))
+        }
+        for port in bound.subtracting(desired.keys) {
+            let listener = stateLock.withLock { () -> NWListener? in
+                portBindWarned.remove(port)
+                return envPortListeners.removeValue(forKey: port)
+            }
+            listener?.cancel()
+        }
+        for port in Set(desired.keys).subtracting(bound) {
+            openEnvPortListener(port, slug: desired[port]?.slug)
+        }
+    }
+
+    /// Bind `127.0.0.1:<port>` for one env.
+    ///
+    /// The occupancy pre-check is what makes the PRE-UPGRADE case (an env
+    /// container started by an older build, still publishing this port through
+    /// Apple's forwarder) diagnose itself instead of turning into an opaque
+    /// listener failure. It is also cheap in both directions: a live listener
+    /// accepts instantly and a free port refuses instantly — the 250ms timeout
+    /// only applies to a port that neither accepts nor refuses.
+    private func openEnvPortListener(_ port: UInt16, slug: String?) {
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else { return }
+        if ProxyControl.isPortAccepting(port) {
+            warnPortUnavailable(port, slug: slug, reason: "something is already listening on it")
+            return
+        }
+        // Loopback ONLY — an env must not become reachable from the LAN just
+        // because this proxy, rather than the forwarder, holds its socket. The
+        // forwarder bound `127.0.0.1:<port>`; so do we.
+        let params = NWParameters.tcp
+        params.allowLocalEndpointReuse = true
+        params.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: nwPort)
+        guard let listener = try? NWListener(using: params) else {
+            warnPortUnavailable(port, slug: slug, reason: "the listener could not be created")
+            return
+        }
+        listener.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .ready:
+                self.stateLock.withLock { _ = self.portBindWarned.remove(port) }
+                Self.log.info("env port \(port, privacy: .public) is now served by the proxy")
+            case .failed(let error):
+                // Drop it so the next refresh tick retries, and say why once.
+                let stale = self.stateLock.withLock { self.envPortListeners.removeValue(forKey: port) }
+                stale?.cancel()
+                self.warnPortUnavailable(port, slug: slug, reason: "\(error)")
+            case .cancelled:
+                // Either our own teardown (already removed from the map) or an
+                // external cancel; make sure the map can't keep a dead listener.
+                _ = self.stateLock.withLock { self.envPortListeners.removeValue(forKey: port) }
+            default:
+                break
+            }
+        }
+        listener.newConnectionHandler = { [weak self] connection in
+            self?.handle(inbound: connection,
+                         context: InboundContext(forwardedProto: "http", pinnedPort: port))
+        }
+        stateLock.withLock { envPortListeners[port] = listener }
+        listener.start(queue: queue)
+    }
+
+    /// One warning per port until it binds. The overwhelmingly likely cause is an
+    /// env container from before this change, still publishing the port itself —
+    /// which resolves the moment that env is restarted once, so the message says
+    /// so rather than describing a permanent fault.
+    private func warnPortUnavailable(_ port: UInt16, slug: String?, reason: String) {
+        let fresh = stateLock.withLock { portBindWarned.insert(port).inserted }
+        guard fresh else { return }
+        let name = slug ?? "an environment"
+        let message = "proxy: could not take 127.0.0.1:\(port) for \(name) — \(reason). "
+            + "If that environment was started by an older build it still publishes the port itself; "
+            + "restart it (wp-container stop \(name) && wp-container start \(name)) and the proxy will "
+            + "take over. Retrying every few seconds."
+        Self.log.warning("\(message, privacy: .public)")
+        // Also on stderr: a headless `wp-container proxy serve` has no other
+        // channel, and this is exactly the case a user needs to be told about.
+        FileHandle.standardError.write(Data((message + "\n").utf8))
     }
 
     /// Refresh the host map from the store every few seconds, and re-issue +
@@ -450,6 +655,9 @@ public final class HTTPSProxy: @unchecked Sendable {
                 await self.refreshContainerIPs()
                 guard let env = try? await self.persistence.load() else { continue }
                 self.updateHostMap(routes: Self.routes(from: env))
+                // Diff the proxy-owned env ports against what is actually bound,
+                // which also RETRIES any port an earlier tick couldn't take.
+                self.syncEnvPortListeners()
                 let wanted = Set(Self.sanHosts(from: env))
                 let known = self.stateLock.withLock { self.coveredHosts }
                 if wanted != known {
@@ -617,9 +825,9 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// Minutes since the instance was last used, taking the LATEST of three
     /// signals — any one of them is enough to keep an instance alive:
     ///
-    /// 1. `lastAccess` — a request this proxy routed. Covers browser traffic to
-    ///    the proxied hostnames, and nothing else (a request straight to
-    ///    `127.0.0.1:<port>` never reaches us).
+    /// 1. `lastAccess` — a request this proxy routed: the proxied hostnames for
+    ///    anything, PLUS an env's own `127.0.0.1:<port>` URL, whose socket the
+    ///    proxy owns. Only a SITE's published port bypasses us.
     /// 2. `persisted` — `lastActivityAt` from the store, written by wp-cli, MCP
     ///    tool calls, magic-login and explicit starts in ANY process. This is the
     ///    signal that makes an agent-driven env trackable at all.
@@ -771,17 +979,17 @@ public final class HTTPSProxy: @unchecked Sendable {
 
     // MARK: - Connection handling
 
-    private func handle(inbound: NWConnection, forwardedProto: String) {
+    private func handle(inbound: NWConnection, context: InboundContext) {
         // One serial queue per accepted connection (shared with its upstream):
         // serial is a Network.framework requirement (see `queue`), per-pair so
         // one slow client can't head-of-line-block every other connection.
         let connQueue = DispatchQueue(label: "dev.wpcontainer.httpsproxy.conn")
         inbound.start(queue: connQueue)
-        readRequestHeader(from: inbound, accumulated: Data(), forwardedProto: forwardedProto, on: connQueue)
+        readRequestHeader(from: inbound, accumulated: Data(), context: context, on: connQueue)
     }
 
     /// Accumulate inbound bytes until the end of the HTTP header block (CRLFCRLF).
-    private func readRequestHeader(from inbound: NWConnection, accumulated: Data, forwardedProto: String, on connQueue: DispatchQueue) {
+    private func readRequestHeader(from inbound: NWConnection, accumulated: Data, context: InboundContext, on connQueue: DispatchQueue) {
         inbound.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, isComplete, error in
             guard let self else { return }
             var buffer = accumulated
@@ -790,7 +998,7 @@ public final class HTTPSProxy: @unchecked Sendable {
             if let range = Self.headerTerminator(in: buffer) {
                 let headerData = buffer.subdata(in: buffer.startIndex..<range.lowerBound)
                 let bodyStart = buffer.subdata(in: range.upperBound..<buffer.endIndex)
-                self.route(inbound: inbound, rawHeader: headerData, bufferedBody: bodyStart, forwardedProto: forwardedProto, on: connQueue)
+                self.route(inbound: inbound, rawHeader: headerData, bufferedBody: bodyStart, context: context, on: connQueue)
                 return
             }
             if error != nil || isComplete {
@@ -801,23 +1009,29 @@ public final class HTTPSProxy: @unchecked Sendable {
                 inbound.cancel()
                 return
             }
-            self.readRequestHeader(from: inbound, accumulated: buffer, forwardedProto: forwardedProto, on: connQueue)
+            self.readRequestHeader(from: inbound, accumulated: buffer, context: context, on: connQueue)
         }
     }
 
-    private func route(inbound: NWConnection, rawHeader: Data, bufferedBody: Data, forwardedProto: String, on connQueue: DispatchQueue) {
+    private func route(inbound: NWConnection, rawHeader: Data, bufferedBody: Data, context: InboundContext, on connQueue: DispatchQueue) {
         guard let header = String(data: rawHeader, encoding: .utf8) else { inbound.cancel(); return }
         let lines = header.components(separatedBy: "\r\n")
         guard let requestLine = lines.first, !requestLine.isEmpty else { inbound.cancel(); return }
 
         let host = Self.headerValue("Host", in: lines) ?? ""
-        guard let target = self.route(forHost: host) else {
+        // A request on a proxy-owned env port resolves by SOCKET, not by Host —
+        // `127.0.0.1:<port>` is what the env advertises and what WordPress has
+        // pinned, and it maps to no hostname at all. Everything downstream from
+        // here (dial, wake gate, waking/stopped/unresponsive pages, Retry-After)
+        // is then identical for both entry points, by construction.
+        let resolved = context.pinnedPort.map { self.route(forPort: $0) } ?? self.route(forHost: host)
+        guard let target = resolved else {
             self.sendHTMLResponse(to: inbound, status: "502 Bad Gateway",
                                   html: Self.unknownHostPage(host: host))
             return
         }
 
-        let rewritten = Self.rewriteHeaders(requestLine: requestLine, lines: Array(lines.dropFirst()), host: host, proto: forwardedProto)
+        let rewritten = Self.rewriteHeaders(requestLine: requestLine, lines: Array(lines.dropFirst()), host: host, proto: context.forwardedProto)
         let upstreamBytes: Data = {
             var bytes = Data(rewritten.utf8)
             bytes.append(bufferedBody)
@@ -825,14 +1039,23 @@ public final class HTTPSProxy: @unchecked Sendable {
         }()
 
         // Prefer dialing the container's vmnet IP directly (forwarder bypass —
-        // see `Route.containerName`); the published `127.0.0.1:<port>` is the
+        // see `Route.containerName`); the published `127.0.0.1:<port>` is a
         // last-resort candidate so unknown-IP and stale-IP cases still work.
-        var candidates: [(host: String, port: UInt16)] = []
+        //
+        // …but ONLY when the container actually publishes that port. For an env
+        // whose socket THIS proxy holds, `127.0.0.1:<port>` is our own listener:
+        // dialing it would relay the request straight back into ourselves and
+        // recurse until something ran out. Ownership is read from the live
+        // listener table rather than from `Route.isEnv`, so a pre-upgrade env we
+        // failed to bind keeps its working forwarder fallback.
+        var candidates: [DialCandidate] = []
         if let name = target.containerName,
            let ip = stateLock.withLock({ containerIPs[name] }) {
-            candidates.append((ip, target.containerPort))
+            candidates.append(DialCandidate(host: ip, port: target.containerPort, isContainerIP: true))
         }
-        candidates.append(("127.0.0.1", UInt16(target.port)))
+        if !ownsLoopbackPort(target.port), let port = UInt16(exactly: target.port) {
+            candidates.append(DialCandidate(host: "127.0.0.1", port: port, isContainerIP: false))
+        }
         // Whether the client would understand an HTML interstitial. An asset
         // fetch, an XHR or `curl` gets a terse machine-readable 503 instead — a
         // page of markup where a stylesheet or a JSON body was expected is worse
@@ -854,17 +1077,30 @@ public final class HTTPSProxy: @unchecked Sendable {
         return lower.contains("*/*") && !lower.contains("application/json")
     }
 
-    /// Try each upstream candidate in order; only when the LAST one (always the
-    /// published localhost port) is down does the friendly "site is stopped"
-    /// page (#6) go out. Connect explicitly and only forward once the upstream
-    /// is READY. On 127.0.0.1 a refused connect surfaces as
-    /// `.waiting(ECONNREFUSED)` (Network.framework treats it as transient and
-    /// would retry forever), so `.waiting` is treated as down — correct for
-    /// localhost where a live listener accepts immediately. A dead vmnet IP
-    /// instead just sits in `.preparing` while ARP times out, so every attempt
-    /// also carries a 2s deadline; a failed direct dial invalidates the IP hint
-    /// before falling through.
-    private func dial(candidates: ArraySlice<(host: String, port: UInt16)>,
+    /// One upstream address to try, and whether it is the container's own vmnet IP
+    /// (as opposed to a published loopback port). The flag replaces the old
+    /// `candidates.count > 1` heuristic for "was this a direct dial?": with the
+    /// loopback fallback now conditional, a container-IP dial is frequently the
+    /// ONLY candidate, and stale-IP invalidation must still fire for it.
+    private struct DialCandidate: Sendable {
+        let host: String
+        let port: UInt16
+        let isContainerIP: Bool
+    }
+
+    /// Try each upstream candidate in order; only when the last one is down does
+    /// the friendly "site is stopped" page (#6) — or, since #16, the waking page —
+    /// go out. An EMPTY candidate list takes the same path immediately, which is
+    /// what a parked env whose IP we don't know looks like.
+    ///
+    /// Connect explicitly and only forward once the upstream is READY. On
+    /// 127.0.0.1 a refused connect surfaces as `.waiting(ECONNREFUSED)`
+    /// (Network.framework treats it as transient and would retry forever), so
+    /// `.waiting` is treated as down — correct for localhost where a live listener
+    /// accepts immediately. A dead vmnet IP instead just sits in `.preparing`
+    /// while ARP times out, so every attempt also carries a 2s deadline; a failed
+    /// container-IP dial invalidates the IP hint before falling through.
+    private func dial(candidates: ArraySlice<DialCandidate>,
                       inbound: NWConnection, upstreamBytes: Data,
                       host: String, target: Route, wantsHTML: Bool, on connQueue: DispatchQueue) {
         guard let candidate = candidates.first else {
@@ -885,7 +1121,7 @@ public final class HTTPSProxy: @unchecked Sendable {
             }
             return
         }
-        let isDirect = candidates.count > 1
+        let isDirect = candidate.isContainerIP
         let upstream = NWConnection(host: NWEndpoint.Host(candidate.host),
                                     port: NWEndpoint.Port(rawValue: candidate.port)!, using: .tcp)
         let decided = ResumeOnce()

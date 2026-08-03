@@ -944,7 +944,19 @@ public actor SiteLifecycle {
         }
     }
 
-    /// Wait until the container's web server answers on 127.0.0.1:<port>.
+    /// Wait until the container's web server answers.
+    ///
+    /// WHERE it probes depends on who owns the host port (issue #16
+    /// follow-through):
+    ///
+    /// - A PUBLISHER (a site) is probed at `inst.localURL` — the forwarder binds
+    ///   the moment the container starts, so the port is the readiness signal.
+    /// - A NON-PUBLISHER (a worktree env) has no host port of its own: the reverse
+    ///   proxy owns `127.0.0.1:<port>`. Probing that would make every env start
+    ///   depend on a live proxy, and would report the PROXY's health rather than
+    ///   the container's. So it is probed directly at the container's vmnet IP on
+    ///   port 80 — exactly what the proxy will relay to — which keeps env starts
+    ///   fully independent of proxy liveness.
     ///
     /// The probe's ONLY job is detecting that apache/php is up, so ANY HTTP
     /// response counts — 200, 3xx, even 500. Crucially it must NOT follow
@@ -960,7 +972,19 @@ public actor SiteLifecycle {
     /// add up to 2s of pure perceived latency.
     private func waitForHTTP(_ inst: any RunnableInstance, timeout: Duration = .seconds(120)) async throws {
         let deadline = ContinuousClock.now.advanced(by: timeout)
-        var request = URLRequest(url: inst.localURL)
+        let probeURL: URL
+        if inst.publishesPort {
+            probeURL = inst.localURL
+        } else {
+            // The IP is assigned a moment after `container run` returns, so poll
+            // briefly for it rather than failing on the first empty inspect.
+            guard let ip = await containerIP(inst.wpContainerName, deadline: deadline),
+                  let url = URL(string: "http://\(ip):80/") else {
+                throw LifecycleError.httpNotReady(observed: "the container never reported an IP address")
+            }
+            probeURL = url
+        }
+        var request = URLRequest(url: probeURL)
         request.timeoutInterval = 5
         request.httpMethod = "HEAD"
         // What the probe saw, for a self-diagnosing timeout message. Heavy
@@ -995,6 +1019,21 @@ public actor SiteLifecycle {
             delay = min(delay * 2, .seconds(1))
         }
         throw LifecycleError.httpNotReady(observed: observed)
+    }
+
+    /// The container's vmnet IP, polled until it appears (IPs are assigned
+    /// asynchronously, shortly after `container run` returns) or `deadline`
+    /// passes. Capped at 15s of its own: an instance that has no IP by then has
+    /// a real problem, and the caller's 120s budget belongs to the HTTP probe.
+    private func containerIP(_ name: String, deadline: ContinuousClock.Instant) async -> String? {
+        let ownDeadline = min(deadline, ContinuousClock.now.advanced(by: .seconds(15)))
+        var delay = Duration.milliseconds(200)
+        while ContinuousClock.now < ownDeadline {
+            if let ip = try? await cli.ipAddress(of: name), !ip.isEmpty { return ip }
+            try? await Task.sleep(for: delay)
+            delay = min(delay * 2, .seconds(1))
+        }
+        return try? await cli.ipAddress(of: name)
     }
 
     /// URLSession that REFUSES to follow redirects (see `waitForHTTP`), with
