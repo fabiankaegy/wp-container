@@ -136,7 +136,7 @@ public actor WorktreeEnvService {
     ///     large database, where the CoW clone of a stopped parent's `database/`
     ///     folder beats a logical dump+restore. Also chosen automatically when
     ///     the safety preflight can't confirm the project honors
-    ///     `WORDPRESS_DB_NAME` (see `sharedDatabaseIsSafe`).
+    ///     `WORDPRESS_DB_NAME` (see `WPConfigService.dbNameFollowsEnvironment`).
     ///   - siblingEnvs: the parent's CURRENT env records. Pass them to enable the
     ///     shared path's orphan sweep, which needs to tell a live env's schema
     ///     from one left behind by a deletion that happened while the DB server
@@ -330,8 +330,17 @@ public actor WorktreeEnvService {
     /// one moment where the server is guaranteed up AND the caller has the store
     /// in hand. `keeping` is the parent's current env records; `plus` is the
     /// schema being created right now (its record may not be persisted yet).
+    ///
+    /// A live env's schema is protected by its PERSISTED name and, additionally,
+    /// by the name its slug would generate. The second set matters because an env
+    /// being created concurrently in another process has a store record (the port
+    /// reservation) whose schema field isn't written yet — without it we'd sweep
+    /// away a sibling's schema mid-creation. It is a do-not-drop guard only;
+    /// nothing ever *operates* on a recomputed name.
     private func sweepOrphanSchemas(dbHost: String, keeping envs: [WorktreeEnv], plus current: String) async {
-        let claimed = Set(envs.compactMap(\.databaseSchema)).union([current])
+        let claimed = Set(envs.compactMap(\.databaseSchema))
+            .union(envs.map { WorktreeEnv.schemaName(forEnvSlug: $0.envSlug) })
+            .union([current])
         guard let output = try? await cli.runCapturing(SiteRecipe.listEnvDatabasesArgs(dbHost: dbHost)),
               output.succeeded else { return }
         let found = output.stdout
