@@ -954,7 +954,22 @@ public final class AppViewModel {
 
     /// Coupled lifecycle (§2b): stopping a site also stops its worktree envs.
     public func stopSite(_ site: Site) {
-        Task { await lifecycle.stopSiteWithEnvs(site, envs: store.envs(forSite: site.id)) }
+        Task {
+            let envs = store.envs(forSite: site.id)
+            await lifecycle.stopSiteWithEnvs(site, envs: envs)
+            await surfaceStopWarnings([site.id] + envs.map(\.id))
+        }
+    }
+
+    /// Surface teardown problems the stop path recorded (issue #16): a container
+    /// that survived both `container stop` and `container delete` is still
+    /// holding its VM's memory, which is precisely what the user is stopping to
+    /// reclaim — so it goes in the error banner rather than nowhere. Matches how
+    /// `startSiteCoupled` surfaces non-fatal start warnings.
+    private func surfaceStopWarnings(_ ids: [UUID]) async {
+        var warnings: [String] = []
+        for id in ids { warnings.append(contentsOf: await lifecycle.drainWarnings(for: id)) }
+        if !warnings.isEmpty { lastError = warnings.joined(separator: "\n") }
     }
 
     /// Whether anything this app started is currently running — the quit hook
@@ -1080,9 +1095,12 @@ public final class AppViewModel {
             await lifecycle.stop(env)
             // Retire a shared DB container nothing needs any more, or a stopped
             // env would leave its parent's ~470 MB server behind (#17).
+            var ids = [env.id]
             if let parent = store.site(id: env.parentSiteID) {
                 await lifecycle.stopSharedDatabaseIfUnused(parent: parent)
+                ids.append(parent.id)
             }
+            await surfaceStopWarnings(ids)
         }
     }
 
