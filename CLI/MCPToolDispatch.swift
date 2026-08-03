@@ -389,7 +389,9 @@ enum MCPToolDispatch {
         // Envs in the fan-out are served by the proxy, not by a published port
         // (issue #16 follow-through), so an absent proxy is worth saying out loud.
         var warnings = outcome.warnings
-        if !envs.isEmpty, let warning = ProxyControl.envProxyWarning() { warnings.append(warning) }
+        // Per-env: one port may be served while another collides with a
+        // pre-upgrade container still publishing it.
+        warnings.append(contentsOf: Set(envs.compactMap { ProxyControl.envProxyWarning(port: $0.port) }))
         if !outcome.envErrorMessages.isEmpty || !warnings.isEmpty {
             var payload: [String: Any] = ["slug": site.slug, "status": "running"]
             if !outcome.envErrorMessages.isEmpty { payload["envWarnings"] = outcome.envErrorMessages }
@@ -506,7 +508,7 @@ enum MCPToolDispatch {
         var warnings = await ctx.lifecycle.drainWarnings(for: env.id)
         // The returned `url` is the proxy's to serve (issue #16 follow-through) —
         // tell the caller now rather than letting it discover a refused connection.
-        if let warning = ProxyControl.envProxyWarning() { warnings.append(warning) }
+        if let warning = ProxyControl.envProxyWarning(port: env.port) { warnings.append(warning) }
         if !warnings.isEmpty { payload["warnings"] = warnings }
         return MCPResult.json(payload)
     }

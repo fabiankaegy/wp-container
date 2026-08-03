@@ -48,17 +48,28 @@ struct LoginCommand: AsyncParsableCommand {
             let alreadyActive = MagicLoginService.isLoginActive(for: inst)
             try PrependService.ensure(for: inst)
             try MagicLoginService.ensureLoginHandler(for: inst)
-            let warning = alreadyActive ? nil :
-                "This site was started before magic-login support; restart it for the link to work: wp-container stop \(target) && wp-container start \(target)"
+            var warnings: [String] = []
+            if !alreadyActive {
+                warnings.append("This site was started before magic-login support; restart it for the link to work: wp-container stop \(target) && wp-container start \(target)")
+            }
+            // The link we are about to print for an ENV points at the URL the proxy
+            // serves (issue #16 follow-through). A link that can't be opened is a
+            // dead end worth naming here, not just at start time — this command is
+            // frequently the ONLY one an agent runs before handing a URL to a human.
+            if case .env(let e) = resolved, let warning = ProxyControl.envProxyWarning(port: e.port) {
+                warnings.append(warning)
+            }
             let link = try await MagicLoginService.issueLoginLink(for: inst, publicURL: publicURL, dbHost: dbHost,
                                                                  cli: ctx.cli, user: user, mailpitHost: mailHost)
             if output.json {
                 emitLine(CLIJSON.string(LoginLinkOutput(url: link.url.absoluteString, user: link.user,
-                                                        expiresAt: link.expiresAt, warning: warning)))
+                                                        expiresAt: link.expiresAt,
+                                                        warning: warnings.first,
+                                                        warnings: warnings.isEmpty ? nil : warnings)))
             } else {
                 emitLine(link.url.absoluteString)
                 emitLine("One-time link for \(link.user); expires in 15 minutes. Open it in a browser for a logged-in wp-admin session.")
-                if let warning { emitLine("warning: \(warning)") }
+                for warning in warnings { emitLine("warning: \(warning)") }
             }
             if open {
                 let p = Process()
@@ -79,5 +90,9 @@ private struct LoginLinkOutput: Encodable {
     let url: String
     let user: String
     let expiresAt: Date
+    /// The first warning, kept for compatibility with anything already reading it.
     let warning: String?
+    /// All warnings — there can now be two (a pre-magic-login container AND a
+    /// proxy that isn't serving this env's port).
+    let warnings: [String]?
 }

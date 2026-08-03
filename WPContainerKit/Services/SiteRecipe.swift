@@ -294,10 +294,16 @@ public enum SiteRecipe {
     /// is published to `webPort` on localhost.
     ///
     /// Mailpit's web port stays PUBLISHED even for a worktree env, whose wp
-    /// container does not (issue #16 follow-through). Deliberate: mailbox traffic
-    /// is a handful of small requests, so the forwarder's lossiness never bites,
-    /// and the mailbox is never a wake trigger or an idle-clock signal — so
-    /// nothing would be gained by moving it behind a proxy-owned socket.
+    /// container does not (issue #16 follow-through). Deliberate: mailbox traffic is
+    /// a handful of small requests, so the forwarder's lossiness never bites, and
+    /// the mailbox is never a WAKE trigger (`HTTPSProxy.resolveDownstream` returns
+    /// `.mailboxUnavailable`, never `.waking`) — so a proxy-owned socket would buy
+    /// nothing here.
+    ///
+    /// Note what this does NOT mean: a request to `<slug>-mail.localhost` DOES go
+    /// through the proxy and DOES stamp the env's idle clock, because
+    /// `route(forHost:)` calls `touchLocked` for every route including mailbox ones.
+    /// Only the direct `127.0.0.1:<mailpitPort>` URL bypasses it.
     public static func runMailpitArgs(_ inst: any RunnableInstance, webPort: Int) -> [String] {
         var args = ["run", "-d", "--rm", "--name", inst.mailContainerName]
         args += resourceArgs(for: inst)

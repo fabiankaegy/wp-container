@@ -170,17 +170,37 @@ struct HTTPSStatus: AsyncParsableCommand {
         let generated = await ca.isGenerated
         let trusted = await ca.isCATrusted()
         let proxy = ProxyControl.current()
-        let payload: [String: Any] = [
+        // Which env ports the live proxy actually holds (issue #16
+        // follow-through). Envs have no published port of their own, so this is
+        // the difference between "the environment's URL works" and "it silently
+        // doesn't" — and there is nowhere else to see it.
+        let envPorts = proxy != nil ? ProxyControl.envPorts() : nil
+        var payload: [String: Any] = [
             "caGenerated": generated,
             "caTrusted": trusted,
             "caPath": await ca.caCertURL.path,
             "proxyRunning": proxy != nil,
             "proxyPort": proxy?.port.map { Int($0) } as Any? ?? NSNull(),
         ]
+        if let envPorts {
+            payload["envPortsServed"] = envPorts.ownedPorts
+            payload["envPortsUnavailable"] = envPorts.conflictedPorts
+        }
         if output.json { emitLine(MCPJSON.string(payload)) }
         else {
             emitLine("CA generated: \(generated)  trusted: \(trusted)")
             emitLine("Proxy running: \(proxy != nil)\(proxy?.port.map { " on port \($0)" } ?? "")")
+            if let envPorts {
+                let served = envPorts.ownedPorts.map(String.init).joined(separator: ", ")
+                emitLine("Environment ports served: \(served.isEmpty ? "none" : served)")
+                if !envPorts.conflictedPorts.isEmpty {
+                    let stuck = envPorts.conflictedPorts.map(String.init).joined(separator: ", ")
+                    emitLine("Environment ports NOT served: \(stuck) — those URLs and their "
+                             + "idle-stop are dead. An environment started by an older build still "
+                             + "publishes its own port (stop and start it once); otherwise check "
+                             + "`lsof -nP -iTCP:<port> -sTCP:LISTEN`.")
+                }
+            }
         }
     }
 }

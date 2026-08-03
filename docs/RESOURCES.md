@@ -94,11 +94,16 @@ the next section.
 | Counted | Not counted |
 |---|---|
 | Requests to `https://<slug>.localhost` or a custom domain | Requests to a **site's** `http://127.0.0.1:<port>` |
-| Requests to an **environment's** `http://127.0.0.1:<port>` | Anything inside the container you started yourself (`container exec`) |
+| Requests to an **environment's** `http://127.0.0.1:<port>` | Requests to a mailbox's direct `http://127.0.0.1:<mailpitPort>` |
+| Requests to `<slug>-mail.localhost` (the mailbox is proxied too) | Anything inside the container you started yourself (`container exec`) |
 | `wp-container wp …` (and the `wp` shim/router) | |
 | MCP tool calls scoped to the site/env | |
 | `wp-container login` / the `login_link` MCP tool | |
 | An explicit start (CLI, MCP `site_start`, the app's Start button) | |
+
+Mailbox requests count as activity (they pass through the proxy like any other
+route) but never *wake* anything: an unread inbox says nothing about whether
+WordPress should be booted.
 
 Only traffic through the proxy is visible to it; the other signals are recorded
 as a `lastActivityAt` stamp in `sites.json` (at most one write a minute) so they
@@ -136,16 +141,27 @@ Agents: `get_site_info` and `worktree_list` report `idleStopMinutes` /
 them — so an agent that will leave an environment idle for longer than the
 timeout while still needing it can turn it off, and back on when it's done.
 
-### Upgrading: environments created before this change
+### When the proxy can't take an environment's port
 
 An environment whose container is still *running* from an older build publishes
-its own port, so the proxy can't take that socket. It logs one warning per port
-(also on stderr for `wp-container proxy serve`), keeps everything else working —
-the environment stays reachable through its own published port — and retries
-every few seconds. Such an environment is also **never idle-stopped**: the proxy
-can't see traffic to a port it doesn't own, so it refuses to judge it idle at all.
+its own port, so the proxy can't take that socket. The same thing happens if any
+other process is holding it. Either way:
+
+- The proxy logs one warning per port (also on stderr for
+  `wp-container proxy serve`) and retries every few seconds.
+- A pre-upgrade environment keeps working through its own published port. One
+  squatted by an unrelated process does not — its URL serves whatever that process
+  is, which is why this is reported rather than left to os_log.
+- Such an environment is **never idle-stopped**: the proxy can't see traffic to a
+  port it doesn't own, so it refuses to judge it idle at all.
+- `wp-container https status` lists which environment ports the proxy serves and
+  which it couldn't take; `wp-container start <env>`, `worktree create` and
+  `wp-container login <env>` say so too, and the app flags it on the environment's
+  detail pane and Idle stop card.
+
 Stop and start that environment once and the proxy takes the socket, from which
-point the timeout applies.
+point the URL, the idle timeout and wake-on-request all apply. For a foreign
+squatter, find it with `lsof -nP -iTCP:<port> -sTCP:LISTEN`.
 
 Expected impact once enabled across a fleet: memory cost becomes roughly
 `~500 MB × environments touched in the last N minutes` instead of
@@ -234,9 +250,10 @@ costs whatever the handful you actually used in the last 15 minutes cost.
    in progress.
 6. **The idle clock is per-proxy-process and in memory.** "When did I first see
    this running" is an observation, not a stored fact, so restarting the app or
-   the headless proxy — or a certificate re-issue, which reloads the listener —
-   reseeds every clock, and nothing can be stopped for at least one full timeout
-   afterwards. An instance started while no proxy was running is first seen when
+   the headless proxy reseeds every clock, and nothing can be stopped for at least
+   one full timeout afterwards. (A certificate re-issue does *not* — it rebinds the
+   443/80 listeners and leaves the clocks, and the per-environment sockets, alone.)
+   An instance started while no proxy was running is first seen when
    one next comes up, and gets a fresh window rather than an immediate stop. The
    persisted `lastActivityAt` stamps do survive restarts; only the
    first-seen-running observation doesn't. Erring toward "leave it running" is
@@ -250,12 +267,24 @@ costs whatever the handful you actually used in the last 15 minutes cost.
    by the container, so its URL only answers while a proxy is running. Localhost
    only either way — other devices on your network can't reach sites or
    environments directly. LAN sharing would need an explicit opt-in feature.
+9. **Environment URLs are HTTP/1.1 with `Connection: close` — no keep-alive, no
+   HTTP upgrade, and no bypass.** The proxy serves one request per connection and
+   rewrites the header, so **WebSockets to an environment URL cannot work** and
+   every request pays a fresh TCP connect. That's fine for serving WordPress, and
+   a site's own published `127.0.0.1:<port>` is unaffected (it doesn't go through
+   the proxy at all), but it is a real limit on environments specifically. Accepted
+   deliberately rather than fixed: keep-alive and upgrade support means connection
+   pooling and framing state in the proxy, and the truncation bugs that shaped the
+   current relay are a warning about how carefully that has to be done. If you need
+   a WebSocket against a branch checkout, run it on the parent site.
 
 ## Inspecting usage yourself
 
 ```bash
 wp-container idle <slug>     # the auto-stop timeout in force for one instance
+wp-container https status    # proxy liveness + which environment ports it serves
 container ls                 # running containers + configured CPU/RAM caps
 container stats              # live resource usage per container
 ps axo rss,comm | grep Virtualization   # real host memory per VM
+lsof -nP -iTCP:<env port> -sTCP:LISTEN  # who actually holds an environment's port
 ```
