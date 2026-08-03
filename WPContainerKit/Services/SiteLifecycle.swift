@@ -91,9 +91,10 @@ public actor SiteLifecycle {
         self.continuation = cont
     }
 
-    /// Record image-pull warnings for an instance (internal bookkeeping; see
-    /// `drainWarnings`).
-    private func recordWarnings(_ new: [String], for id: UUID) {
+    /// Record non-fatal warnings against an instance, for a caller to `drain`
+    /// and surface however suits its layer. Used for image-pull fallbacks
+    /// (issue #18) and the shared-database safety fallback (issue #17).
+    public func recordWarnings(_ new: [String], for id: UUID) {
         guard !new.isEmpty else { return }
         pendingWarnings[id, default: []].append(contentsOf: new)
     }
@@ -260,12 +261,16 @@ public actor SiteLifecycle {
             owner = nil
         }
         try await ensureDatabaseContainer(named: inst.dbContainerName, owner: owner)
+        return try await databaseAddresses(named: inst.dbContainerName)
+    }
 
+    /// Poll a DB container's (IP, gateway) until assigned (15s deadline).
+    private func databaseAddresses(named name: String) async throws -> (ip: String, gateway: String?) {
         var delay = Duration.milliseconds(100)
         let deadline = ContinuousClock.now.advanced(by: .seconds(15))
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
-            if let record = try await cli.inspect(inst.dbContainerName).first,
+            if let record = try await cli.inspect(name).first,
                let ip = record.ipAddress, !ip.isEmpty {
                 return (ip, record.gatewayAddress)
             }
@@ -273,6 +278,21 @@ public actor SiteLifecycle {
             delay = min(delay * 2, .milliseconds(500))
         }
         throw LifecycleError.databaseIPUnavailable
+    }
+
+    /// Boot the DB container OWNED by `owner` if it isn't already up, and return
+    /// its IP once the server accepts connections.
+    ///
+    /// Lets `WorktreeEnvService` create and seed a shared env's schema (issue
+    /// #17) BEFORE the env's own wp container starts, so the env is never served
+    /// from an empty database. Idempotent, and deduped against the concurrent
+    /// boots a coupled start issues.
+    public func prepareDatabaseHost(owner: any RunnableInstance) async throws -> String {
+        _ = try? await images.ensure(SiteRecipe.databaseImage, policy: .ifMissing)
+        try await ensureDatabaseContainer(named: owner.dbContainerName, owner: owner)
+        let (ip, _) = try await databaseAddresses(named: owner.dbContainerName)
+        try await waitForDatabaseReady(owner, dbHost: ip)
+        return ip
     }
 
     /// Boot the named DB container if it isn't already running, at most ONCE per

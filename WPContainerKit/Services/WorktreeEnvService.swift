@@ -131,6 +131,18 @@ public actor WorktreeEnvService {
     ///     assets, provisioned mu-plugins/plugins) so the env boots into a
     ///     working site with no manual `composer install`/`npm run build`
     ///     preamble (issue #14). Pass false for a bare checkout.
+    ///   - isolatedDB: opt OUT of the shared-database default (issue #17) and
+    ///     give this env its own MariaDB container — worth it only for a very
+    ///     large database, where the CoW clone of a stopped parent's `database/`
+    ///     folder beats a logical dump+restore. Also chosen automatically when
+    ///     the safety preflight can't confirm the project honors
+    ///     `WORDPRESS_DB_NAME` (see `sharedDatabaseIsSafe`).
+    ///   - siblingEnvs: the parent's CURRENT env records. Pass them to enable the
+    ///     shared path's orphan sweep, which needs to tell a live env's schema
+    ///     from one left behind by a deletion that happened while the DB server
+    ///     was down. nil (the default) SKIPS the sweep — a caller that can't
+    ///     supply the real list must never make us mistake live schemas for
+    ///     orphans.
     public func create(
         parent: Site,
         parentIsRunning: Bool,
@@ -139,7 +151,9 @@ public actor WorktreeEnvService {
         from: String?,
         port: Int,
         reserved: WorktreeEnv? = nil,
-        provision: Bool = true
+        provision: Bool = true,
+        isolatedDB: Bool = false,
+        siblingEnvs: [WorktreeEnv]? = nil
     ) async throws -> WorktreeEnv {
         let fm = FileManager.default
         // Reject `..`-laden rel paths outright (#8): the shadow mount would
@@ -159,6 +173,24 @@ public actor WorktreeEnvService {
         // the env gets its own ES container; a fresh ES index is fine.
         var env = reserved ?? Self.descriptor(parent: parent, repoRelPath: repoRelPath,
                                               branch: branch, port: port)
+
+        // Shared database by default (issue #17): the env becomes an extra
+        // SCHEMA on the parent's existing MariaDB container instead of running a
+        // ~470 MB VM of its own. Refused when the project's wp-config.php
+        // wouldn't honor WORDPRESS_DB_NAME — that would silently write into the
+        // PARENT's database, so we degrade to an isolated container and say so.
+        var useSharedDB = !isolatedDB
+        if useSharedDB, !WPConfigService.dbNameFollowsEnvironment(wordpressFolder: parent.wordpressFolder) {
+            useSharedDB = false
+            await lifecycle.recordWarnings([
+                "\(parent.slug) defines DB_NAME literally in wp-config.php instead of reading \(WPConfigService.dbNameEnvironmentVariable), so this environment got its own database container rather than a schema on the parent's server.",
+            ], for: env.id)
+        }
+        if useSharedDB {
+            env.adoptSharedDatabase(schema: WorktreeEnv.schemaName(forEnvSlug: env.envSlug))
+        }
+        let sharedSchema = env.sharedDatabase ? env.databaseSchema : nil
+
         let envPath = env.envPath
         let worktreePath = env.worktreePath
 
@@ -181,14 +213,29 @@ public actor WorktreeEnvService {
             try await SiteFolders.cloneCopyOnWrite(from: parent.wordpressFolder,
                                                    to: envPath.appendingPathComponent("wordpress", isDirectory: true))
 
-            // 3. Clone database.
-            let envDatabase = envPath.appendingPathComponent("database", isDirectory: true)
-            if parentIsRunning {
+            // 3. Clone the database.
+            if let sharedSchema {
+                // Shared path (issue #17): no `database/` folder and no DB
+                // container for the env at all. Bring up the PARENT's server
+                // (only its db container needs to be running — not its wp
+                // container), then create + grant + fill the env's schema
+                // entirely server-side, before the env's wp container starts.
+                let parentDBHost = try await lifecycle.prepareDatabaseHost(owner: parent)
+                try await cli.run(SiteRecipe.createEnvDatabaseArgs(dbHost: parentDBHost, schema: sharedSchema))
+                // The server is guaranteed up right here, so when the caller
+                // hands us the live env list this is the natural place to reap
+                // schemas whose env was deleted while the server was down.
+                if let siblingEnvs {
+                    await sweepOrphanSchemas(dbHost: parentDBHost, keeping: siblingEnvs, plus: sharedSchema)
+                }
+                try await cli.run(SiteRecipe.cloneDatabaseArgs(dbHost: parentDBHost,
+                                                               from: SiteRecipe.dbName, to: sharedSchema))
+            } else if parentIsRunning {
                 // Live path handled after the env DB is up (export/import below).
-                try fm.createDirectory(at: envDatabase, withIntermediateDirectories: true)
+                try fm.createDirectory(at: env.databaseFolder, withIntermediateDirectories: true)
             } else {
                 // Fast path: copy-on-write the parent's data directory.
-                try await SiteFolders.cloneCopyOnWrite(from: parent.databaseFolder, to: envDatabase)
+                try await SiteFolders.cloneCopyOnWrite(from: parent.databaseFolder, to: env.databaseFolder)
             }
 
             // Pre-create the shadow mountpoint intentionally. VALIDATED gotcha: if
@@ -199,16 +246,20 @@ public actor WorktreeEnvService {
             let mountpoint = env.wordpressFolder.appendingPathComponent(repoRelPath, isDirectory: true)
             try? fm.createDirectory(at: mountpoint, withIntermediateDirectories: true)
 
-            // 4. Start env containers (shared recipe + shadow mount).
-            let dbHost = try await lifecycle.startContainers(env)
+            // 4. Start env containers (shared recipe + shadow mount). For a
+            // shared-database env the parent is the `dbProvider`, so no DB
+            // container of its own is ever created.
+            let dbHost = try await lifecycle.startContainers(env, dbProvider: parent)
 
             // The wp-cli work below (live DB import, URL fixes) genuinely
             // needs the DB accepting connections — the shared start path no
             // longer gates on DB readiness (issue #9), so gate explicitly here.
             try await lifecycle.waitForDatabaseReady(env, dbHost: dbHost)
 
-            // 3b. Live DB transfer if the parent was running.
-            if parentIsRunning {
+            // 3b. Live DB transfer if the parent was running. Shared envs were
+            // already filled server-side above (no host staging, no dump
+            // buffered through a Swift String).
+            if sharedSchema == nil, parentIsRunning {
                 try await liveDatabaseTransfer(parent: parent, env: env, envDBHost: dbHost)
             }
 
@@ -224,6 +275,10 @@ public actor WorktreeEnvService {
             // KEEP the branch), and delete `.envs/<b>`. The caller only writes the
             // store entry on success, so there is nothing to unwind there.
             await lifecycle.deleteContainers(env) // stops+deletes, emits .stopped
+            // A schema we may have already created on the parent's server is
+            // part of the half-created env — unwind it too, or the next create
+            // would clone into a stale one.
+            await dropSharedSchema(of: env, parent: parent)
             try? await git.worktreeRemove(repo: repoURL, path: worktreePath, force: true)
             try? fm.removeItem(at: envPath)
             throw WorktreeError.creationFailed(short: WorktreeError.firstLine(of: error),
@@ -231,9 +286,13 @@ public actor WorktreeEnvService {
         }
     }
 
-    /// Deletion: stop containers → git worktree remove → delete `.envs/<b>`.
+    /// Deletion: stop containers → drop the shared schema → git worktree remove
+    /// → delete `.envs/<b>`.
     public func delete(_ env: WorktreeEnv, parent: Site?, keepBranch: Bool, keepWorktree: Bool) async {
+        // Never the parent's DB container: `deleteContainers` skips it for a
+        // shared-database env (issue #17).
         await lifecycle.deleteContainers(env)
+        await dropSharedSchema(of: env, parent: parent)
         if !keepWorktree, let parent {
             let repoURL = parent.repoURL(forRelativePath: env.repoRelPath)
             try? await git.worktreeRemove(repo: repoURL, path: env.worktreePath, force: true)
@@ -242,6 +301,46 @@ public actor WorktreeEnvService {
         // Note: `keepBranch` is honored by NOT deleting the git branch here; we
         // never delete branches (worktree remove leaves the branch intact).
         _ = keepBranch
+    }
+
+    // MARK: - Shared schema teardown (issue #17)
+
+    /// Drop a shared-database env's own schema off the parent's server.
+    ///
+    /// Three guards, because dropping the wrong name here would destroy a
+    /// sibling env or the parent site itself (trade-off #3): the env must
+    /// actually be in shared mode, the stored schema must be present, and it must
+    /// pass `WorktreeEnv.isManagedSchemaName` (a `wpc_`-prefixed identifier — so
+    /// never `wordpress`). Best-effort by design: if the parent's DB container is
+    /// down there is nothing to connect to, and the schema is left to the
+    /// create-time orphan sweep.
+    private func dropSharedSchema(of env: WorktreeEnv, parent: Site?) async {
+        guard env.sharedDatabase, let schema = env.databaseSchema,
+              WorktreeEnv.isManagedSchemaName(schema), schema != SiteRecipe.dbName,
+              let parent, parent.dbContainerName == env.dbContainerName else { return }
+        guard let dbHost = (try? await cli.ipAddress(of: env.dbContainerName)) ?? nil,
+              !dbHost.isEmpty else { return }
+        _ = try? await cli.run(SiteRecipe.dropEnvDatabaseArgs(dbHost: dbHost, schema: schema))
+    }
+
+    /// Drop every `wpc_*` schema on this server that no live env record claims.
+    ///
+    /// Deleting an env while the parent's DB container is down can't drop its
+    /// schema, so orphans accumulate. `create` runs this sweep because it is the
+    /// one moment where the server is guaranteed up AND the caller has the store
+    /// in hand. `keeping` is the parent's current env records; `plus` is the
+    /// schema being created right now (its record may not be persisted yet).
+    private func sweepOrphanSchemas(dbHost: String, keeping envs: [WorktreeEnv], plus current: String) async {
+        let claimed = Set(envs.compactMap(\.databaseSchema)).union([current])
+        guard let output = try? await cli.runCapturing(SiteRecipe.listEnvDatabasesArgs(dbHost: dbHost)),
+              output.succeeded else { return }
+        let found = output.stdout
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { WorktreeEnv.isManagedSchemaName($0) }
+        for schema in found where !claimed.contains(schema) {
+            _ = try? await cli.run(SiteRecipe.dropEnvDatabaseArgs(dbHost: dbHost, schema: schema))
+        }
     }
 
     // MARK: - Live DB clone (parent running)

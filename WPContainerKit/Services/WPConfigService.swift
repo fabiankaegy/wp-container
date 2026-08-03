@@ -119,6 +119,39 @@ public enum WPConfigService {
         return backup
     }
 
+    // MARK: - Shared-database safety preflight (issue #17)
+
+    /// The env var the `wordpress` image's `wp-config.php` template reads
+    /// `DB_NAME` from — and the hinge the whole shared-database feature turns on.
+    public static let dbNameEnvironmentVariable = "WORDPRESS_DB_NAME"
+
+    /// Whether pointing a container at a different schema via
+    /// `WORDPRESS_DB_NAME` will actually be honored by this site's
+    /// `wp-config.php`.
+    ///
+    /// This is the guard in front of issue #17's one genuinely dangerous failure
+    /// mode: a project that ships its own config with a hardcoded
+    /// `define('DB_NAME', 'wordpress')` would ignore the env var entirely and a
+    /// "shared" env would silently read and WRITE the parent site's database.
+    /// Anything we can't positively confirm reads as false, so the caller falls
+    /// back to a dedicated DB container.
+    ///
+    /// A missing `wp-config.php` is safe: the image's entrypoint generates one
+    /// from the `WORDPRESS_DB_*` environment on first boot.
+    public static func dbNameFollowsEnvironment(wordpressFolder: URL) -> Bool {
+        let url = configURL(for: wordpressFolder)
+        guard FileManager.default.fileExists(atPath: url.path) else { return true }
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return false }
+        // The DB_NAME define's value expression, whatever shape it has.
+        let pattern = #"define\s*\(\s*['\"]DB_NAME['\"]\s*,\s*(.*?)\s*\)\s*;"#
+        guard let re = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) else { return false }
+        let ns = text as NSString
+        guard let m = re.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)) else {
+            return false // No DB_NAME define we can reason about — assume unsafe.
+        }
+        return ns.substring(with: m.range(at: 1)).contains(dbNameEnvironmentVariable)
+    }
+
     // MARK: - Development constants (§2c-bis)
 
     /// Debug switches surfaced in Settings → Development (all boolean).
