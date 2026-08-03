@@ -113,6 +113,7 @@ public final class AppViewModel {
         await refreshCATrusted()
         observeStatusEvents()
         startReconcileLoop()
+        installIdleStopHook()
         // Adopt an already-running headless proxy, if any.
         proxyPort = ProxyControl.current()?.port
         // Version pickers: show the cached matrix immediately, refresh from
@@ -323,6 +324,24 @@ public final class AppViewModel {
             var updated = env
             updated.idleStopMinutes = minutes
             await store.upsertEnv(updated)
+        }
+    }
+
+    /// Keep the generic "Stopped <name>" banner out of automatic idle stops.
+    /// The status event still flows (the sidebar/detail flip to Stopped as
+    /// usual) — only the notification is suppressed, because a notification
+    /// about something the user did not do reads as a failure rather than as the
+    /// memory housekeeping it is. Awaited by the proxy, so the suppression is
+    /// always recorded before the `.stopped` event arrives.
+    private func installIdleStopHook() {
+        proxy.setWillIdleStopHook { [weak self] id in
+            await MainActor.run {
+                guard let self else { return }
+                self.suppressStatusNotify.insert(id)
+                // Generous window: `.stopped` is now emitted only after the
+                // teardown verify/escalate pass, which can take several seconds.
+                self.clearSuppressionSoon(id, after: .seconds(30))
+            }
         }
     }
 
@@ -673,9 +692,9 @@ public final class AppViewModel {
     /// Stop suppressing an instance's start/stop notifications after a short
     /// delay, so any buffered `.running`/`.stopped` event emitted during the
     /// create flow has drained (and been suppressed) first.
-    private func clearSuppressionSoon(_ id: UUID) {
+    private func clearSuppressionSoon(_ id: UUID, after delay: Duration = .seconds(3)) {
         Task { [weak self] in
-            try? await Task.sleep(for: .seconds(3))
+            try? await Task.sleep(for: delay)
             self?.suppressStatusNotify.remove(id)
         }
     }

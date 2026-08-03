@@ -130,6 +130,21 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// "site is stopped" page.
     private let lifecycle: SiteLifecycle?
 
+    /// Called — and AWAITED — immediately before an idle stop, with the
+    /// instance's UUID. The app uses it to suppress the generic "Stopped <name>"
+    /// notification for a stop the user didn't ask for (a banner saying the tool
+    /// stopped your environment reads as a fault, not as housekeeping).
+    ///
+    /// Awaited rather than fire-and-forget precisely so there is no race with the
+    /// `.stopped` status event the stop is about to emit.
+    private var willIdleStop: (@Sendable (UUID) async -> Void)?
+
+    /// Install the pre-idle-stop hook. Set once by the host before/just after
+    /// `start()`; guarded by the same lock as the rest of the mutable state.
+    public func setWillIdleStopHook(_ hook: (@Sendable (UUID) async -> Void)?) {
+        stateLock.withLock { willIdleStop = hook }
+    }
+
     private static let log = Logger(subsystem: "com.fabiankaegy.wpcontainer", category: "proxy-idle")
 
     public init(ca: CertificateAuthority = CertificateAuthority(),
@@ -477,11 +492,14 @@ public final class HTTPSProxy: @unchecked Sendable {
             guard timeout > 0, idleMinutes(of: env.envSlug, now: now) >= Double(timeout) else { continue }
             guard !isWaking(env.envSlug), !(await lifecycle.isBusy(env.id)) else { continue }
             Self.log.info("idle-stop: env \(env.envSlug, privacy: .public) idle for \(timeout, privacy: .public)+ min")
+            await notifyWillIdleStop(env.id)
             await lifecycle.stop(env)
+            var ids = [env.id]
             if let parent = envelope.sites.first(where: { $0.id == env.parentSiteID }) {
                 await lifecycle.stopSharedDatabaseIfUnused(parent: parent)
+                ids.append(parent.id)
             }
-            _ = await lifecycle.drainWarnings(for: env.id)
+            await logTeardownWarnings(ids, lifecycle: lifecycle)
             forgetClock(env.envSlug)
             stoppedAnEnv = true
         }
@@ -497,9 +515,27 @@ public final class HTTPSProxy: @unchecked Sendable {
             guard !envSlugs.contains(where: { running.contains("wpc-\($0)-wp") }) else { continue }
             guard !isWaking(site.slug), !(await lifecycle.isBusy(site.id)) else { continue }
             Self.log.info("idle-stop: site \(site.slug, privacy: .public) idle for \(timeout, privacy: .public)+ min")
+            await notifyWillIdleStop(site.id)
             await lifecycle.stop(site)
-            _ = await lifecycle.drainWarnings(for: site.id)
+            await logTeardownWarnings([site.id], lifecycle: lifecycle)
             forgetClock(site.slug)
+        }
+    }
+
+    private func notifyWillIdleStop(_ id: UUID) async {
+        guard let hook = stateLock.withLock({ willIdleStop }) else { return }
+        await hook(id)
+    }
+
+    /// An automatic stop has nobody watching a terminal or an error banner, so a
+    /// container that survived both `container stop` and `container delete`
+    /// (issue #16, item 4) would otherwise vanish silently — exactly the failure
+    /// mode that made the leak hard to find. Drain the warnings and log them.
+    private func logTeardownWarnings(_ ids: [UUID], lifecycle: SiteLifecycle) async {
+        for id in ids {
+            for warning in await lifecycle.drainWarnings(for: id) {
+                Self.log.error("idle-stop: \(warning, privacy: .public)")
+            }
         }
     }
 
@@ -559,9 +595,13 @@ public final class HTTPSProxy: @unchecked Sendable {
     }
 
     private func performWake(slug: String, route: Route) async {
-        guard let lifecycle else { return }
+        // Every exit path MUST clear `wakesInFlight`, or the slug stays wedged
+        // and no later request can ever wake it again — so the whole body is one
+        // do/catch with a single cleanup at the end, and there are no early
+        // returns.
         var failure: String?
         do {
+            guard let lifecycle else { throw WakeError.noLifecycle }
             let envelope = try await persistence.load()
             if route.isEnv {
                 guard let env = envelope.envs.first(where: { $0.envSlug == slug }) else {
@@ -601,9 +641,11 @@ public final class HTTPSProxy: @unchecked Sendable {
 
     private enum WakeError: Error, CustomStringConvertible {
         case vanished(String)
+        case noLifecycle
         var description: String {
             switch self {
             case .vanished(let slug): return "\(slug) is no longer in the store."
+            case .noLifecycle: return "This proxy was started without a lifecycle and cannot start containers."
             }
         }
     }
