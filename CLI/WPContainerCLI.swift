@@ -448,7 +448,7 @@ struct WorktreeCreate: AsyncParsableCommand {
             // during the (long) creation flow below.
             let repoArg = repo
             let branchArg = branch
-            guard let (_, reserved, _) = try await ctx.persistence.allocatePort(reserve: { port, store in
+            guard let (_, reserved, storeAfterReserve) = try await ctx.persistence.allocatePort(reserve: { port, store in
                 WorktreeEnvService.reservedDescriptor(parent: parent, repoRelPath: repoArg,
                                                       branch: branchArg, port: port, into: &store)
             }) else { throw CLIErrorJSON("no_free_port") }
@@ -456,7 +456,9 @@ struct WorktreeCreate: AsyncParsableCommand {
             do {
                 // Live sibling records (the reserved one excluded) so the shared
                 // path's orphan sweep can tell a live schema from a leaked one.
-                let siblings = envelope.envs.filter { $0.parentSiteID == parent.id && $0.id != reserved.id }
+                // Read from the POST-reservation envelope, so a sibling another
+                // process reserved while we were loading is still protected.
+                let siblings = storeAfterReserve.envs.filter { $0.parentSiteID == parent.id && $0.id != reserved.id }
                 let env = try await ctx.worktrees.create(parent: parent, parentIsRunning: parentRunning,
                                                          repoRelPath: repo, branch: branch, from: from,
                                                          port: reserved.port, reserved: reserved,

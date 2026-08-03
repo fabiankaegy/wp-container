@@ -381,7 +381,7 @@ enum MCPToolDispatch {
         let running = await ctx.runningContainerNames()
         // Port allocation + env reservation happen in ONE locked store mutation
         // (#3) so a concurrent creator can't observe the same port as free.
-        guard let (_, reserved, _) = try await ctx.persistence.allocatePort(reserve: { port, store in
+        guard let (_, reserved, storeAfterReserve) = try await ctx.persistence.allocatePort(reserve: { port, store in
             WorktreeEnvService.reservedDescriptor(parent: parent, repoRelPath: repo, branch: branch, port: port, into: &store)
         }) else {
             throw ToolError("no_free_port", "No free port available.")
@@ -389,8 +389,10 @@ enum MCPToolDispatch {
         let env: WorktreeEnv
         do {
             // Live sibling records (the reserved one excluded) so the shared
-            // path's orphan sweep can tell a live schema from a leaked one.
-            let siblings = envelope.envs.filter { $0.parentSiteID == parent.id && $0.id != reserved.id }
+            // path's orphan sweep can tell a live schema from a leaked one. Read
+            // from the POST-reservation envelope, so a sibling another process
+            // reserved while we were loading is still protected.
+            let siblings = storeAfterReserve.envs.filter { $0.parentSiteID == parent.id && $0.id != reserved.id }
             env = try await ctx.worktrees.create(parent: parent, parentIsRunning: running.contains(parent.wpContainerName),
                                                  repoRelPath: repo, branch: branch, from: from,
                                                  port: reserved.port, reserved: reserved, provision: provision,
