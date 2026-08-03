@@ -215,23 +215,22 @@ struct IdleCommand: AsyncParsableCommand {
         (Apple `container` never releases guest memory), and VM boot is ~1s — so \
         an idle instance can be parked and woken again on the next request by \
         whichever process hosts the HTTPS proxy (the app, or \
-        `wp-container proxy serve`). Hitting a parked <slug>.localhost URL in the \
-        browser serves a "waking up" page that refreshes into the live site.
+        `wp-container proxy serve`). Hitting a parked URL in the browser serves a \
+        "waking up" page that refreshes into the live site.
 
-        OFF BY DEFAULT for both sites and environments — this is opt-in. 15 \
-        minutes is the recommended value for environments you create and finish \
-        with (an agent's branch environment, say).
+        ENVIRONMENTS: on by default, 15 minutes. An environment's container \
+        publishes no port of its own — the proxy owns its \
+        http://127.0.0.1:<port> URL — so every request to it counts as activity, \
+        and a parked environment wakes at that same URL. So do wp-cli, MCP tool \
+        calls and magic-login links.
 
-        What counts as activity: requests to the proxied hostnames \
-        (<slug>.localhost or a custom domain), plus wp-cli, MCP tool calls and \
-        magic-login links. Requests straight to http://127.0.0.1:<port> are NOT \
-        visible — and that is the URL worktree environments are advertised at — so \
-        if you browse an environment that way, leave this off or expect it to be \
-        parked while you are looking at it. Wake-on-request likewise only works \
-        through the proxied hostname.
+        SITES: off by default, opt-in. A site publishes its own \
+        http://127.0.0.1:<port>, and requests to that address bypass the proxy: \
+        they neither count as activity nor wake it. Its proxied URLs \
+        (<slug>.localhost, a custom domain) do both. A parent site is also never \
+        auto-stopped while any of its environments are running.
 
-        A parent site is never auto-stopped while any of its environments are \
-        running. Accepts a site slug or an env slug.
+        Accepts a site slug or an env slug.
         """
     )
     @Argument(help: "Site slug or env slug.") var slug: String
@@ -296,7 +295,7 @@ struct IdleCommand: AsyncParsableCommand {
                     "idleStopMinutes": configured as Any? ?? NSNull(),
                     "effectiveIdleStopMinutes": effective,
                     "enforced": proxyRunning,
-                    "note": IdlePolicy.activityCaveat,
+                    "note": IdlePolicy.activityNote(isEnv: isEnv),
                 ]))
             } else {
                 var line = "\(slug): auto-stop when idle \(IdlePolicy.label(configured: configured, isEnv: isEnv))."
@@ -306,7 +305,7 @@ struct IdleCommand: AsyncParsableCommand {
                 emitLine(line)
                 // Print the caveat only when the setting is actually on: it is the
                 // difference between "works" and "parks an env you're browsing".
-                if effective > 0 { emitLine(IdlePolicy.activityCaveat) }
+                if effective > 0 { emitLine(IdlePolicy.activityNote(isEnv: isEnv)) }
             }
         } catch { throw failCommand(error, json: output.json) }
     }

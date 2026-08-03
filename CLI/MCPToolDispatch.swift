@@ -104,7 +104,7 @@ enum MCPToolDispatch {
             "idleStopMinutes": newValue as Any? ?? NSNull(),
             "effectiveIdleStopMinutes": effective,
             "enforced": ProxyControl.current() != nil,
-            "note": IdlePolicy.activityCaveat,
+            "note": IdlePolicy.activityNote(isEnv: isEnv),
         ])
     }
 
