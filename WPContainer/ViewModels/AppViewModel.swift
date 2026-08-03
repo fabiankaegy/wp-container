@@ -86,7 +86,11 @@ public final class AppViewModel {
         let ca = CertificateAuthority()
         self.ca = ca
         self.httpsIntegration = HTTPSIntegration(cli: cli, ca: ca)
-        self.proxy = HTTPSProxy(ca: ca)
+        // The proxy owns idle-stop and wake-on-request (issue #16), so it needs
+        // the same lifecycle everything else in the app drives — handing it the
+        // shared instance also means its in-flight claim guard (issue #5) dedupes
+        // a wake against a concurrent UI start.
+        self.proxy = HTTPSProxy(ca: ca, lifecycle: lifecycle)
         self.dbImporter = DatabaseImportService(cli: cli, lifecycle: lifecycle)
         self.store = SiteStore()
     }
