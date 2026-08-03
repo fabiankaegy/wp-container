@@ -80,8 +80,7 @@ public enum AgentToolsService {
         written.append(doc)
 
         // wp shim at the root, pointing at the site's absolute wordpress path.
-        _ = try? WPCLIShim.writeShim(slug: site.slug, siteRoot: root, wordpressFolder: site.wordpressFolder,
-                                     cliImage: WordPressImageCatalog.cliImage(for: site.imageTag))
+        _ = try? WPCLIShim.writeShim(for: site, siteRoot: root, slug: site.slug)
         written.append("wp")
 
         try updateGitignore(root: root, docName: doc, enabled: true); written.append(".gitignore")

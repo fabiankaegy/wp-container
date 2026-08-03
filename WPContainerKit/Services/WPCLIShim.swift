@@ -31,8 +31,11 @@ public enum WPCLIShim {
 
     /// Bumped whenever the shim body format changes so stale shims auto-refresh
     /// (PLAN.md scope addition). Written into the shim header. v3 bakes in the
-    /// site's PHP-matched cli image (was hardcoded `wordpress:cli`).
-    public static let shimVersion = 3
+    /// site's PHP-matched cli image (was hardcoded `wordpress:cli`); v4 bakes in
+    /// the real DB CONTAINER and SCHEMA instead of deriving them from the slug,
+    /// so a shared-database worktree env resolves the parent's container and its
+    /// own `wpc_*` schema (issue #17).
+    public static let shimVersion = 4
     private static let versionMarker = "# wpc-shim-version:"
 
     // MARK: - Per-site shim
@@ -40,7 +43,14 @@ public enum WPCLIShim {
     /// Body of the executable `wp` shim. `wordpressFolder` is baked in as an
     /// ABSOLUTE path so the shim works from any placement root and any cwd.
     /// `cliImage` is the PHP-matched one-shot wp-cli image for the site.
-    public static func shimScript(slug: String, wordpressFolder: URL, cliImage: String) -> String {
+    ///
+    /// `dbContainer` and `databaseName` are baked in rather than derived from the
+    /// slug (issue #17): they differ for a shared-database env, which talks to its
+    /// PARENT's container and its own schema. Both default to the classic
+    /// per-site values.
+    public static func shimScript(slug: String, wordpressFolder: URL, cliImage: String,
+                                  dbContainer: String? = nil,
+                                  databaseName: String = SiteRecipe.dbName) -> String {
         """
         #!/bin/bash
         \(versionMarker) \(shimVersion)
@@ -53,7 +63,7 @@ public enum WPCLIShim {
 
         CONTAINER_BIN="\(containerBinary)"
         SITE_SLUG="\(slug)"
-        DB_NAME="wpc-${SITE_SLUG}-db"
+        DB_CONTAINER="\(dbContainer ?? "wpc-\(slug)-db")"
         WP_DIR="\(wordpressFolder.path)"
 
         if [ ! -x "$CONTAINER_BIN" ]; then
@@ -71,10 +81,10 @@ public enum WPCLIShim {
           WORKDIR="/var/www/html/${CUR#"$WP_REAL"/}"
         fi
 
-        DB_IP="$("$CONTAINER_BIN" inspect "$DB_NAME" 2>/dev/null \\
+        DB_IP="$("$CONTAINER_BIN" inspect "$DB_CONTAINER" 2>/dev/null \\
           | sed -n 's/.*"ipv4Address"[^"]*"\\([0-9.]*\\).*/\\1/p' | head -n1)"
         if [ -z "$DB_IP" ]; then
-          echo "wp: database container '$DB_NAME' is not running." >&2
+          echo "wp: database container '$DB_CONTAINER' is not running." >&2
           echo "    Start the site first (e.g. wp-container start $SITE_SLUG)." >&2
           exit 1
         fi
@@ -86,7 +96,7 @@ public enum WPCLIShim {
           -e "WORDPRESS_DB_HOST=$DB_IP" \\
           -e "WORDPRESS_DB_USER=\(SiteRecipe.dbUser)" \\
           -e "WORDPRESS_DB_PASSWORD=\(SiteRecipe.dbPassword)" \\
-          -e "WORDPRESS_DB_NAME=\(SiteRecipe.dbName)" \\
+          -e "WORDPRESS_DB_NAME=\(databaseName)" \\
           "\(cliImage)" wp "$@"
         """
     }
@@ -97,13 +107,31 @@ public enum WPCLIShim {
     /// Idempotent.
     @discardableResult
     public static func writeShim(slug: String, siteRoot: URL, wordpressFolder: URL? = nil,
-                                 cliImage: String = WordPressImageCatalog.baseCLIImage) throws -> URL {
+                                 cliImage: String = WordPressImageCatalog.baseCLIImage,
+                                 dbContainer: String? = nil,
+                                 databaseName: String = SiteRecipe.dbName) throws -> URL {
         let url = siteRoot.appendingPathComponent("wp")
         let wp = wordpressFolder ?? siteRoot.appendingPathComponent("wordpress", isDirectory: true)
         try FileManager.default.createDirectory(at: siteRoot, withIntermediateDirectories: true)
-        try shimScript(slug: slug, wordpressFolder: wp, cliImage: cliImage).write(to: url, atomically: true, encoding: .utf8)
+        try shimScript(slug: slug, wordpressFolder: wp, cliImage: cliImage,
+                       dbContainer: dbContainer, databaseName: databaseName)
+            .write(to: url, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
         return url
+    }
+
+    /// Write the shim for a runnable instance — the overload to prefer, since it
+    /// can't get the DB container or schema wrong (issue #17). Sites place it at
+    /// their root; a shared-database env's shim resolves the PARENT's container
+    /// and the env's own schema.
+    @discardableResult
+    public static func writeShim(for inst: any RunnableInstance, siteRoot: URL,
+                                 slug: String, wordpressFolder: URL? = nil) throws -> URL {
+        try writeShim(slug: slug, siteRoot: siteRoot,
+                      wordpressFolder: wordpressFolder ?? inst.wordpressFolder,
+                      cliImage: SiteRecipe.cliImage(for: inst),
+                      dbContainer: inst.dbContainerName,
+                      databaseName: inst.databaseName)
     }
 
     /// Whether the shim at `<siteRoot>/wp` is missing or older than the current
@@ -124,9 +152,18 @@ public enum WPCLIShim {
     /// wp-cli (cwd mapped to a workdir); otherwise it transparently execs the
     /// user's real `wp` (the next one on PATH), so Homebrew workflows are
     /// unaffected.
+    /// Bumped whenever the ROUTER body changes, so a stale one auto-refreshes
+    /// (the app does it on launch, and `resolve-site` — which the router itself
+    /// calls on every invocation — does it for CLI-only users). v2 passes the
+    /// resolved schema through as `WORDPRESS_DB_NAME`, which a shared-database
+    /// worktree env needs to avoid operating on its PARENT's data (issue #17).
+    public static let routerVersion = 2
+    private static let routerVersionMarker = "# wpc-router-version:"
+
     public static func routerScript() -> String {
         """
         #!/bin/bash
+        \(routerVersionMarker) \(routerVersion)
         # WP Container global `wp` router. Auto-generated by `wp-container setup wp`.
         # Inside a WP Container site's wordpress/ tree → containerized wp-cli;
         # everywhere else → your normal wp-cli. Remove with `wp-container setup wp --remove`.
@@ -149,6 +186,7 @@ public enum WPCLIShim {
         print("WPC_DB=" + shlex.quote(d["dbContainer"]))
         print("WPC_SUB=" + shlex.quote(d.get("subpath", "")))
         print("WPC_CLI=" + shlex.quote(d.get("cliImage", "wordpress:cli")))
+        print("WPC_DBNAME=" + shlex.quote(d.get("dbName", "\(SiteRecipe.dbName)")))
         ')"
           DB_IP="$("$CONTAINER_BIN" inspect "$WPC_DB" 2>/dev/null \\
             | sed -n 's/.*"ipv4Address"[^"]*"\\([0-9.]*\\).*/\\1/p' | head -n1)"
@@ -165,7 +203,7 @@ public enum WPCLIShim {
             -e "WORDPRESS_DB_HOST=$DB_IP" \\
             -e "WORDPRESS_DB_USER=\(SiteRecipe.dbUser)" \\
             -e "WORDPRESS_DB_PASSWORD=\(SiteRecipe.dbPassword)" \\
-            -e "WORDPRESS_DB_NAME=\(SiteRecipe.dbName)" \\
+            -e "WORDPRESS_DB_NAME=${WPC_DBNAME:-\(SiteRecipe.dbName)}" \\
             "${WPC_CLI:-\(WordPressImageCatalog.baseCLIImage)}" wp "$@"
         fi
 
@@ -202,22 +240,57 @@ public enum WPCLIShim {
         FileManager.default.isExecutableFile(atPath: routerPath)
     }
 
+    /// Whether an INSTALLED router predates the current body format. False when
+    /// no router is installed (there is nothing to refresh).
+    public static var routerNeedsRefresh: Bool {
+        guard routerInstalled else { return false }
+        guard let text = try? String(contentsOfFile: routerPath, encoding: .utf8) else { return true }
+        guard let line = text.split(separator: "\n").first(where: { $0.contains(routerVersionMarker) }),
+              let v = Int(line.replacingOccurrences(of: routerVersionMarker, with: "").trimmingCharacters(in: .whitespaces))
+        else { return true }
+        return v < routerVersion
+    }
+
+    /// Rewrite the installed router if its format is stale. Cheap enough to call
+    /// from `resolve-site`, which the router invokes on every `wp` — so a router
+    /// installed by an older build heals itself on first use.
+    public static func refreshRouterIfStale() {
+        guard routerNeedsRefresh else { return }
+        _ = try? writeRouter()
+    }
+
     // MARK: - Interactive Terminal command (§2e)
 
     /// A single shell command (for `Terminal.app`) that opens an interactive
     /// wp-cli shell inside a `wordpress:cli` container cd'd to /var/www/html.
+    ///
+    /// `dbContainer`/`databaseName` are passed in rather than derived from the
+    /// slug (issue #17) so an interactive shell for a shared-database env lands
+    /// in the env's schema on the parent's server. Prefer
+    /// `interactiveTerminalCommand(for:)`.
     public static func interactiveTerminalCommand(slug: String, wordpressFolder: URL,
-                                                  cliImage: String = WordPressImageCatalog.baseCLIImage) -> String {
+                                                  cliImage: String = WordPressImageCatalog.baseCLIImage,
+                                                  dbContainer: String? = nil,
+                                                  databaseName: String = SiteRecipe.dbName) -> String {
         let wp = wordpressFolder.path
-        let db = "wpc-\(slug)-db"
+        let db = dbContainer ?? "wpc-\(slug)-db"
         return """
         DB_IP=$(\(containerBinary) inspect \(shellQuote(db)) 2>/dev/null | sed -n 's/.*\"ipv4Address\"[^\"]*\"\\([0-9.]*\\).*/\\1/p' | head -n1); \
         if [ -z "$DB_IP" ]; then echo 'Site \(slug) is not running — start it first.'; else \
         \(containerBinary) run -it --rm -w /var/www/html -v \(shellQuote(wp)):/var/www/html \
         -e WORDPRESS_DB_HOST=$DB_IP -e WORDPRESS_DB_USER=\(SiteRecipe.dbUser) \
-        -e WORDPRESS_DB_PASSWORD=\(SiteRecipe.dbPassword) -e WORDPRESS_DB_NAME=\(SiteRecipe.dbName) \
+        -e WORDPRESS_DB_PASSWORD=\(SiteRecipe.dbPassword) -e WORDPRESS_DB_NAME=\(databaseName) \
         \(cliImage) bash; fi
         """
+    }
+
+    /// The interactive Terminal command for a runnable instance — can't get the
+    /// DB container or schema wrong (issue #17).
+    public static func interactiveTerminalCommand(for inst: any RunnableInstance, slug: String) -> String {
+        interactiveTerminalCommand(slug: slug, wordpressFolder: inst.wordpressFolder,
+                                   cliImage: SiteRecipe.cliImage(for: inst),
+                                   dbContainer: inst.dbContainerName,
+                                   databaseName: inst.databaseName)
     }
 
     private static func shellQuote(_ s: String) -> String {

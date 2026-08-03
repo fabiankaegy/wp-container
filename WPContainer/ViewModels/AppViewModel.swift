@@ -569,15 +569,13 @@ public final class AppViewModel {
     /// improvements ship automatically on the next launch (PLAN.md §2e).
     private func refreshStaleShims() {
         for site in store.sites where WPCLIShim.shimNeedsRefresh(siteRoot: site.path) {
-            _ = try? WPCLIShim.writeShim(slug: site.slug, siteRoot: site.path,
-                                         cliImage: WordPressImageCatalog.cliImage(for: site.imageTag))
+            _ = try? WPCLIShim.writeShim(for: site, siteRoot: site.path, slug: site.slug)
         }
         for site in store.sites {
             guard let root = site.agentToolsRoot else { continue }
             let url = URL(fileURLWithPath: root)
             if WPCLIShim.shimNeedsRefresh(siteRoot: url) {
-                _ = try? WPCLIShim.writeShim(slug: site.slug, siteRoot: url, wordpressFolder: site.wordpressFolder,
-                                             cliImage: WordPressImageCatalog.cliImage(for: site.imageTag))
+                _ = try? WPCLIShim.writeShim(for: site, siteRoot: url, slug: site.slug)
             }
         }
         if WPCLIShim.routerInstalled { _ = try? WPCLIShim.writeRouter() }
@@ -585,8 +583,7 @@ public final class AppViewModel {
 
     /// Open an interactive wp-cli shell for the site in Terminal.app (§2e).
     public func openWPCLI(_ site: Site) {
-        let command = WPCLIShim.interactiveTerminalCommand(slug: site.slug, wordpressFolder: site.wordpressFolder,
-                                                            cliImage: WordPressImageCatalog.cliImage(for: site.imageTag))
+        let command = WPCLIShim.interactiveTerminalCommand(for: site, slug: site.slug)
         SystemActions.openTerminalRunning(command)
     }
 
