@@ -44,6 +44,12 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     /// > 0 = stop after that many idle minutes. Enforced by the HTTPS proxy,
     /// which also wakes the site on the next request.
     public var idleStopMinutes: Int?
+    /// Last time any process observed deliberate use of this site (issue #16) —
+    /// wp-cli, an MCP tool call, a magic-login link, or an explicit start. Feeds
+    /// the idle sweep alongside the proxy's in-memory request tracking, so work
+    /// that never goes through the proxy still counts as activity. Written
+    /// throttled by `StorePersistence.recordActivity`.
+    public var lastActivityAt: Date?
     /// Optional custom domain (e.g. `mysite.local`), routed via /etc/hosts + the
     /// host proxy (PLAN.md §2i). nil = the zero-config `<slug>.localhost` name.
     public var customDomain: String?
@@ -86,7 +92,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         case xdebugEnabled, elasticsearchEnabled, customDomain, networkType
         case agentToolsRoot, agentToolsDoc
         case cpuLimit, memoryLimitMB
-        case idleStopMinutes
+        case idleStopMinutes, lastActivityAt
         case mailpitEnabled, mailpitPort
         case lastImportSourceURL
         case pendingSchemaDrops
@@ -111,6 +117,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         cpuLimit: Int? = nil,
         memoryLimitMB: Int? = nil,
         idleStopMinutes: Int? = nil,
+        lastActivityAt: Date? = nil,
         customDomain: String? = nil,
         networkType: NetworkType = .none,
         agentToolsRoot: String? = nil,
@@ -137,6 +144,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.cpuLimit = cpuLimit
         self.memoryLimitMB = memoryLimitMB
         self.idleStopMinutes = idleStopMinutes
+        self.lastActivityAt = lastActivityAt
         self.customDomain = customDomain
         self.networkType = networkType
         self.agentToolsRoot = agentToolsRoot
@@ -173,6 +181,10 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         // "use the default", which for a SITE is off. Old stores therefore keep
         // exactly today's behaviour (nothing is ever auto-stopped).
         self.idleStopMinutes = try? c.decodeIfPresent(Int.self, forKey: .idleStopMinutes)
+        // Also absent before issue #16. nil reads as "never observed", which the
+        // sweep treats as no evidence rather than as ancient — see
+        // `HTTPSProxy.idleMinutes`.
+        self.lastActivityAt = try? c.decodeIfPresent(Date.self, forKey: .lastActivityAt)
         self.customDomain = try? c.decodeIfPresent(String.self, forKey: .customDomain)
         self.networkType = (try? c.decodeIfPresent(NetworkType.self, forKey: .networkType)) ?? .none
         self.agentToolsRoot = try? c.decodeIfPresent(String.self, forKey: .agentToolsRoot)

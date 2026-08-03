@@ -7,8 +7,10 @@ import WPContainerKit
 /// trade is memory for a moment of latency.
 ///
 /// Follows `ResourcesCard`'s Default/override shape — the picker's "Default"
-/// state persists `nil`, which resolves to 15 minutes for an environment and OFF
-/// for a parent site (auto-stopping the thing you are working on is opt-in).
+/// state persists `nil`, which currently resolves to OFF for both sites and envs.
+/// The card states plainly what the idle clock can and cannot see, because
+/// enabling it on an instance you only ever reach at `127.0.0.1:<port>` would
+/// look like a bug rather than a limitation (see `IdlePolicy`).
 struct IdleStopCard: View {
     @Environment(AppViewModel.self) private var vm
 
@@ -44,13 +46,21 @@ struct IdleStopCard: View {
                     Picker("", selection: selection) {
                         Text(defaultLabel).tag(Int?.none)
                         Text("Never").tag(Int?.some(0))
+                        // `selectableMinutes` leads with the recommended value.
                         ForEach(IdlePolicy.selectableMinutes, id: \.self) { minutes in
-                            Text("\(minutes) min").tag(Int?.some(minutes))
+                            Text(minutes == IdlePolicy.recommendedMinutes
+                                 ? "\(minutes) min (recommended)" : "\(minutes) min")
+                                .tag(Int?.some(minutes))
                         }
                     }
                     .labelsHidden().fixedSize()
                 }
 
+                if effective > 0 {
+                    Text(IdlePolicy.activityCaveat)
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if effective > 0 && !proxyRunning {
                     Text("The reverse proxy isn’t running, so nothing is enforcing this yet.")
                         .font(.caption2).foregroundStyle(.tertiary)
@@ -66,8 +76,8 @@ struct IdleStopCard: View {
 
     private var detailText: String {
         if isEnv {
-            return "Frees this environment’s memory when nobody is using it. Opening its URL starts it again in about a second."
+            return "Off by default. Turn it on for environments you create and finish with — an agent’s branch environment, say — and its ~500 MB comes back when nobody is using it. Opening its <slug>.localhost URL starts it again in about a second."
         }
-        return "Off by default for sites — you’re usually working in them. When on, the site is never stopped while any of its environments are running, and opening its URL starts it again."
+        return "Off by default — you’re usually working in a site. When on, it is never stopped while any of its environments are running, and opening its URL starts it again."
     }
 }

@@ -60,6 +60,16 @@ public struct EnvJSON: Codable, Sendable {
     public let port: Int
     public let path: String
     public let worktreePath: String
+    /// The persisted auto-stop-when-idle setting (issue #16): null = follow the
+    /// built-in default, 0 = never, > 0 = minutes.
+    public let idleStopMinutes: Int?
+    /// The timeout actually in force with the default resolved; 0 = never. Agents
+    /// should read THIS to know whether an env can be parked under them, and use
+    /// the `set_idle_stop` MCP tool (or `wp-container idle`) to change it.
+    public let effectiveIdleStopMinutes: Int
+    /// Last recorded deliberate use — wp-cli, an MCP tool call, magic-login or an
+    /// explicit start — from any process. null when never observed.
+    public let lastActivityAt: Date?
 
     public init(from env: WorktreeEnv) {
         self.id = env.id.uuidString
@@ -72,6 +82,9 @@ public struct EnvJSON: Codable, Sendable {
         self.port = env.port
         self.path = env.envPath.path
         self.worktreePath = env.worktreePath.path
+        self.idleStopMinutes = env.idleStopMinutes
+        self.effectiveIdleStopMinutes = env.effectiveIdleStopMinutes
+        self.lastActivityAt = env.lastActivityAt
     }
 }
 
@@ -100,6 +113,11 @@ public struct WorktreeDescriptor: Codable, Sendable {
     /// container, because that is genuinely the one it talks to.
     public let databaseName: String
     public let sharedDatabase: Bool
+    /// Auto-stop-when-idle for the new env (issue #16): the persisted setting
+    /// (null = default) and the timeout actually in force (0 = never). Reported at
+    /// creation so an agent knows up front whether its environment can be parked.
+    public let idleStopMinutes: Int?
+    public let effectiveIdleStopMinutes: Int
 
     public init(from env: WorktreeEnv) {
         self.url = env.localURL.absoluteString
@@ -111,6 +129,8 @@ public struct WorktreeDescriptor: Codable, Sendable {
         self.containers = [env.wpContainerName, env.dbContainerName]
         self.databaseName = env.databaseName
         self.sharedDatabase = env.sharedDatabase
+        self.idleStopMinutes = env.idleStopMinutes
+        self.effectiveIdleStopMinutes = env.effectiveIdleStopMinutes
     }
 }
 
