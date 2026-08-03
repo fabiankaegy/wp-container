@@ -38,6 +38,12 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     /// Optional per-site memory cap in MB passed to `container run --memory`
     /// (issue #11). nil = the `container` default (1024 MB).
     public var memoryLimitMB: Int?
+    /// Optional per-site auto-stop-when-idle timeout in minutes (issue #16).
+    /// nil = the built-in default (`IdlePolicy.defaultSiteMinutes`, i.e. OFF —
+    /// auto-stopping a parent site is strictly opt-in); 0 = explicitly off;
+    /// > 0 = stop after that many idle minutes. Enforced by the HTTPS proxy,
+    /// which also wakes the site on the next request.
+    public var idleStopMinutes: Int?
     /// Optional custom domain (e.g. `mysite.local`), routed via /etc/hosts + the
     /// host proxy (PLAN.md §2i). nil = the zero-config `<slug>.localhost` name.
     public var customDomain: String?
@@ -80,6 +86,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         case xdebugEnabled, elasticsearchEnabled, customDomain, networkType
         case agentToolsRoot, agentToolsDoc
         case cpuLimit, memoryLimitMB
+        case idleStopMinutes
         case mailpitEnabled, mailpitPort
         case lastImportSourceURL
         case pendingSchemaDrops
@@ -103,6 +110,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         mailpitPort: Int? = nil,
         cpuLimit: Int? = nil,
         memoryLimitMB: Int? = nil,
+        idleStopMinutes: Int? = nil,
         customDomain: String? = nil,
         networkType: NetworkType = .none,
         agentToolsRoot: String? = nil,
@@ -128,6 +136,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.mailpitPort = mailpitPort
         self.cpuLimit = cpuLimit
         self.memoryLimitMB = memoryLimitMB
+        self.idleStopMinutes = idleStopMinutes
         self.customDomain = customDomain
         self.networkType = networkType
         self.agentToolsRoot = agentToolsRoot
@@ -160,6 +169,10 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         // Absent in stores written before issue #11.
         self.cpuLimit = try? c.decodeIfPresent(Int.self, forKey: .cpuLimit)
         self.memoryLimitMB = try? c.decodeIfPresent(Int.self, forKey: .memoryLimitMB)
+        // Absent in stores written before issue #16 — decodes to nil, which means
+        // "use the default", which for a SITE is off. Old stores therefore keep
+        // exactly today's behaviour (nothing is ever auto-stopped).
+        self.idleStopMinutes = try? c.decodeIfPresent(Int.self, forKey: .idleStopMinutes)
         self.customDomain = try? c.decodeIfPresent(String.self, forKey: .customDomain)
         self.networkType = (try? c.decodeIfPresent(NetworkType.self, forKey: .networkType)) ?? .none
         self.agentToolsRoot = try? c.decodeIfPresent(String.self, forKey: .agentToolsRoot)

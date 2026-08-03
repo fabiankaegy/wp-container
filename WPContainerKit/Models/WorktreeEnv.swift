@@ -33,6 +33,12 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
     /// Inherited per-site resource caps (issue #11); nil = `container` defaults.
     public var cpuLimit: Int?
     public var memoryLimitMB: Int?
+    /// Optional per-env auto-stop-when-idle timeout in minutes (issue #16).
+    /// nil = the built-in default (`IdlePolicy.defaultEnvMinutes`, 15 minutes —
+    /// envs are the many-of-them case this exists for); 0 = explicitly off;
+    /// > 0 = stop after that many idle minutes. Deliberately NOT inherited from
+    /// the parent site, whose own default is off.
+    public var idleStopMinutes: Int?
     /// Whether this env lives as an extra SCHEMA on the parent site's MariaDB
     /// container instead of running one of its own (issue #17). The default for
     /// newly created envs; `--isolated-db` opts out. Records written before
@@ -55,6 +61,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         case id, parentSiteID, parentSlug, envSlug, repoRelPath, branch,
              worktreePath, envPath, port, imageTag, createdAt, provisioned,
              xdebugEnabled, elasticsearchEnabled, cpuLimit, memoryLimitMB,
+             idleStopMinutes,
              mailpitEnabled, mailpitPort, sharedDatabase, databaseSchema
     }
 
@@ -77,6 +84,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         mailpitPort: Int? = nil,
         cpuLimit: Int? = nil,
         memoryLimitMB: Int? = nil,
+        idleStopMinutes: Int? = nil,
         sharedDatabase: Bool = false,
         databaseSchema: String? = nil,
         status: SiteStatus = .stopped
@@ -99,6 +107,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         self.mailpitPort = mailpitPort
         self.cpuLimit = cpuLimit
         self.memoryLimitMB = memoryLimitMB
+        self.idleStopMinutes = idleStopMinutes
         // Enforce the shared-DB invariant at the only two entry points.
         self.databaseSchema = databaseSchema
         self.sharedDatabase = sharedDatabase && databaseSchema != nil
@@ -128,6 +137,11 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         // Absent in envs written before issue #11.
         self.cpuLimit = try? c.decodeIfPresent(Int.self, forKey: .cpuLimit)
         self.memoryLimitMB = try? c.decodeIfPresent(Int.self, forKey: .memoryLimitMB)
+        // Absent in envs written before issue #16 — nil means "use the default",
+        // which for an env is 15 minutes, so pre-#16 envs opt into auto-stop
+        // simply by existing (that is the intended behaviour: they are the case
+        // the whole feature exists for).
+        self.idleStopMinutes = try? c.decodeIfPresent(Int.self, forKey: .idleStopMinutes)
         // Absent in envs written before issue #17 — they keep their own DB
         // container, so the default MUST be false/nil.
         let schema = try? c.decodeIfPresent(String.self, forKey: .databaseSchema)
