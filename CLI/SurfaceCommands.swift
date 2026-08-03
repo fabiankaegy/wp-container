@@ -196,7 +196,16 @@ struct ProxyCommand: AsyncParsableCommand {
 }
 
 struct ProxyServe: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "serve", abstract: "Start the TLS-terminating reverse proxy (headless; runs until interrupted).")
+    static let configuration = CommandConfiguration(
+        commandName: "serve",
+        abstract: "Start the TLS-terminating reverse proxy (headless; runs until interrupted).",
+        discussion: """
+        The proxy also enforces auto-stop-when-idle and wakes stopped \
+        sites/environments on the next request (issue #16), so running it \
+        headlessly gives the same behaviour as running the app — see \
+        `wp-container idle`.
+        """
+    )
     @OptionGroup var output: JSONOptions
 
     func run() async throws {
@@ -206,7 +215,11 @@ struct ProxyServe: AsyncParsableCommand {
             else { emitLine(msg) }
             return
         }
-        let proxy = HTTPSProxy()
+        // Its own lifecycle: there is no IPC between app/CLI/MCP — every process
+        // drives `container` directly and coordinates through the flock'd
+        // sites.json plus container-runtime ground truth. Without this the
+        // headless proxy could route but never idle-stop or wake (issue #16).
+        let proxy = HTTPSProxy(lifecycle: SiteLifecycle(cli: ContainerCLI()))
         do {
             let port = try await proxy.start()
             try ProxyControl.claim(port: port)

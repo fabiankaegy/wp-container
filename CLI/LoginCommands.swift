@@ -28,6 +28,9 @@ struct LoginCommand: AsyncParsableCommand {
             let envelope = try await ctx.load()
             guard let resolved = resolveTarget(target, in: envelope) else { throw CLIErrorJSON("not_found", detail: target) }
             let inst = resolved.instance
+            // Minting a login link means somebody is about to work in this
+            // instance — count it as activity (issue #16).
+            await ctx.persistence.recordActivity(instanceID: inst.instanceID)
             guard let dbHost = try await ctx.cli.ipAddress(of: inst.dbContainerName) else {
                 throw CLIErrorJSON("not_running", detail: "start \(target) first")
             }

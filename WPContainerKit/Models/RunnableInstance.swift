@@ -60,6 +60,26 @@ public protocol RunnableInstance: Sendable {
     /// Per-instance memory cap in MB for `container run --memory` (issue #11);
     /// nil = default.
     var memoryLimitMB: Int? { get }
+    /// Per-instance auto-stop-when-idle timeout in MINUTES (issue #16).
+    ///
+    /// `nil` = follow the built-in default for this kind of instance, resolved by
+    /// `IdlePolicy.effectiveMinutes(configured:isEnv:)` (currently OFF for both
+    /// sites and envs — see `IdlePolicy` for why the feature is opt-in); `0` =
+    /// explicitly disabled; `> 0` = stop the instance after that many idle
+    /// minutes. Enforced by whichever process hosts the HTTPS proxy, which is
+    /// also what wakes the instance back up on the next request — so this MUST be
+    /// a persisted per-instance field rather than a `UserDefaults` setting
+    /// (UserDefaults is per-process and invisible to a headless
+    /// `wp-container proxy serve`).
+    var idleStopMinutes: Int? { get }
+    /// Last time ANY process observed deliberate use of this instance (issue #16):
+    /// a wp-cli invocation, an MCP tool call, a magic-login link, or an explicit
+    /// start. Persisted precisely because the proxy's own in-memory last-access
+    /// map only sees traffic it routed — an agent driving an env entirely through
+    /// wp-cli and MCP would otherwise look idle. Written throttled (see
+    /// `StorePersistence.recordActivity`) so it never turns a hot loop of tool
+    /// calls into a hot loop of store writes.
+    var lastActivityAt: Date? { get }
     /// Whether a per-instance Mailpit email-catcher container runs (issue #10).
     var mailpitEnabled: Bool { get }
     /// The localhost port the Mailpit web UI is published on (issue #10).
@@ -91,6 +111,16 @@ public extension RunnableInstance {
     var networkType: NetworkType { .none }
     var cpuLimit: Int? { nil }
     var memoryLimitMB: Int? { nil }
+    var idleStopMinutes: Int? { nil }
+    var lastActivityAt: Date? { nil }
+    /// The idle timeout actually in force for this instance (issue #16), with the
+    /// kind-specific default already resolved. `0` ⇒ auto-stop is off.
+    ///
+    /// Lives here rather than in the proxy so the idle sweep can treat sites and
+    /// envs uniformly — `envLabel != nil` is the one bit that distinguishes them.
+    var effectiveIdleStopMinutes: Int {
+        IdlePolicy.effectiveMinutes(configured: idleStopMinutes, isEnv: envLabel != nil)
+    }
     var mailpitEnabled: Bool { false }
     var mailpitPort: Int? { nil }
     /// Per-instance Elasticsearch data directory bind mount host path.

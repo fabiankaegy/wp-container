@@ -8,6 +8,12 @@ import WPContainerKit
 enum MCPToolDispatch {
     static func handle(_ params: CallTool.Parameters, ctx: CLIContext, scopedSlug: String) async -> CallTool.Result {
         let args = params.arguments ?? [:]
+        // Any scoped tool call is an agent deliberately working on this instance,
+        // and none of it goes through the proxy — so stamp `lastActivityAt` before
+        // dispatching (throttled to at most one store write a minute, issue #16).
+        // Without this an agent driving an environment entirely over MCP would
+        // look completely idle and get parked mid-task.
+        await stampActivity(ctx: ctx, slug: scopedSlug)
         do {
             switch params.name {
             case "wp_cli":            return try await wpCLI(args, ctx: ctx, slug: scopedSlug)
@@ -32,12 +38,74 @@ enum MCPToolDispatch {
             case "elasticsearch_toggle": return try await addonToggle(args, ctx: ctx, slug: scopedSlug, kind: .elasticsearch)
             case "mailpit_toggle":    return try await mailpitToggle(args, ctx: ctx, slug: scopedSlug)
             case "db_import":         return try await dbImport(args, ctx: ctx, slug: scopedSlug)
+            case "set_idle_stop":     return try await setIdleStop(args, ctx: ctx, slug: scopedSlug)
             default:
                 return MCPResult.failure("Unknown tool: \(params.name)")
             }
         } catch {
             return MCPResult.failure(humanError(error))
         }
+    }
+
+    // MARK: - Activity tracking (issue #16)
+
+    /// Record the scoped slug's `lastActivityAt`. Best-effort and silent: an
+    /// unresolvable slug or a store error must never turn into a tool failure.
+    /// Accepts a site OR an env slug, since agents work in both.
+    private static func stampActivity(ctx: CLIContext, slug: String) async {
+        guard let envelope = try? await ctx.load() else { return }
+        guard let resolved = resolveTarget(slug, in: envelope) else { return }
+        await ctx.persistence.recordActivity(instanceID: resolved.instance.instanceID)
+    }
+
+    // MARK: - Idle stop (issue #16)
+
+    /// Set (or clear) the auto-stop-when-idle timeout for a site or env.
+    ///
+    /// Exists so an agent that just created an environment can opt it in without
+    /// shelling out to `wp-container idle` — the whole point of the feature is
+    /// reclaiming memory from fleets of agent-created envs, and the agent is the
+    /// one who knows whether its env is finished with.
+    ///
+    /// `minutes` omitted ⇒ back to the built-in default; `0` ⇒ never.
+    private static func setIdleStop(_ args: [String: Value], ctx: CLIContext, slug: String) async throws -> CallTool.Result {
+        let target = args["slug"]?.stringValue ?? slug
+        let envelope = try await ctx.load()
+        guard let resolved = resolveTarget(target, in: envelope) else {
+            throw ToolError("not_found", "No site or environment with slug \(target).")
+        }
+        let isEnv = resolved.instance.envLabel != nil
+        // Absent `minutes` is a deliberate "back to default", which is why this
+        // reads the key's presence rather than defaulting the value.
+        var configured: Int?
+        if let raw = args["minutes"] {
+            guard let value = raw.intValue else {
+                throw ToolError("bad_args", "minutes must be an integer (omit it for the default, 0 for never).")
+            }
+            configured = value > 0 ? value : 0
+        }
+        let newValue = configured
+        _ = try await ctx.persistence.mutate { store in
+            switch resolved {
+            case .site(let site):
+                if let i = store.sites.firstIndex(where: { $0.id == site.id }) {
+                    store.sites[i].idleStopMinutes = newValue
+                }
+            case .env(let env):
+                if let i = store.envs.firstIndex(where: { $0.id == env.id }) {
+                    store.envs[i].idleStopMinutes = newValue
+                }
+            }
+        }
+        let effective = IdlePolicy.effectiveMinutes(configured: newValue, isEnv: isEnv)
+        return MCPResult.json([
+            "slug": target,
+            "kind": isEnv ? "env" : "site",
+            "idleStopMinutes": newValue as Any? ?? NSNull(),
+            "effectiveIdleStopMinutes": effective,
+            "enforced": ProxyControl.current() != nil,
+            "note": IdlePolicy.activityCaveat,
+        ])
     }
 
     // MARK: - Resolution helpers
@@ -176,6 +244,12 @@ enum MCPToolDispatch {
             "provisioned": site.provisioned,
             "mailpitEnabled": site.mailpitEnabled,
             "mailboxUrl": site.mailboxURL?.absoluteString as Any? ?? NSNull(),
+            // Auto-stop-when-idle (issue #16). `idleStopMinutes` is the persisted
+            // setting (null = follow the default), `effectiveIdleStopMinutes` the
+            // timeout actually in force with the default resolved — 0 means the
+            // site is never auto-stopped. Sites default to off; envs to 15 min.
+            "idleStopMinutes": site.idleStopMinutes as Any? ?? NSNull(),
+            "effectiveIdleStopMinutes": site.effectiveIdleStopMinutes,
             // Read off the instance rather than the `SiteRecipe` constants (#17).
             // `resolveSite` only ever returns a SITE, which always owns its
             // `wordpress` schema — going through the instance just means this
@@ -326,7 +400,15 @@ enum MCPToolDispatch {
         let site = try await resolveSite(slug, ctx: ctx)
         let envs = try await ctx.load().envs.filter { $0.parentSiteID == site.id }
         await ctx.lifecycle.stopSiteWithEnvs(site, envs: envs)
-        return MCPResult.json(["slug": slug, "status": "stopped"])
+        // Teardown problems recorded by the stop path (issue #16) — a container
+        // that outlived both `stop` and `delete` is still holding VM memory.
+        var warnings: [String] = []
+        for id in [site.id] + envs.map(\.id) {
+            warnings.append(contentsOf: await ctx.lifecycle.drainWarnings(for: id))
+        }
+        var payload: [String: Any] = ["slug": slug, "status": "stopped"]
+        if !warnings.isEmpty { payload["warnings"] = warnings }
+        return MCPResult.json(payload)
     }
 
     private static func siteRestart(ctx: CLIContext, slug: String) async throws -> CallTool.Result {
@@ -429,7 +511,11 @@ enum MCPToolDispatch {
         let envs = envelope.envs.filter { filter == "*" || $0.parentSlug == filter }.map { e -> [String: Any] in
             ["envSlug": e.envSlug, "parentSlug": e.parentSlug, "branch": e.branch, "repoRelPath": e.repoRelPath,
              "status": running.contains(e.wpContainerName) ? "running" : "stopped",
-             "url": e.localURL.absoluteString, "port": e.port, "worktreePath": e.worktreePath.path]
+             "url": e.localURL.absoluteString, "port": e.port, "worktreePath": e.worktreePath.path,
+             // Auto-stop-when-idle (issue #16), so an agent can see whether an env
+             // may be parked under it and opt in/out via `set_idle_stop`.
+             "idleStopMinutes": e.idleStopMinutes as Any? ?? NSNull(),
+             "effectiveIdleStopMinutes": e.effectiveIdleStopMinutes]
         }
         return MCPResult.json(["envs": envs])
     }
