@@ -57,6 +57,20 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     /// which needs a known source host to rewrite missing upload URLs against.
     /// nil until a database has ever been imported into this site.
     public var lastImportSourceURL: String?
+    /// TOMBSTONES: schemas on this site's MariaDB server that belonged to a
+    /// deleted shared-database worktree env but could not be dropped at deletion
+    /// time because the server was down (issue #17).
+    ///
+    /// An explicit list, deliberately: the alternative — listing `wpc\_%` on the
+    /// server and dropping whatever no live env record claims — races any
+    /// concurrent env creation, whose schema exists before its record does, and
+    /// the loser's fresh database gets DROPped. We only ever drop names we
+    /// recorded ourselves. Consequence: a schema orphaned by a hard crash
+    /// mid-create is never reaped. Leaking beats destroying.
+    ///
+    /// Reaped by `WorktreeEnvService.create` on the shared path, where the server
+    /// is guaranteed up; entries are cleared once their DROP actually succeeds.
+    public var pendingSchemaDrops: [String] = []
 
     /// Runtime-derived; NOT persisted.
     public var status: SiteStatus = .stopped
@@ -68,6 +82,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         case cpuLimit, memoryLimitMB
         case mailpitEnabled, mailpitPort
         case lastImportSourceURL
+        case pendingSchemaDrops
     }
 
     public init(
@@ -93,6 +108,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         agentToolsRoot: String? = nil,
         agentToolsDoc: String? = nil,
         lastImportSourceURL: String? = nil,
+        pendingSchemaDrops: [String] = [],
         status: SiteStatus = .stopped
     ) {
         self.id = id
@@ -117,6 +133,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.agentToolsRoot = agentToolsRoot
         self.agentToolsDoc = agentToolsDoc
         self.lastImportSourceURL = lastImportSourceURL
+        self.pendingSchemaDrops = pendingSchemaDrops
         self.status = status
     }
 
@@ -149,6 +166,11 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.agentToolsDoc = try? c.decodeIfPresent(String.self, forKey: .agentToolsDoc)
         // Absent in stores written before the Database Importer (§2m).
         self.lastImportSourceURL = try? c.decodeIfPresent(String.self, forKey: .lastImportSourceURL)
+        // Absent in stores written before issue #17. Only ever holds names that
+        // pass `WorktreeEnv.isManagedSchemaName`; a hand-edited store can't widen
+        // the blast radius because every drop re-checks.
+        self.pendingSchemaDrops = ((try? c.decodeIfPresent([String].self, forKey: .pendingSchemaDrops)) ?? [])
+            ?? []
     }
 
     // MARK: Derived paths

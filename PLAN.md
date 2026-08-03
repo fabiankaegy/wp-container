@@ -41,7 +41,12 @@ site folder.
   Stop = `container stop`. This sidesteps container-IP churn across restarts and makes
   the host folder the single source of truth.
   - DB container: `wpc-<slug>-db`, image `mariadb:11` (env: MARIADB_DATABASE=wordpress,
-    MARIADB_USER=wordpress, MARIADB_PASSWORD=wordpress, MARIADB_ROOT_PASSWORD=root).
+    MARIADB_USER=wordpress, MARIADB_PASSWORD=wordpress, MARIADB_ROOT_PASSWORD=root),
+    run with `--max-connections=300` because it also serves every one of the site's
+    shared-database worktree envs (issue #17). `MARIADB_DATABASE` provisions the
+    OWNER's primary schema only; env schemas are created separately on the same
+    server. Each env's WordPress reaches its own schema purely through
+    `WORDPRESS_DB_NAME` — nothing on disk differs.
   - WP container: `wpc-<slug>-wp`, image `wordpress:latest` (or a pinned
     PHP-version variant chosen in the Add Site sheet, e.g. `wordpress:php8.3-apache`),
     `-p 127.0.0.1:<port>:80`, env WORDPRESS_DB_HOST/USER/PASSWORD/NAME.
@@ -73,18 +78,36 @@ primary site.
 worktree of one repo inside it:
 - `id, parentSiteID, envSlug` (`<site-slug>-wt-<branch-slug>`), `repoRelPath`
   (e.g. `wp-content/plugins/my-plugin`), `branch`, `worktreePath`, `port`, `createdAt`.
-- On disk: `~/WP Container Sites/<site>/.envs/<branch-slug>/{wordpress,database}` plus
+- On disk: `~/WP Container Sites/<site>/.envs/<branch-slug>/wordpress` plus
   `~/WP Container Sites/<site>/.worktrees/<branch-slug>/` for the git worktree itself.
   `.envs`/`.worktrees` are hidden from the primary install (never inside `wordpress/`).
+  A `database/` folder exists only for an `--isolated-db` env — by default the env's
+  database is a schema on the PARENT's server (issue #17), so it has no data
+  directory of its own.
+- `sharedDatabase` + `databaseSchema` (persisted): shared mode and the `wpc_*`
+  schema name it owns. Records written before issue #17 decode as isolated and
+  keep their own container, so nothing existing changes behavior.
 
 **Creation flow (speed is the point — APFS makes cloning ~instant):**
 1. `git -C <repo> worktree add [-b] <worktreePath> <branch>` (create branch if new).
 2. Clone site files: `cp -Rc wordpress/ .envs/<b>/wordpress/` (APFS copy-on-write).
-3. Clone database:
-   - Fast path (parent stopped): `cp -Rc database/ .envs/<b>/database/`.
-   - Live path (parent running): one-shot `wordpress:cli` → `wp db export`, import
-     into the env's fresh MariaDB. (Default to whichever the parent's state allows.)
-4. Start env containers (same recipe as a site, names `wpc-<envSlug>-{wp,db}`,
+3. Clone the database:
+   - **Default — shared server (issue #17):** bring up the parent's db container
+     (only *it* needs to be running, not the parent's wp container), then
+     `CREATE DATABASE wpc_<env-slug>` + `GRANT` to the shared `wordpress` user and
+     fill it server-side with `mariadb-dump … | mariadb …` inside one one-shot
+     `mariadb:11` container. No host staging file, no dump buffered through a Swift
+     `String`. Guarded by a preflight: if the project's `wp-config.php` defines
+     `DB_NAME` literally instead of reading `WORDPRESS_DB_NAME`, shared mode would
+     silently write into the parent's database, so creation falls back to an
+     isolated container and warns.
+   - `--isolated-db` (dedicated container), fast path (parent stopped):
+     `cp -Rc database/ .envs/<b>/database/` — instant at any size.
+   - `--isolated-db`, live path (parent running): one-shot `wordpress:cli` →
+     `wp db export`, import into the env's fresh MariaDB.
+4. Start env containers (same recipe as a site, names `wpc-<envSlug>-wp` and
+   `wpc-<envSlug>-db` for an isolated env — a shared env talks to
+   `wpc-<site-slug>-db` instead and never creates one,
    labels `dev.wpcontainer.site=<site-slug>` + `dev.wpcontainer.env=<envSlug>`), with ONE
    extra mount that shadows the repo path:
    `-v <worktreePath>:/var/www/html/<repoRelPath>` — the worktree checkout replaces
@@ -94,8 +117,16 @@ worktree of one repo inside it:
    `wp cache flush`). Admin creds are inherited from the parent (cloned DB).
 6. Emit a machine-readable descriptor: `{url, port, path, worktreePath, branch, containers}`.
 
-**Deletion:** stop containers → `git worktree remove` (or leave with `--keep-worktree`)
-→ delete `.envs/<b>` → update store.
+**Deletion:** stop containers (never the parent's shared db container) → drop the
+env's own `wpc_*` schema, behind a prefix/charset guard so a bad name can't take
+out a sibling or the parent → `git worktree remove` (or leave with
+`--keep-worktree`) → delete `.envs/<b>` → update store. If the server is down the
+drop is skipped and the name is TOMBSTONED on the parent site
+(`Site.pendingSchemaDrops`), to be dropped by the next shared-env `create` — which
+drops only tombstoned names, never whatever a `SHOW DATABASES` shows minus what the
+store claims (that races a concurrent create, whose schema exists before its record
+does). A schema orphaned by a hard crash mid-create therefore leaks; leaking beats
+destroying a live env's database.
 
 **Automation API — the `wp-container` CLI.** Agents need a scriptable surface, so the
 core moves into a shared framework and a CLI executable (binary `wp-container`, convenience symlink `wpc`) ships alongside the app:
@@ -133,7 +164,9 @@ first-class in the sidebar:
   `startSiteWithEnvs`/`stopSiteWithEnvs`, so app, CLI and MCP behave
   identically; the parent is sequenced first and per-env failures surface
   individually without aborting the rest). Envs remain individually
-  start/stoppable.
+  start/stoppable — starting one whose database is shared brings up the parent's
+  db container if needed, and stopping the last running one of a stopped site
+  shuts it back down so it never lingers (issue #17).
 - The menu bar extra nests running envs under their parent site row (small
   indent + branch glyph).
 - Each site's detail view keeps its "Branches" card, plus the "New branch

@@ -119,6 +119,99 @@ public enum WPConfigService {
         return backup
     }
 
+    // MARK: - Shared-database safety preflight (issue #17)
+
+    /// The env var the `wordpress` image's `wp-config.php` template reads
+    /// `DB_NAME` from — and the hinge the whole shared-database feature turns on.
+    public static let dbNameEnvironmentVariable = "WORDPRESS_DB_NAME"
+
+    /// Whether pointing a container at a different schema via
+    /// `WORDPRESS_DB_NAME` will actually be honored by this site's
+    /// `wp-config.php`.
+    ///
+    /// This is the guard in front of issue #17's one genuinely dangerous failure
+    /// mode: a project that ships its own config with a hardcoded
+    /// `define('DB_NAME', 'wordpress')` would ignore the env var entirely and a
+    /// "shared" env would silently read and WRITE the parent site's database.
+    /// Anything we can't positively confirm reads as false, so the caller falls
+    /// back to a dedicated DB container.
+    ///
+    /// A missing `wp-config.php` is safe: the image's entrypoint generates one
+    /// from the `WORDPRESS_DB_*` environment on first boot.
+    ///
+    /// Comments are stripped before matching, and EVERY surviving `DB_NAME` define
+    /// must follow the environment. Looking at only the first match is how you get
+    /// fooled by the shape that matters most — a commented-out env-following
+    /// define sitting above the live hardcoded one:
+    /// ```php
+    /// // define('DB_NAME', getenv_docker('WORDPRESS_DB_NAME', 'wordpress'));
+    /// define('DB_NAME', 'wordpress');
+    /// ```
+    public static func dbNameFollowsEnvironment(wordpressFolder: URL) -> Bool {
+        let url = configURL(for: wordpressFolder)
+        guard FileManager.default.fileExists(atPath: url.path) else { return true }
+        guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return false }
+        let text = strippingPHPComments(raw)
+        // The DB_NAME define's value expression, whatever shape it has.
+        let pattern = #"define\s*\(\s*['\"]DB_NAME['\"]\s*,\s*(.*?)\s*\)\s*;"#
+        guard let re = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) else { return false }
+        let ns = text as NSString
+        let matches = re.matches(in: text, range: NSRange(location: 0, length: ns.length))
+        // No DB_NAME define we can reason about — assume unsafe.
+        guard !matches.isEmpty else { return false }
+        return matches.allSatisfy {
+            ns.substring(with: $0.range(at: 1)).contains(dbNameEnvironmentVariable)
+        }
+    }
+
+    /// Remove PHP comments (`//`, `#`, `/* … */`) while leaving string literals
+    /// intact, so a `define('DB_NAME', 'shop#1')` isn't truncated and a
+    /// commented-out define can't be mistaken for live code.
+    ///
+    /// A character scanner rather than a regex, because the two constructs are
+    /// mutually nesting: `'a // b'` is a string, `// 'a` is a comment. Heredocs
+    /// and Nowdocs are NOT modelled — a heredoc containing `/*` would over-strip.
+    /// That direction is safe here: over-stripping can only remove `define`s, and
+    /// removing them all makes `dbNameFollowsEnvironment` return false (isolated
+    /// fallback), never true.
+    static func strippingPHPComments(_ text: String) -> String {
+        enum State { case code, singleQuoted, doubleQuoted, lineComment, blockComment }
+        var state = State.code
+        var out = String()
+        out.reserveCapacity(text.count)
+        var escaped = false
+        let chars = Array(text)
+        var i = 0
+        while i < chars.count {
+            let ch = chars[i]
+            let next: Character? = i + 1 < chars.count ? chars[i + 1] : nil
+            switch state {
+            case .code:
+                if ch == "/", next == "/" { state = .lineComment; i += 2; continue }
+                if ch == "#" { state = .lineComment; i += 1; continue }
+                if ch == "/", next == "*" { state = .blockComment; i += 2; continue }
+                if ch == "'" { state = .singleQuoted }
+                if ch == "\"" { state = .doubleQuoted }
+                out.append(ch)
+            case .singleQuoted, .doubleQuoted:
+                out.append(ch)
+                if escaped { escaped = false }
+                else if ch == "\\" { escaped = true }
+                else if (state == .singleQuoted && ch == "'") || (state == .doubleQuoted && ch == "\"") {
+                    state = .code
+                }
+            case .lineComment:
+                // Keep the newline so line numbers and statement boundaries hold.
+                if ch == "\n" { out.append(ch); state = .code }
+            case .blockComment:
+                if ch == "*", next == "/" { state = .code; i += 2; continue }
+                if ch == "\n" { out.append(ch) }
+            }
+            i += 1
+        }
+        return out
+    }
+
     // MARK: - Development constants (§2c-bis)
 
     /// Debug switches surfaced in Settings → Development (all boolean).

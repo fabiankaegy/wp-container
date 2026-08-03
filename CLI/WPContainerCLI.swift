@@ -238,8 +238,7 @@ struct CreateCommand: AsyncParsableCommand {
             }
             try SiteFolders.ensure(for: created)
             // Write the per-site wp-cli shim at <site>/wp (§2e).
-            try? WPCLIShim.writeShim(slug: created.slug, siteRoot: created.path,
-                                     cliImage: WordPressImageCatalog.cliImage(for: created.imageTag))
+            try? WPCLIShim.writeShim(for: created, siteRoot: created.path, slug: created.slug)
             let resolvedGroupName = created.groupID.flatMap { id in updated.groups.first { $0.id == id }?.name }
             if output.json { emitLine(CLIJSON.string(SiteJSON(from: created, group: resolvedGroupName))) }
             else { emitLine("Created \(created.slug) at \(created.path.path) (port \(created.port))\(resolvedGroupName.map { " in group \"\($0)\"" } ?? "").") }
@@ -315,8 +314,11 @@ struct StartCommand: AsyncParsableCommand {
                 }
             case .env(let env):
                 // Guarded start (issue #5): dedupes against a concurrent
-                // action for the same env in THIS process.
-                _ = try await ctx.lifecycle.startInstance(env, pullPolicy: policy)
+                // action for the same env in THIS process. The parent goes along
+                // as `dbProvider` so a shared-database env can boot the server it
+                // borrows when the parent site is down (issue #17).
+                let parent = envelope.sites.first { $0.id == env.parentSiteID }
+                _ = try await ctx.lifecycle.startInstance(env, pullPolicy: policy, dbProvider: parent)
                 for warning in await ctx.lifecycle.drainWarnings(for: env.id) {
                     FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
                 }
@@ -353,6 +355,11 @@ struct StopCommand: AsyncParsableCommand {
                 await ctx.lifecycle.stopSiteWithEnvs(site, envs: envs)
             case .env(let env):
                 await ctx.lifecycle.stop(env)
+                // A shared DB container would otherwise linger after its last
+                // user stopped (issue #17) — that memory is the whole point.
+                if let parent = envelope.sites.first(where: { $0.id == env.parentSiteID }) {
+                    await ctx.lifecycle.stopSharedDatabaseIfUnused(parent: parent)
+                }
             }
             if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(target) stopped"))) }
             else { emitLine("Stopped \(target).") }
@@ -392,8 +399,18 @@ struct DeleteCommand: AsyncParsableCommand {
                 try? await CertificateAuthority().removeLeafCoverage(staleHosts)
             case .env(let env):
                 let parent = envelope.sites.first { $0.id == env.parentSiteID }
-                await ctx.worktrees.delete(env, parent: parent, keepBranch: true, keepWorktree: false)
-                _ = try await ctx.persistence.mutate { store in store.envs.removeAll { $0.id == env.id } }
+                let outcome = await ctx.worktrees.delete(env, parent: parent, keepBranch: true, keepWorktree: false)
+                _ = try await ctx.persistence.mutate { store in
+                    store.envs.removeAll { $0.id == env.id }
+                    // The DB server was down, so the env's schema is still there
+                    // (issue #17). Tombstone it for the next shared-env create.
+                    if let orphan = outcome.tombstonedSchema, let parent,
+                       let i = store.sites.firstIndex(where: { $0.id == parent.id }),
+                       !store.sites[i].pendingSchemaDrops.contains(orphan) {
+                        store.sites[i].pendingSchemaDrops.append(orphan)
+                    }
+                }
+                if let parent { await ctx.lifecycle.stopSharedDatabaseIfUnused(parent: parent) }
                 try? await CertificateAuthority().removeLeafCoverage(["\(env.envSlug).localhost"])
             }
             if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(target) deleted"))) }
@@ -421,6 +438,7 @@ struct WorktreeCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Branch name.") var branch: String
     @Option(name: .long, help: "Base ref for a new branch.") var from: String?
     @Flag(name: .long, help: "Skip seeding the worktree with the parent's gitignored runtime deps (vendor/, built assets, provisioned plugins); leaves a bare checkout.") var noProvision: Bool = false
+    @Flag(name: .long, help: "Give the environment its own MariaDB container instead of a schema on the parent site's server. Costs ~470 MB of memory; worth it only for a very large database, where cloning the parent's data directory beats a logical dump+restore.") var isolatedDb: Bool = false
     @OptionGroup var output: JSONOptions
 
     func run() async throws {
@@ -445,13 +463,23 @@ struct WorktreeCreate: AsyncParsableCommand {
             }) else { throw CLIErrorJSON("no_free_port") }
 
             do {
-                let env = try await ctx.worktrees.create(parent: parent, parentIsRunning: parentRunning,
-                                                         repoRelPath: repo, branch: branch, from: from,
-                                                         port: reserved.port, reserved: reserved,
-                                                         provision: !noProvision)
+                let outcome = try await ctx.worktrees.create(parent: parent, parentIsRunning: parentRunning,
+                                                            repoRelPath: repo, branch: branch, from: from,
+                                                            port: reserved.port, reserved: reserved,
+                                                            provision: !noProvision, isolatedDB: isolatedDb)
+                let env = outcome.env
+                let reaped = outcome.reapedSchemas
                 _ = try await ctx.persistence.mutate { store in
                     store.envs.removeAll { $0.id == env.id }
                     store.envs.append(env)
+                    // Clear exactly the tombstones whose DROP succeeded (#17); one
+                    // that failed keeps its reminder for the next create.
+                    if !reaped.isEmpty, let i = store.sites.firstIndex(where: { $0.id == parent.id }) {
+                        store.sites[i].pendingSchemaDrops.removeAll { reaped.contains($0) }
+                    }
+                }
+                for warning in await ctx.lifecycle.drainWarnings(for: env.id) {
+                    FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
                 }
                 if output.json { emitLine(CLIJSON.string(WorktreeDescriptor(from: env))) }
                 else { emitLine("Created env \(env.envSlug) at \(env.localURL.absoluteString) (worktree: \(env.worktreePath.path)).") }
