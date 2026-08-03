@@ -141,6 +141,9 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// so a broken wake doesn't spin silently forever. Cleared by a later
     /// successful wake.
     private var wakeFailures: [String: String] = [:]
+    /// In-flight `container list` for the wake gate, shared by every request that
+    /// arrives while it runs — see `freshRunningNames()`.
+    private var runningNamesProbe: Task<Set<String>?, Never>?
 
     /// Drives idle-stop and wake-on-request (issue #16). Optional only so the
     /// proxy stays constructible without one; both real hosts (the app and
@@ -578,6 +581,39 @@ public final class HTTPSProxy: @unchecked Sendable {
         Set(try await cli.list(all: true).filter(\.isRunning).map(\.name))
     }
 
+    /// `runningContainerNames()` with concurrent callers coalesced onto one
+    /// `container list`.
+    ///
+    /// A browser hitting a stopped site doesn't make one request, it makes thirty
+    /// — the document plus every asset — and each one reaches the wake gate at the
+    /// same moment. Without coalescing that is thirty `container list` invocations
+    /// for one answer. Sharing the in-flight probe keeps the answer exactly as
+    /// fresh (nobody gets data from before their own request) at one process's
+    /// cost, which is why this is a shared Task rather than a cache with a TTL: a
+    /// TTL could hand back a snapshot predating a start and trigger a wake against
+    /// a container that already exists — the very thing the gate is here to stop.
+    /// nil ⇒ the listing FAILED, which is not the same as "nothing is running":
+    /// callers must treat it as "cannot tell" and refuse to act.
+    private func freshRunningNames() async -> Set<String>? {
+        if let existing = stateLock.withLock({ runningNamesProbe }) {
+            return await existing.value
+        }
+        let probe = Task<Set<String>?, Never> { [weak self] in
+            guard let self else { return nil }
+            return try? await self.runningContainerNames()
+        }
+        // Racing callers that both found nil: keep the first, and the loser simply
+        // awaits the winner instead of running its own probe.
+        let winner: Task<Set<String>?, Never> = stateLock.withLock {
+            if let existing = runningNamesProbe { return existing }
+            runningNamesProbe = probe
+            return probe
+        }
+        let names = await winner.value
+        if winner == probe { stateLock.withLock { runningNamesProbe = nil } }
+        return names
+    }
+
     /// Minutes since the instance was last used, taking the LATEST of three
     /// signals — any one of them is enough to keep an instance alive:
     ///
@@ -652,7 +688,10 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// would be shown that as a wake failure.
     private func resolveDownstream(route: Route) async -> DownstreamOutcome {
         guard lifecycle != nil, let slug = route.slug else { return .stopped }
-        let running = (try? await runningContainerNames()) ?? []
+        // FAIL CLOSED on an unreadable container list: "I can't tell" must not be
+        // read as "it's down". Waking on that guess would `container run` a name
+        // that may well exist and surface the collision as a wake failure.
+        guard let running = await freshRunningNames() else { return .stopped }
         // `Route` doesn't carry the wp container name for a mailbox route, but the
         // naming convention is the same everywhere else in the codebase.
         let wpRunning = running.contains("wpc-\(slug)-wp")
