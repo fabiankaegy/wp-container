@@ -126,10 +126,12 @@ Sites are provisioned automatically (no install wizard) and log in with
 - **Per-site resource limits** — cap CPU/memory per site in
   Settings → Resources or `wp-container limits <slug> --cpus 2 --memory 512`
   (see [docs/RESOURCES.md](docs/RESOURCES.md)).
-- **Auto-stop idle, wake on request** — unused branch environments are stopped
-  after 15 minutes (sites: opt-in), and the next request to their URL starts them
-  again behind a "waking up" page that refreshes into the live site. Tune it per
-  instance in the Idle stop card or with `wp-container idle <slug> --minutes 30`.
+- **Auto-stop idle, wake on request** (opt-in) — enable it on a site or branch
+  environment and the proxy stops it once nobody has used it for N minutes, then
+  starts it again on the next request behind a "waking up" page that refreshes
+  into the live site. `wp-container idle <slug> --minutes 15`, the Idle stop card,
+  or the `set_idle_stop` MCP tool. Recommended for agent-created environments —
+  see the activity caveats in [docs/RESOURCES.md](docs/RESOURCES.md).
 - **Touch ID for privileged actions** — the optional signed hosts-helper
   makes custom-domain changes a Touch ID dialog instead of a password prompt
   (one-time enable in Settings → General).
@@ -168,23 +170,31 @@ measured usage, and the limitations to be aware of are documented in
 reservations, stopped sites cost zero, and stopping unused sites is the lever
 that matters — which is why the proxy now does it for you (below).
 
-### Idle environments stop themselves and wake on request
+### Idle environments can stop themselves and wake on request
 
 Apple `container` never returns guest memory to macOS, so a running VM's host
 footprint is its high-water mark and only stopping it reclaims anything. VM boot
 is ~1s, which makes that trade cheap: the reverse proxy tracks when each site and
-environment was last requested, stops the ones past their timeout, and starts
-them again on the next request while serving a page that auto-refreshes into the
-live site.
+environment was last used, stops the ones past their timeout, and starts them
+again on the next request while serving a page that auto-refreshes into the live
+site.
 
-- Defaults: branch environments **15 minutes**, parent sites **off** (a site is
-  what you're working in; auto-stopping it is opt-in). A site is additionally
-  never auto-stopped while any of its environments are running.
-- Stopping an environment also retires the parent's shared MariaDB container once
+- **Off by default** — enable it per site or environment. 15 minutes is the
+  recommended value for environments you create and then finish with.
+- **What counts as use:** requests to the proxied hostnames
+  (`<slug>.localhost`, custom domains), plus wp-cli, MCP tool calls, magic-login
+  links and explicit starts. A request straight to `http://127.0.0.1:<port>` is
+  **not** visible to it — and that's the URL branch environments are advertised
+  at — so leave it off for environments you browse that way. Wake-on-request works
+  only through the proxied hostname too. Details and the full table are in
+  [docs/RESOURCES.md](docs/RESOURCES.md).
+- A site is never auto-stopped while any of its environments are running, and
+  stopping an environment also retires the parent's shared MariaDB container once
   nothing else needs it — that's the other ~470 MB.
 - Configure per instance: the **Idle stop** card on a site's Settings tab or an
-  environment's detail pane, or
-  `wp-container idle <slug> [--minutes N | --off | --default]`.
+  environment's detail pane,
+  `wp-container idle <slug> [--minutes N | --off | --default]`, or the
+  `set_idle_stop` MCP tool so an agent can opt its own environment in and out.
 - Enforcement lives in whichever process owns the proxy — the app, or
   `wp-container proxy serve`. With no proxy listening, nothing is stopped and
   nothing is woken; the CLI and the card both tell you when that's the case.
