@@ -314,8 +314,11 @@ struct StartCommand: AsyncParsableCommand {
                 }
             case .env(let env):
                 // Guarded start (issue #5): dedupes against a concurrent
-                // action for the same env in THIS process.
-                _ = try await ctx.lifecycle.startInstance(env, pullPolicy: policy)
+                // action for the same env in THIS process. The parent goes along
+                // as `dbProvider` so a shared-database env can boot the server it
+                // borrows when the parent site is down (issue #17).
+                let parent = envelope.sites.first { $0.id == env.parentSiteID }
+                _ = try await ctx.lifecycle.startInstance(env, pullPolicy: policy, dbProvider: parent)
                 for warning in await ctx.lifecycle.drainWarnings(for: env.id) {
                     FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
                 }
@@ -352,6 +355,12 @@ struct StopCommand: AsyncParsableCommand {
                 await ctx.lifecycle.stopSiteWithEnvs(site, envs: envs)
             case .env(let env):
                 await ctx.lifecycle.stop(env)
+                // A shared DB container would otherwise linger after its last
+                // user stopped (issue #17) — that memory is the whole point.
+                if let parent = envelope.sites.first(where: { $0.id == env.parentSiteID }) {
+                    let siblings = envelope.envs.filter { $0.parentSiteID == parent.id && $0.id != env.id }
+                    await ctx.lifecycle.stopSharedDatabaseIfUnused(parent: parent, siblingEnvs: siblings)
+                }
             }
             if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(target) stopped"))) }
             else { emitLine("Stopped \(target).") }
@@ -420,6 +429,7 @@ struct WorktreeCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Branch name.") var branch: String
     @Option(name: .long, help: "Base ref for a new branch.") var from: String?
     @Flag(name: .long, help: "Skip seeding the worktree with the parent's gitignored runtime deps (vendor/, built assets, provisioned plugins); leaves a bare checkout.") var noProvision: Bool = false
+    @Flag(name: .long, help: "Give the environment its own MariaDB container instead of a schema on the parent site's server. Costs ~470 MB of memory; worth it only for a very large database, where cloning the parent's data directory beats a logical dump+restore.") var isolatedDb: Bool = false
     @OptionGroup var output: JSONOptions
 
     func run() async throws {
@@ -444,13 +454,20 @@ struct WorktreeCreate: AsyncParsableCommand {
             }) else { throw CLIErrorJSON("no_free_port") }
 
             do {
+                // Live sibling records (the reserved one excluded) so the shared
+                // path's orphan sweep can tell a live schema from a leaked one.
+                let siblings = envelope.envs.filter { $0.parentSiteID == parent.id && $0.id != reserved.id }
                 let env = try await ctx.worktrees.create(parent: parent, parentIsRunning: parentRunning,
                                                          repoRelPath: repo, branch: branch, from: from,
                                                          port: reserved.port, reserved: reserved,
-                                                         provision: !noProvision)
+                                                         provision: !noProvision, isolatedDB: isolatedDb,
+                                                         siblingEnvs: siblings)
                 _ = try await ctx.persistence.mutate { store in
                     store.envs.removeAll { $0.id == env.id }
                     store.envs.append(env)
+                }
+                for warning in await ctx.lifecycle.drainWarnings(for: env.id) {
+                    FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
                 }
                 if output.json { emitLine(CLIJSON.string(WorktreeDescriptor(from: env))) }
                 else { emitLine("Created env \(env.envSlug) at \(env.localURL.absoluteString) (worktree: \(env.worktreePath.path)).") }
