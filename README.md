@@ -179,8 +179,10 @@ Practical consequences:
   stopping the last running env of a stopped site shuts it down again. Stopping or
   deleting an env never touches the parent's database container itself.
 - Deleting an env drops exactly its own `wpc_*` schema. If the server happens to
-  be down at that moment the schema is left behind and swept the next time an env
-  is created for that site.
+  be down at that moment, the name is recorded on the parent site and dropped the
+  next time an env is created for it. Only names recorded that way are ever
+  dropped — never "every `wpc_*` schema the store doesn't recognise", which would
+  race an environment being created alongside it and destroy a live database.
 - The env's WordPress finds its schema through `WORDPRESS_DB_NAME`, so nothing on
   disk is edited. If a project ships its own `wp-config.php` with a hardcoded
   `define('DB_NAME', …)` the env would silently write into the parent's database —
