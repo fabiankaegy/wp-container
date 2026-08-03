@@ -29,6 +29,7 @@ struct WPContainerCLI: AsyncParsableCommand {
             MailpitCommand.self,
             DBCommand.self,
             LimitsCommand.self,
+            IdleCommand.self,
             DomainCommand.self,
             ResolveSiteCommand.self,
             SetupCommand.self,

@@ -176,6 +176,12 @@ enum MCPToolDispatch {
             "provisioned": site.provisioned,
             "mailpitEnabled": site.mailpitEnabled,
             "mailboxUrl": site.mailboxURL?.absoluteString as Any? ?? NSNull(),
+            // Auto-stop-when-idle (issue #16). `idleStopMinutes` is the persisted
+            // setting (null = follow the default), `effectiveIdleStopMinutes` the
+            // timeout actually in force with the default resolved — 0 means the
+            // site is never auto-stopped. Sites default to off; envs to 15 min.
+            "idleStopMinutes": site.idleStopMinutes as Any? ?? NSNull(),
+            "effectiveIdleStopMinutes": site.effectiveIdleStopMinutes,
             // Read off the instance rather than the `SiteRecipe` constants (#17).
             // `resolveSite` only ever returns a SITE, which always owns its
             // `wordpress` schema — going through the instance just means this

@@ -30,6 +30,9 @@ struct EnvDetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     overviewCard
+                    IdleStopCard(configured: env.idleStopMinutes, isEnv: true) { minutes in
+                        vm.setIdleStop(env, minutes: minutes)
+                    }
                     LogsView(env: env)
                     dangerZone
                 }

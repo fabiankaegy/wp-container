@@ -204,6 +204,99 @@ struct LimitsCommand: AsyncParsableCommand {
     }
 }
 
+// MARK: - idle (issue #16)
+
+struct IdleCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "idle",
+        abstract: "Show or set when a site or environment is auto-stopped while idle: idle <slug> [--minutes N | --off | --default].",
+        discussion: """
+        A stopped container is the only way to give its memory back to macOS \
+        (Apple `container` never releases guest memory), and VM boot is ~1s — so \
+        idle environments are parked and woken again on the next request by \
+        whichever process hosts the HTTPS proxy (the app, or \
+        `wp-container proxy serve`). Hitting a parked URL in the browser serves a \
+        "waking up" page that refreshes into the live site.
+
+        Defaults: worktree environments 15 minutes, parent sites OFF. A parent \
+        site is never auto-stopped while any of its environments are running. \
+        Accepts a site slug or an env slug.
+        """
+    )
+    @Argument(help: "Site slug or env slug.") var slug: String
+    @Option(name: .long, help: "Auto-stop after this many idle minutes.") var minutes: Int?
+    @Flag(name: .long, help: "Never auto-stop this instance.") var off = false
+    @Flag(name: .long, help: "Follow the built-in default (environments 15 min, sites off).") var `default` = false
+    @OptionGroup var output: JSONOptions
+
+    func run() async throws {
+        let ctx = CLIContext()
+        do {
+            // Exactly one intent, or none (which means "report").
+            let intents = [minutes != nil, off, `default`].filter { $0 }.count
+            guard intents <= 1 else {
+                throw CLIErrorJSON("bad_args", detail: "--minutes, --off and --default are mutually exclusive")
+            }
+            if let minutes, minutes <= 0 {
+                throw CLIErrorJSON("bad_args", detail: "--minutes must be greater than 0 (use --off to disable)")
+            }
+            let envelope = try await ctx.load()
+            guard let resolved = resolveTarget(slug, in: envelope) else {
+                throw CLIErrorJSON("not_found", detail: slug)
+            }
+            let isEnv = resolved.instance.envLabel != nil
+            // nil = follow the default, 0 = off, N = N minutes. `--default` is
+            // spelled as an explicit erase so it can't be confused with "0".
+            let newValue: Int?? = {
+                if let minutes { return .some(.some(minutes)) }
+                if off { return .some(.some(0)) }
+                if `default` { return .some(.none) }
+                return .none // no intent: report only
+            }()
+
+            var configured = resolved.instance.idleStopMinutes
+            if let newValue {
+                let updated = try await ctx.persistence.mutate { env in
+                    switch resolved {
+                    case .site(let site):
+                        if let i = env.sites.firstIndex(where: { $0.id == site.id }) {
+                            env.sites[i].idleStopMinutes = newValue
+                        }
+                    case .env(let wtEnv):
+                        if let i = env.envs.firstIndex(where: { $0.id == wtEnv.id }) {
+                            env.envs[i].idleStopMinutes = newValue
+                        }
+                    }
+                }
+                switch resolved {
+                case .site(let site):
+                    configured = updated.sites.first { $0.id == site.id }?.idleStopMinutes
+                case .env(let wtEnv):
+                    configured = updated.envs.first { $0.id == wtEnv.id }?.idleStopMinutes
+                }
+            }
+            let effective = IdlePolicy.effectiveMinutes(configured: configured, isEnv: isEnv)
+            let proxyRunning = ProxyControl.current() != nil
+            if output.json {
+                emitLine(MCPJSON.string([
+                    "ok": true,
+                    "slug": slug,
+                    "kind": isEnv ? "env" : "site",
+                    "idleStopMinutes": configured as Any? ?? NSNull(),
+                    "effectiveIdleStopMinutes": effective,
+                    "enforced": proxyRunning,
+                ]))
+            } else {
+                var line = "\(slug): auto-stop when idle \(IdlePolicy.label(configured: configured, isEnv: isEnv))."
+                if effective > 0 && !proxyRunning {
+                    line += " The proxy isn’t running, so nothing is enforcing it — start the app or run `wp-container proxy serve`."
+                }
+                emitLine(line)
+            }
+        } catch { throw failCommand(error, json: output.json) }
+    }
+}
+
 // MARK: - domain (§2i)
 
 struct DomainCommand: AsyncParsableCommand {
