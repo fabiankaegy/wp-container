@@ -268,9 +268,29 @@ wp-cli is a first-class citizen on all four surfaces (implementation: one-shot
 - **HTTPS termination on the host, not in containers:** the app runs a lightweight
   TLS-terminating reverse proxy (Network.framework listener, port 443 — unprivileged
   on modern macOS — with 8443 fallback) that routes by Host header:
-  `https://my-blog.localhost` → `127.0.0.1:8881`. Containers stay untouched.
+  `https://my-blog.localhost` → the site's container. SITE containers stay
+  untouched — they keep publishing their own `127.0.0.1:8881` and the proxy is
+  purely additive in front of them.
   The CLI gains `wp-container proxy serve` (daemonizable) so HTTPS works app-closed;
   app and CLI negotiate who owns the listener via a pidfile.
+- **Amendment (issue #16 follow-through) — worktree ENVS are not untouched.** An
+  env's wp container publishes NOTHING; the proxy binds `127.0.0.1:<env port>`
+  itself, one loopback listener per env, and relays to the container's vmnet IP.
+  The premise above held only as long as the proxy was an optional extra path, and
+  for envs it can't be: `http://127.0.0.1:<port>` is the ONLY URL an env is ever
+  advertised at (app, CLI, MCP payloads, magic-login) and it is what WordPress has
+  pinned as `home`/`siteurl`. Leaving that URL on Apple's forwarder meant the idle
+  clock could not see the traffic that mattered and wake-on-request could not fire
+  where users actually clicked — the two halves of issue #16 — while also routing
+  every env's bulk HTTP through the lossy forwarder. Owning the socket fixes all
+  three at once, at the price of envs now depending on proxy liveness (the app
+  ensures it; CLI/MCP warn). Env starts stay independent of it: readiness is
+  probed at the container's vmnet IP rather than the port. Env MAILPIT ports stay
+  published — light traffic, never a wake or idle signal, nothing to gain.
+  TRANSITION: an env container still running from a pre-change build holds its own
+  port, so the proxy logs one warning per port and retries every few seconds; that
+  env keeps working through its published port and the proxy takes the socket after
+  the env is restarted once.
 - **Proxy liveness is a correctness concern, not an option** (user-reported bug:
   after an app relaunch nothing listened on 443 → every HTTPS/custom-domain site
   showed "Safari Can't Connect"). The "start proxy at launch" setting is opt-OUT

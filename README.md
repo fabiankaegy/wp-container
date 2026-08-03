@@ -126,12 +126,12 @@ Sites are provisioned automatically (no install wizard) and log in with
 - **Per-site resource limits** — cap CPU/memory per site in
   Settings → Resources or `wp-container limits <slug> --cpus 2 --memory 512`
   (see [docs/RESOURCES.md](docs/RESOURCES.md)).
-- **Auto-stop idle, wake on request** (opt-in) — enable it on a site or branch
-  environment and the proxy stops it once nobody has used it for N minutes, then
-  starts it again on the next request behind a "waking up" page that refreshes
-  into the live site. `wp-container idle <slug> --minutes 15`, the Idle stop card,
-  or the `set_idle_stop` MCP tool. Recommended for agent-created environments —
-  see the activity caveats in [docs/RESOURCES.md](docs/RESOURCES.md).
+- **Auto-stop idle, wake on request** — a branch environment nobody has used for
+  15 minutes is stopped and its ~500 MB returned to macOS; the next request to its
+  URL starts it again behind a "waking up" page that refreshes into the live site.
+  On by default for environments, opt-in for sites. `wp-container idle <slug>`,
+  the Idle stop card, or the `set_idle_stop` MCP tool — see
+  [docs/RESOURCES.md](docs/RESOURCES.md).
 - **Touch ID for privileged actions** — the optional signed hosts-helper
   makes custom-domain changes a Touch ID dialog instead of a password prompt
   (one-time enable in Settings → General).
@@ -179,25 +179,30 @@ environment was last used, stops the ones past their timeout, and starts them
 again on the next request while serving a page that auto-refreshes into the live
 site.
 
-- **Off by default** — enable it per site or environment. 15 minutes is the
-  recommended value for environments you create and then finish with.
-- **What counts as use:** requests to the proxied hostnames
-  (`<slug>.localhost`, custom domains), plus wp-cli, MCP tool calls, magic-login
-  links and explicit starts. A request straight to `http://127.0.0.1:<port>` is
-  **not** visible to it — and that's the URL branch environments are advertised
-  at — so leave it off for environments you browse that way. Wake-on-request works
-  only through the proxied hostname too. Details and the full table are in
-  [docs/RESOURCES.md](docs/RESOURCES.md).
+- **Environments: on by default (15 minutes). Sites: off by default.** The
+  difference is observability, not importance. An environment's container
+  publishes no host port — the proxy binds `127.0.0.1:<env port>` itself and
+  relays to the container — so the one URL every surface advertises (and that
+  WordPress has pinned as `home`/`siteurl`) runs through the proxy. Every request
+  to an environment therefore counts as use, and reopening a parked one wakes it
+  **at that same URL**. A *site* still publishes its own port, and a request
+  straight to `http://127.0.0.1:<port>` bypasses the proxy — that's the one
+  remaining blind spot, and why sites stay opt-in.
+- **What else counts as use:** wp-cli, MCP tool calls, magic-login links and
+  explicit starts, recorded as a persisted stamp so they work across processes.
+  Full table in [docs/RESOURCES.md](docs/RESOURCES.md).
 - A site is never auto-stopped while any of its environments are running, and
   stopping an environment also retires the parent's shared MariaDB container once
   nothing else needs it — that's the other ~470 MB.
 - Configure per instance: the **Idle stop** card on a site's Settings tab or an
   environment's detail pane,
   `wp-container idle <slug> [--minutes N | --off | --default]`, or the
-  `set_idle_stop` MCP tool so an agent can opt its own environment in and out.
-- Enforcement lives in whichever process owns the proxy — the app, or
-  `wp-container proxy serve`. With no proxy listening, nothing is stopped and
-  nothing is woken; the CLI and the card both tell you when that's the case.
+  `set_idle_stop` MCP tool so an agent can opt its own environment out while it's
+  mid-task and back in when it's done.
+- Enforcement — and, for environments, reachability — lives in whichever process
+  owns the proxy: the app, or `wp-container proxy serve`. The app starts it
+  automatically when an environment starts; the CLI and MCP warn when nothing is
+  listening (the environment still starts; wp-cli and MCP need no HTTP).
 
 ### Branch environments share the parent's database
 

@@ -7,10 +7,11 @@ import WPContainerKit
 /// trade is memory for a moment of latency.
 ///
 /// Follows `ResourcesCard`'s Default/override shape — the picker's "Default"
-/// state persists `nil`, which currently resolves to OFF for both sites and envs.
-/// The card states plainly what the idle clock can and cannot see, because
-/// enabling it on an instance you only ever reach at `127.0.0.1:<port>` would
-/// look like a bug rather than a limitation (see `IdlePolicy`).
+/// state persists `nil`, which resolves to 15 minutes for an environment (whose
+/// every request the proxy sees) and to OFF for a site. The card states plainly
+/// what the idle clock can and cannot see, because a site you only ever reach at
+/// `127.0.0.1:<port>` would look like a bug rather than a limitation (see
+/// `IdlePolicy`).
 struct IdleStopCard: View {
     @Environment(AppViewModel.self) private var vm
 
@@ -57,7 +58,7 @@ struct IdleStopCard: View {
                 }
 
                 if effective > 0 {
-                    Text(IdlePolicy.activityCaveat)
+                    Text(IdlePolicy.activityNote(isEnv: isEnv))
                         .font(.caption2).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -76,8 +77,8 @@ struct IdleStopCard: View {
 
     private var detailText: String {
         if isEnv {
-            return "Off by default. Turn it on for environments you create and finish with — an agent’s branch environment, say — and its ~500 MB comes back when nobody is using it. Opening its <slug>.localhost URL starts it again in about a second."
+            return "On by default (\(IdlePolicy.defaultEnvMinutes) minutes). An environment nobody is using gives its ~500 MB back, and the next request to its URL starts it again in about a second behind a page that refreshes into the site."
         }
-        return "Off by default — you’re usually working in a site. When on, it is never stopped while any of its environments are running, and opening its URL starts it again."
+        return "Off by default — you’re usually working in a site. When on, it is never stopped while any of its environments are running, and opening its proxied URL starts it again."
     }
 }
