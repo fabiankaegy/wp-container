@@ -19,6 +19,10 @@ struct IdleStopCard: View {
     let configured: Int?
     /// Envs and sites have different defaults and different copy.
     let isEnv: Bool
+    /// For an ENV: the port whose ownership decides whether this policy is being
+    /// enforced at all (issue #16 follow-through). nil for sites, whose enforcement
+    /// only needs a proxy to exist.
+    var envPort: Int? = nil
     let onChange: (Int?) -> Void
 
     private var selection: Binding<Int?> {
@@ -32,6 +36,28 @@ struct IdleStopCard: View {
     /// Enforced by whichever process hosts the proxy — with no proxy listening
     /// nothing stops anything, so say so rather than lying with a picker.
     private var proxyRunning: Bool { vm.proxyPort != nil }
+
+    /// Why this setting is NOT currently in force, or nil when it is.
+    ///
+    /// For an env there are two distinct answers, and the second one is the whole
+    /// reason the proxy publishes its port report: a running proxy that does not
+    /// own the env's socket cannot see its traffic, and so deliberately refuses to
+    /// judge it idle (see `HTTPSProxy.sweepIdleInstances`).
+    private var enforcementProblem: String? {
+        guard let envPort else {
+            return proxyRunning ? nil
+                : "The reverse proxy isn’t running, so nothing is enforcing this yet."
+        }
+        switch ProxyControl.envPortOwnership(envPort) {
+        case .noProxy:
+            return "The reverse proxy isn’t running, so nothing is enforcing this yet."
+        case .conflicted:
+            return "The proxy doesn’t own port \(envPort), so it can’t see this environment’s "
+                + "traffic and won’t stop it. Stop and start the environment once."
+        case .owned, .unknown:
+            return nil
+        }
+    }
 
     var body: some View {
         SectionCard(title: "Idle stop", systemImage: "moon.zzz") {
@@ -62,8 +88,8 @@ struct IdleStopCard: View {
                         .font(.caption2).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                if effective > 0 && !proxyRunning {
-                    Text("The reverse proxy isn’t running, so nothing is enforcing this yet.")
+                if effective > 0, let notEnforced = enforcementProblem {
+                    Text(notEnforced)
                         .font(.caption2).foregroundStyle(.tertiary)
                 }
             }

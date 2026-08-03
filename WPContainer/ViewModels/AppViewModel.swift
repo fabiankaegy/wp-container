@@ -530,9 +530,31 @@ public final class AppViewModel {
         }
     }
 
+    /// The single in-flight `ensureProxyRunning()` run, so concurrent callers
+    /// await one attempt instead of racing (issue #16 follow-through).
+    ///
+    /// This became load-bearing when env starts and env creation started calling
+    /// it: the early-out checks (`ProxyControl.current()`, `proxy.boundPort`) both
+    /// read state that only becomes true AFTER the `await proxy.start()` inside,
+    /// and every caller is on the MainActor — so two entries that suspend at that
+    /// await both proceed to `start()`, double-binding listeners and spinning two
+    /// refresh + idle loops in one process.
+    private var ensureProxyTask: Task<Void, Never>?
+
     /// Start the in-app HTTPS proxy unless an external `proxy serve` already owns
     /// the listener.
     public func ensureProxyRunning() async {
+        if let existing = ensureProxyTask { await existing.value; return }
+        let task = Task { @MainActor [weak self] in
+            await self?.startProxyIfNeeded()
+            return ()
+        }
+        ensureProxyTask = task
+        await task.value
+        ensureProxyTask = nil
+    }
+
+    private func startProxyIfNeeded() async {
         if let status = ProxyControl.current() { proxyPort = status.port; return }
         if proxy.boundPort != nil { proxyPort = proxy.boundPort; return }
         do {
@@ -575,10 +597,23 @@ public final class AppViewModel {
         if anySiteNeedsProxy { await ensureProxyRunning() }
     }
 
-    /// Cheap liveness refresh for proxy status lines: adopt an externally-owned
-    /// listener (e.g. `wp-container proxy serve`) if one has appeared.
+    /// Cheap liveness refresh for proxy status lines, in BOTH directions: adopt an
+    /// externally-owned listener (e.g. `wp-container proxy serve`) if one has
+    /// appeared, and clear a recorded port that no longer accepts.
+    ///
+    /// Clearing matters as much as adopting now that env URLs depend on the proxy:
+    /// this value is what the env pane and the Idle stop card read to decide
+    /// whether to warn, and a stale non-nil made both of them quietly reassuring
+    /// about a proxy that had died.
     public func refreshProxyLiveness() {
-        if proxyPort == nil { proxyPort = ProxyControl.current()?.port }
+        if let port = proxyPort {
+            // Our own in-process listener is authoritative for us; otherwise the
+            // recorded port must actually be accepting.
+            if proxy.boundPort == port { return }
+            if !ProxyControl.isPortAccepting(port) { proxyPort = ProxyControl.current()?.port }
+            return
+        }
+        proxyPort = ProxyControl.current()?.port
     }
 
     /// Install the local CA as a trusted root (prompts for admin), then refresh.

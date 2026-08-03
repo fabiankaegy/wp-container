@@ -481,7 +481,7 @@ private struct ProxySettingsPane: View {
             SectionCard(title: "HTTPS Proxy", systemImage: "lock.shield") {
                 VStack(alignment: .leading, spacing: 14) {
                     SettingRow(title: "Start HTTPS proxy at launch",
-                               explanation: "Start the local HTTPS reverse proxy when WP Container opens, so https://<site>.localhost and custom domains work right away. Even when off, the proxy still starts whenever a site that needs it exists or is started.") {
+                               explanation: "Start the local HTTPS reverse proxy when WP Container opens, so https://<site>.localhost and custom domains work right away. Turning it off has little effect in practice: the proxy also starts whenever anything needs it — including any branch environment, whose http://127.0.0.1:<port> URL the proxy serves directly (its container publishes no port of its own), so it auto-starts as soon as one environment exists.") {
                         Toggle("", isOn: $autoStartProxy)
                             .labelsHidden().toggleStyle(.switch)
                     }
@@ -498,7 +498,7 @@ private struct ProxySettingsPane: View {
                             Text("Proxy running on port \(String(port)).")
                                 .font(.caption).foregroundStyle(.secondary)
                         } else {
-                            Text("Proxy not running. It starts on demand when a site enables HTTPS.")
+                            Text("Proxy not running. Branch-environment URLs don’t answer without it, and it starts on demand when a site enables HTTPS.")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()

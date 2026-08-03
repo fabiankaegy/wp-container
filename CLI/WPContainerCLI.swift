@@ -311,8 +311,10 @@ struct StartCommand: AsyncParsableCommand {
                     FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
                 }
                 // Any env in the fan-out is served by the proxy, not by a
-                // published port (issue #16 follow-through).
-                if !envs.isEmpty, let warning = ProxyControl.envProxyWarning() {
+                // published port (issue #16 follow-through). Per-env, because the
+                // answer differs per port: one may be served while another collides
+                // with a pre-upgrade container still publishing it.
+                for warning in Set(envs.compactMap { ProxyControl.envProxyWarning(port: $0.port) }) {
                     FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
                 }
                 // Env failures are non-fatal warnings; a parent failure fails
@@ -335,8 +337,8 @@ struct StartCommand: AsyncParsableCommand {
                     FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
                 }
                 // The env is up either way — but its URL only answers when a
-                // proxy owns the port (issue #16 follow-through).
-                if let warning = ProxyControl.envProxyWarning() {
+                // proxy owns THIS port (issue #16 follow-through).
+                if let warning = ProxyControl.envProxyWarning(port: env.port) {
                     FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
                 }
             }
@@ -512,7 +514,7 @@ struct WorktreeCreate: AsyncParsableCommand {
                 }
                 // The env was created and started; its URL, though, is the
                 // proxy's to serve (issue #16 follow-through).
-                if let warning = ProxyControl.envProxyWarning() {
+                if let warning = ProxyControl.envProxyWarning(port: env.port) {
                     FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
                 }
                 if output.json { emitLine(CLIJSON.string(WorktreeDescriptor(from: env))) }

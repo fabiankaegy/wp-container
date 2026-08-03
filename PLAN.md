@@ -286,11 +286,27 @@ wp-cli is a first-class citizen on all four surfaces (implementation: one-shot
   three at once, at the price of envs now depending on proxy liveness (the app
   ensures it; CLI/MCP warn). Env starts stay independent of it: readiness is
   probed at the container's vmnet IP rather than the port. Env MAILPIT ports stay
-  published — light traffic, never a wake or idle signal, nothing to gain.
+  published — light traffic, and never a WAKE trigger (a mailbox request does still
+  stamp the idle clock, like any proxied route), so there is nothing to gain.
   TRANSITION: an env container still running from a pre-change build holds its own
   port, so the proxy logs one warning per port and retries every few seconds; that
   env keeps working through its published port and the proxy takes the socket after
-  the env is restarted once.
+  the env is restarted once. Because a port the proxy does not own is a port whose
+  traffic it cannot see, such an env is also exempt from idle-stop until it is
+  restarted. Ownership is not merely logged: the proxy publishes
+  `proxy-env-ports.json` next to its pidfile (owned + conflicted ports, rewritten
+  each reconcile, removed on clean stop) so `wp-container https status`, the
+  CLI/MCP env warnings and the app can all distinguish "no proxy" from "a proxy is
+  up but is not serving this env" — dropping `-p` turned a loud `container run`
+  failure into an otherwise silent misroute.
+- **ACCEPTED COST of proxying env traffic: no keep-alive, no HTTP upgrade.** The
+  proxy forces `Connection: close` and serves one request per connection, so
+  WebSockets to an env URL cannot work and every env request pays a fresh TCP
+  connect. Sites are unaffected (their published port bypasses the proxy). Not
+  fixed now, and deliberately so: keep-alive plus upgrade means connection pooling
+  and framing state, and the response-truncation bugs that shaped the current relay
+  (see `relay(from:to:)`) are a standing warning about how much care that needs.
+  Revisit only with a concrete need.
 - **Proxy liveness is a correctness concern, not an option** (user-reported bug:
   after an app relaunch nothing listened on 443 → every HTTPS/custom-domain site
   showed "Safari Can't Connect"). The "start proxy at launch" setting is opt-OUT
