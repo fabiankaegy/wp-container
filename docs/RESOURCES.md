@@ -142,7 +142,10 @@ An environment whose container is still *running* from an older build publishes
 its own port, so the proxy can't take that socket. It logs one warning per port
 (also on stderr for `wp-container proxy serve`), keeps everything else working —
 the environment stays reachable through its own published port — and retries
-every few seconds. Stop and start that environment once and the proxy takes over.
+every few seconds. Such an environment is also **never idle-stopped**: the proxy
+can't see traffic to a port it doesn't own, so it refuses to judge it idle at all.
+Stop and start that environment once and the proxy takes the socket, from which
+point the timeout applies.
 
 Expected impact once enabled across a fleet: memory cost becomes roughly
 `~500 MB × environments touched in the last N minutes` instead of

@@ -142,6 +142,18 @@ struct EnvDetailView: View {
                         CopyButton(value: env.localURL.absoluteString)
                     }
                 }
+                // This URL is the reverse proxy's to serve: an environment's
+                // container publishes no port of its own (issue #16
+                // follow-through), so with nothing listening the link just
+                // refuses — say so rather than letting it look broken.
+                if vm.proxyPort == nil {
+                    HStack(spacing: 6) {
+                        Text("The reverse proxy serves this URL and isn’t running.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                        Button("Start Proxy") { Task { await vm.ensureProxyRunning() } }
+                            .buttonStyle(.link).font(.caption2)
+                    }
+                }
                 InfoRow(label: "Local port") {
                     Text(String(env.port)).monospaced()
                 }
