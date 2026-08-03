@@ -21,8 +21,16 @@ For WP Container that means each **running** site is 2+ VMs:
 | one-shot `wordpress:cli` | during provisioning/wp-cli calls | seconds-lived |
 | `buildkit` builder | only while building the Xdebug image | 2 CPUs, 2 GB |
 
-Branch environments (worktree clones) run their **own** db/wp/(es) containers,
-so a running env costs the same as its parent site.
+Branch environments (worktree clones) run their own wp/(es) containers, but
+**not** their own MariaDB: by default an env is an extra schema on the parent
+site's existing db container, so a running env costs one VM rather than two.
+Measured on a 4-env site, that reclaimed ~1.9 GB — the DB VMs were ~490 MB each
+to serve a 1.2 MB database at a peak of 2 connections, because the memory is VM
+baseline plus guest page cache and almost entirely decoupled from the workload
+(see below). `--isolated-db` opts an env back into its own container.
+
+The shared server is started with `--max-connections=300` (up from the stock 151)
+since it now serves a whole family of environments.
 
 ## Memory
 
