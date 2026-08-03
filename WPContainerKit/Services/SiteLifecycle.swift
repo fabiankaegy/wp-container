@@ -540,8 +540,13 @@ public actor SiteLifecycle {
         return outcome
     }
 
-    /// Stop a site AND all of its worktree envs (coupled lifecycle, §2b),
-    /// concurrently. Instances with an action in flight are skipped (issue #5).
+    /// Stop a site AND all of its worktree envs (coupled lifecycle, §2b).
+    /// Instances with an action in flight are skipped (issue #5).
+    ///
+    /// The envs go down first (concurrently among themselves), THEN the parent.
+    /// Ordering matters since issue #17: the parent's `stopCore` refuses to stop
+    /// a DB container a live env is still borrowing, so stopping them at the same
+    /// time would race and could leave the server running.
     public func stopSiteWithEnvs(_ site: Site, envs: [WorktreeEnv]) async {
         let stopParent = claim(site.id)
         let claimedEnvs = envs.filter { claim($0.id) }
@@ -550,13 +555,11 @@ public actor SiteLifecycle {
             for env in claimedEnvs { release(env.id) }
         }
         await withTaskGroup(of: Void.self) { group in
-            if stopParent {
-                group.addTask { await self.stopCore(site) }
-            }
             for env in claimedEnvs {
                 group.addTask { await self.stopCore(env) }
             }
         }
+        if stopParent { await stopCore(site) }
     }
 
     // MARK: - Stop / delete
@@ -575,8 +578,18 @@ public actor SiteLifecycle {
         // containers are independent — stop them concurrently (issue #9). The
         // es sidecar is stopped best-effort whether or not the flag is
         // currently set (it may have been toggled off since start).
+        var names = Self.ownedContainerNames(of: inst)
+        // Restarting a parent site (an Xdebug/Mailpit/domain/HTTPS toggle,
+        // `site_restart`) must not bounce the DB container out from under a
+        // live shared-database env (issue #17): the env's wp container had the
+        // old DB IP baked in at `container run` time and cannot pick up a new
+        // one. `stopSiteWithEnvs` stops envs BEFORE the parent, so a genuine
+        // whole-family stop still takes the server down.
+        if inst.ownsDatabaseContainer, await hasRunningSharedDatabaseDependents(inst) {
+            names.removeAll { $0 == inst.dbContainerName }
+        }
         await withTaskGroup(of: Void.self) { group in
-            for name in Self.ownedContainerNames(of: inst) {
+            for name in names {
                 group.addTask { [cli] in _ = try? await cli.run(SiteRecipe.stopArgs(name)) }
             }
         }
@@ -593,6 +606,25 @@ public actor SiteLifecycle {
         var names = [inst.wpContainerName, inst.esContainerName, inst.mailContainerName]
         if inst.ownsDatabaseContainer { names.append(inst.dbContainerName) }
         return names
+    }
+
+    /// Whether a running worktree env is currently borrowing this site's database
+    /// container (issue #17).
+    ///
+    /// Read from live container LABELS rather than the store, because the
+    /// lifecycle has no store access — and labels are the reconciliation ground
+    /// truth anyway. An env is identified as *borrowing* by the absence of a
+    /// running `wpc-<envSlug>-db` of its own, which is exactly what shared mode
+    /// means at the container level.
+    private func hasRunningSharedDatabaseDependents(_ site: any RunnableInstance) async -> Bool {
+        guard site.envLabel == nil else { return false } // an env has no dependents
+        let running = ((try? await cli.list(all: true)) ?? []).filter(\.isRunning)
+        let names = Set(running.map(\.name))
+        return running.contains { record in
+            guard let envSlug = record.envLabel, record.siteLabel == site.siteSlug,
+                  record.name == "wpc-\(envSlug)-wp" else { return false }
+            return !names.contains("wpc-\(envSlug)-db")
+        }
     }
 
     /// Retire a shared DB container that nothing needs any more (issue #17,
