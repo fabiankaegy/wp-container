@@ -908,9 +908,22 @@ public final class AppViewModel {
         return store.env(id: selection)
     }
 
+    /// Start ONLY the site's own containers — worktree envs are left alone
+    /// (issue #18: fan-out is opt-in). See `startSiteWithEnvs(_:)` for the
+    /// coupled behavior.
+    public func startSite(_ site: Site) {
+        startSiteCoupled(site, includeEnvs: false)
+    }
+
     /// Coupled lifecycle (§2b): starting a site also starts all of its worktree
     /// envs (parent first, then envs; individual failures surfaced together).
-    public func startSite(_ site: Site) {
+    /// Opt-in since issue #18 — exposed as a separate "Start with Environments"
+    /// affordance in the UI.
+    public func startSiteWithEnvs(_ site: Site) {
+        startSiteCoupled(site, includeEnvs: true)
+    }
+
+    private func startSiteCoupled(_ site: Site, includeEnvs: Bool) {
         Task {
             // An HTTPS/custom-domain site is unreachable without the reverse
             // proxy — ensure it's listening whenever such a site starts (covers
@@ -918,7 +931,7 @@ public final class AppViewModel {
             if site.httpsEnabled || site.customDomain != nil {
                 await ensureProxyRunning()
             }
-            let envs = store.envs(forSite: site.id)
+            let envs = includeEnvs ? store.envs(forSite: site.id) : []
             let outcome = await lifecycle.startSiteWithEnvs(site, envs: envs)
             if outcome.provisioned != site.provisioned {
                 var updated = site
@@ -927,6 +940,8 @@ public final class AppViewModel {
             }
             if let summary = outcome.errorSummary {
                 lastError = summary
+            } else if !outcome.warnings.isEmpty {
+                lastError = outcome.warnings.joined(separator: "\n")
             }
         }
     }
