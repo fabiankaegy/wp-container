@@ -47,6 +47,26 @@ public enum ProxyControl {
 
     public static var isRunning: Bool { current() != nil }
 
+    /// Why a worktree environment needs a live proxy, phrased for a warnings
+    /// channel (issue #16 follow-through).
+    ///
+    /// An env's container publishes no host port of its own — the proxy binds
+    /// `127.0.0.1:<port>` and relays to the container — so with nothing listening
+    /// the env runs perfectly but its URL refuses connections. wp-cli and MCP
+    /// workflows are unaffected, which is exactly why this is a warning and not an
+    /// error: the start itself succeeded.
+    public static let envNeedsProxyWarning =
+        "Environment URLs are served by the WP Container reverse proxy, and none is "
+        + "running — http://127.0.0.1:<port> will refuse connections until one is. "
+        + "Launch WPContainer.app or run `wp-container proxy serve`. "
+        + "(wp-cli and MCP work either way.)"
+
+    /// `envNeedsProxyWarning` when no proxy is accepting, nil when one is. Use it
+    /// wherever a command that starts or creates an env has a warnings channel.
+    public static func envProxyWarning() -> String? {
+        current() == nil ? envNeedsProxyWarning : nil
+    }
+
     /// True when something ACCEPTS a TCP connection on 127.0.0.1:`port`.
     /// Non-blocking connect with a short (250ms) timeout — the proxy is local:
     /// a live listener accepts effectively instantly and ECONNREFUSED returns

@@ -310,6 +310,11 @@ struct StartCommand: AsyncParsableCommand {
                 for warning in outcome.warnings {
                     FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
                 }
+                // Any env in the fan-out is served by the proxy, not by a
+                // published port (issue #16 follow-through).
+                if !envs.isEmpty, let warning = ProxyControl.envProxyWarning() {
+                    FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
+                }
                 // Env failures are non-fatal warnings; a parent failure fails
                 // the command (envs were still attempted first, per §2b).
                 for message in outcome.envErrorMessages {
@@ -327,6 +332,11 @@ struct StartCommand: AsyncParsableCommand {
                 await ctx.persistence.recordActivity(instanceID: env.id)
                 _ = try await ctx.lifecycle.startInstance(env, pullPolicy: policy, dbProvider: parent)
                 for warning in await ctx.lifecycle.drainWarnings(for: env.id) {
+                    FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
+                }
+                // The env is up either way — but its URL only answers when a
+                // proxy owns the port (issue #16 follow-through).
+                if let warning = ProxyControl.envProxyWarning() {
                     FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
                 }
             }
@@ -498,6 +508,11 @@ struct WorktreeCreate: AsyncParsableCommand {
                     }
                 }
                 for warning in await ctx.lifecycle.drainWarnings(for: env.id) {
+                    FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
+                }
+                // The env was created and started; its URL, though, is the
+                // proxy's to serve (issue #16 follow-through).
+                if let warning = ProxyControl.envProxyWarning() {
                     FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
                 }
                 if output.json { emitLine(CLIJSON.string(WorktreeDescriptor(from: env))) }
