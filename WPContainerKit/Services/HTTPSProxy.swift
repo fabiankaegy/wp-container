@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import OSLog
 import Security
 
 /// TLS-terminating reverse proxy for trusted local HTTPS (PLAN.md §2f).
@@ -59,14 +60,26 @@ public final class HTTPSProxy: @unchecked Sendable {
         /// truncated multi-MB responses behind this proxy.
         public let containerName: String?
         public let containerPort: UInt16
+        /// Whether `slug` names a worktree ENV rather than a parent site (issue
+        /// #16). Tagged statically when the table is built — the two loops in
+        /// `routes(from:)` already know which is which — so the idle sweep and
+        /// the wake path never have to guess from the slug shape.
+        public let isEnv: Bool
+        /// For an env route, its parent site's slug — the descriptor a
+        /// shared-database env needs as `dbProvider` when it is woken while the
+        /// parent site is down (issue #17).
+        public let parentSlug: String?
 
         public init(port: Int, slug: String? = nil, displayName: String? = nil,
-                    containerName: String? = nil, containerPort: UInt16 = 80) {
+                    containerName: String? = nil, containerPort: UInt16 = 80,
+                    isEnv: Bool = false, parentSlug: String? = nil) {
             self.port = port
             self.slug = slug
             self.displayName = displayName
             self.containerName = containerName
             self.containerPort = containerPort
+            self.isEnv = isEnv
+            self.parentSlug = parentSlug
         }
     }
 
@@ -80,15 +93,51 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// dial invalidates its entry and falls back to the published port.
     private var containerIPs: [String: String] = [:]
     private var refreshTask: Task<Void, Never>?
+    private var idleTask: Task<Void, Never>?
     private var _boundPort: UInt16?
     private var _boundHTTPPort: UInt16?
     /// SAN hosts the leaf currently covers, to detect when a reload is needed.
     private var coveredHosts: Set<String> = []
 
+    // MARK: Idle tracking (issue #16)
+
+    /// Slug → when the proxy last resolved a route for it. Every HTTP request
+    /// already passes through `route(forHost:)`, which makes it the one free
+    /// instrumentation point for "is anybody using this environment?".
+    private var lastAccess: [String: Date] = [:]
+    /// Slug → when the IP-refresh loop FIRST saw its wp container running.
+    ///
+    /// Without this, an instance nobody ever opened in a browser would have no
+    /// idle clock at all and would run forever — exactly the agent-started env
+    /// case this feature is for. The idle clock is
+    /// `max(firstSeenRunning, lastAccess)`; the entry is dropped as soon as the
+    /// container stops, so a restart re-seeds a fresh clock.
+    private var firstSeenRunning: [String: Date] = [:]
+    /// Slugs with a wake currently in flight, so a browser hammering refresh (or
+    /// a page issuing twenty parallel asset requests) triggers exactly ONE start.
+    /// Sits on top of `SiteLifecycle`'s own per-UUID claim guard (issue #5) —
+    /// this one exists so the waking page can be honest about what it's doing.
+    private var wakesInFlight: Set<String> = []
+    /// The last wake failure per slug, shown on the waking page's next refresh
+    /// so a broken wake doesn't spin silently forever. Cleared by a later
+    /// successful wake.
+    private var wakeFailures: [String: String] = [:]
+
+    /// Drives idle-stop and wake-on-request (issue #16). Optional only so the
+    /// proxy stays constructible without one; both real hosts (the app and
+    /// `wp-container proxy serve`) pass theirs, and with nil the proxy behaves
+    /// exactly as it did before this feature — no sweeps, no wakes, the plain
+    /// "site is stopped" page.
+    private let lifecycle: SiteLifecycle?
+
+    private static let log = Logger(subsystem: "com.fabiankaegy.wpcontainer", category: "proxy-idle")
+
     public init(ca: CertificateAuthority = CertificateAuthority(),
-                persistence: StorePersistence = StorePersistence()) {
+                persistence: StorePersistence = StorePersistence(),
+                lifecycle: SiteLifecycle? = nil) {
         self.ca = ca
         self.persistence = persistence
+        self.lifecycle = lifecycle
     }
 
     /// The port the listener actually bound, once started.
@@ -118,12 +167,20 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// Route by an exact Host-header lookup, then fall back to stripping the
     /// leftmost label so subdomain-multisite subsites (`sub.<slug>.localhost`,
     /// `sub.mysite.local`) route to their network's port (PLAN.md §2i/§2j).
+    ///
+    /// Also stamps the route's slug as accessed NOW (issue #16). This is the
+    /// single choke point every proxied request passes through — one call per
+    /// request, already inside the state lock — so last-access tracking is free
+    /// here and would need extra bookkeeping anywhere else.
     private func route(forHost host: String) -> Route? {
         // Strip any :port suffix and lowercase.
         var name = host.split(separator: ":").first.map { $0.lowercased() } ?? host.lowercased()
         return stateLock.withLock {
             while true {
-                if let route = hostMap[name] { return route }
+                if let route = hostMap[name] {
+                    if let slug = route.slug { lastAccess[slug] = Date() }
+                    return route
+                }
                 guard let dot = name.firstIndex(of: ".") else { return nil }
                 let rest = String(name[name.index(after: dot)...])
                 if rest.isEmpty || !rest.contains(".") { return nil }
@@ -155,12 +212,14 @@ public final class HTTPSProxy: @unchecked Sendable {
         for env in envelope.envs {
             map["\(env.envSlug).localhost"] = Route(port: env.port, slug: env.envSlug,
                                                     displayName: "\(env.parentSlug) · \(env.branch)",
-                                                    containerName: env.wpContainerName)
+                                                    containerName: env.wpContainerName,
+                                                    isEnv: true, parentSlug: env.parentSlug)
             if env.mailpitEnabled, let mp = env.mailpitPort {
                 map["\(env.envSlug)-mail.localhost"] = Route(port: mp, slug: env.envSlug,
                                                              displayName: "\(env.parentSlug) · \(env.branch) · Mailbox",
                                                              containerName: env.mailContainerName,
-                                                             containerPort: UInt16(SiteRecipe.mailpitWebPort))
+                                                             containerPort: UInt16(SiteRecipe.mailpitWebPort),
+                                                             isEnv: true, parentSlug: env.parentSlug)
             }
         }
         return map
@@ -251,6 +310,7 @@ public final class HTTPSProxy: @unchecked Sendable {
         await refreshContainerIPs()
 
         startRefreshLoop()
+        startIdleLoop()
         return boundPort
     }
 
@@ -261,14 +321,41 @@ public final class HTTPSProxy: @unchecked Sendable {
     private func refreshContainerIPs() async {
         guard let records = try? await cli.list(all: false) else { return }
         var ips: [String: String] = [:]
+        var runningSlugs = Set<String>()
         for record in records {
             if let ip = record.ipAddress, !ip.isEmpty { ips[record.name] = ip }
+            // `wpc-<slug>-wp` is the container that defines "this instance is
+            // running" everywhere else in the codebase (reconcile, stop
+            // dependents), so it defines the idle clock too.
+            if record.isRunning, let slug = Self.slug(ofWPContainer: record.name) {
+                runningSlugs.insert(slug)
+            }
         }
-        stateLock.withLock { containerIPs = ips }
+        let now = Date()
+        stateLock.withLock {
+            containerIPs = ips
+            for slug in runningSlugs where firstSeenRunning[slug] == nil {
+                firstSeenRunning[slug] = now
+            }
+            // Drop clocks for instances that are no longer up, so the next start
+            // gets a fresh idle window instead of inheriting the previous one.
+            for slug in firstSeenRunning.keys where !runningSlugs.contains(slug) {
+                firstSeenRunning.removeValue(forKey: slug)
+                lastAccess.removeValue(forKey: slug)
+            }
+        }
+    }
+
+    /// `wpc-<slug>-wp` → `<slug>`; nil for any other container name.
+    private static func slug(ofWPContainer name: String) -> String? {
+        guard name.hasPrefix("wpc-"), name.hasSuffix("-wp") else { return nil }
+        let slug = String(name.dropFirst(4).dropLast(3))
+        return slug.isEmpty ? nil : slug
     }
 
     public func stop() {
         refreshTask?.cancel(); refreshTask = nil
+        idleTask?.cancel(); idleTask = nil
         stateLock.withLock {
             listener?.cancel()
             listener = nil
@@ -332,6 +419,191 @@ public final class HTTPSProxy: @unchecked Sendable {
                         return // reload() spins a fresh loop
                     }
                 }
+            }
+        }
+    }
+
+    // MARK: - Idle stop (issue #16)
+
+    /// The idle sweep lives HERE, next to the routing table, rather than in the
+    /// app's reconcile loop: the proxy is the only component that knows when each
+    /// instance was last used, and it is also the only one guaranteed to exist in
+    /// both hosting arrangements (inside the app, or headless via
+    /// `wp-container proxy serve` — arbitrated by `ProxyControl`'s pidfile). An
+    /// app-side timer would silently stop enforcing the moment the user ran the
+    /// proxy headlessly.
+    ///
+    /// Its own 30s cadence rather than the 3s IP-refresh loop: the sweep costs a
+    /// store load plus a `container list`, and a 30s granularity on a 15-minute
+    /// timeout is irrelevant.
+    private func startIdleLoop() {
+        guard lifecycle != nil, idleTask == nil else { return }
+        idleTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                guard let self else { return }
+                await self.sweepIdleInstances()
+            }
+        }
+    }
+
+    /// Stop every running instance whose effective policy is enabled and whose
+    /// idle clock has run out.
+    ///
+    /// Ordering and guards, all of them load-bearing:
+    ///
+    /// - ENVS FIRST, then sites. An env stop is followed by
+    ///   `stopSharedDatabaseIfUnused` so the parent's ~470 MB DB VM is retired
+    ///   too once nothing borrows it — without that, idling envs would reclaim
+    ///   only half the memory this exists for (issue #17).
+    /// - A parent site is skipped entirely while ANY of its envs' wp containers
+    ///   run: its DB container may be serving them. `stopCore`'s label-based
+    ///   dependent check is the backstop, but there is no reason to even start.
+    /// - A site idle-stop stops ONLY the parent, never its envs — coupled stops
+    ///   are a user gesture; a timer must not cascade.
+    /// - `isBusy` skips anything the lifecycle already has an action in flight
+    ///   for, and `wakesInFlight` skips anything mid-wake, so a request that
+    ///   just revived an instance can't be immediately undone.
+    private func sweepIdleInstances() async {
+        guard let lifecycle else { return }
+        guard let envelope = try? await persistence.load() else { return }
+        guard var running = try? await runningContainerNames() else { return }
+        let now = Date()
+
+        var stoppedAnEnv = false
+        for env in envelope.envs {
+            guard running.contains(env.wpContainerName) else { continue }
+            let timeout = env.effectiveIdleStopMinutes
+            guard timeout > 0, idleMinutes(of: env.envSlug, now: now) >= Double(timeout) else { continue }
+            guard !isWaking(env.envSlug), !(await lifecycle.isBusy(env.id)) else { continue }
+            Self.log.info("idle-stop: env \(env.envSlug, privacy: .public) idle for \(timeout, privacy: .public)+ min")
+            await lifecycle.stop(env)
+            if let parent = envelope.sites.first(where: { $0.id == env.parentSiteID }) {
+                await lifecycle.stopSharedDatabaseIfUnused(parent: parent)
+            }
+            _ = await lifecycle.drainWarnings(for: env.id)
+            forgetClock(env.envSlug)
+            stoppedAnEnv = true
+        }
+        // Re-read reality if we changed it: the snapshot above would still show
+        // the envs we just stopped, needlessly deferring their parent by a cycle.
+        if stoppedAnEnv, let fresh = try? await runningContainerNames() { running = fresh }
+
+        for site in envelope.sites {
+            guard running.contains(site.wpContainerName) else { continue }
+            let timeout = site.effectiveIdleStopMinutes
+            guard timeout > 0, idleMinutes(of: site.slug, now: now) >= Double(timeout) else { continue }
+            let envSlugs = envelope.envs.filter { $0.parentSiteID == site.id }.map(\.envSlug)
+            guard !envSlugs.contains(where: { running.contains("wpc-\($0)-wp") }) else { continue }
+            guard !isWaking(site.slug), !(await lifecycle.isBusy(site.id)) else { continue }
+            Self.log.info("idle-stop: site \(site.slug, privacy: .public) idle for \(timeout, privacy: .public)+ min")
+            await lifecycle.stop(site)
+            _ = await lifecycle.drainWarnings(for: site.id)
+            forgetClock(site.slug)
+        }
+    }
+
+    private func runningContainerNames() async throws -> Set<String> {
+        Set(try await cli.list(all: true).filter(\.isRunning).map(\.name))
+    }
+
+    /// Minutes since the instance was last used, where "used" is the later of a
+    /// proxied request and the moment we first saw it running. Returns 0 when
+    /// neither is known (the refresh loop hasn't observed it yet), which reads as
+    /// "just started" and defers the decision to the next sweep — never stopping
+    /// something on no evidence.
+    private func idleMinutes(of slug: String, now: Date) -> Double {
+        let reference = stateLock.withLock { () -> Date? in
+            let seen = firstSeenRunning[slug]
+            let used = lastAccess[slug]
+            guard let seen else { return used }
+            guard let used else { return seen }
+            return max(seen, used)
+        }
+        guard let reference else { return 0 }
+        return max(0, now.timeIntervalSince(reference)) / 60
+    }
+
+    private func isWaking(_ slug: String) -> Bool {
+        stateLock.withLock { wakesInFlight.contains(slug) }
+    }
+
+    private func forgetClock(_ slug: String) {
+        stateLock.withLock {
+            firstSeenRunning.removeValue(forKey: slug)
+            lastAccess.removeValue(forKey: slug)
+        }
+    }
+
+    // MARK: - Wake on request (issue #16)
+
+    /// Start the instance behind a route whose upstream is down, at most once at
+    /// a time, and report whether a waking page should be served instead of the
+    /// plain "site is stopped" page.
+    ///
+    /// The pattern is Sablier's / Heroku's: answer the request immediately with a
+    /// self-refreshing page rather than holding the connection open for the boot.
+    /// The meta-refresh IS the progress poll — at ~1s of VM boot plus WordPress
+    /// warmup, one or two refreshes land on the live site.
+    private func beginWake(route: Route) -> Bool {
+        guard lifecycle != nil, let slug = route.slug else { return false }
+        let claimed: Bool = stateLock.withLock {
+            // Count the wake itself as an access, so the instance can't come up
+            // and be swept away by an idle clock that predates it.
+            lastAccess[slug] = Date()
+            return wakesInFlight.insert(slug).inserted
+        }
+        guard claimed else { return true } // already waking — page, no second start
+        Task { [weak self] in await self?.performWake(slug: slug, route: route) }
+        return true
+    }
+
+    private func performWake(slug: String, route: Route) async {
+        guard let lifecycle else { return }
+        var failure: String?
+        do {
+            let envelope = try await persistence.load()
+            if route.isEnv {
+                guard let env = envelope.envs.first(where: { $0.envSlug == slug }) else {
+                    throw WakeError.vanished(slug)
+                }
+                // The parent rides along as `dbProvider` so a shared-database env
+                // can boot the server it borrows while the parent site is down
+                // (issue #17) — without it the start throws
+                // `sharedDatabaseUnavailable`.
+                let parent = envelope.sites.first { $0.id == env.parentSiteID }
+                _ = try await lifecycle.startInstance(env, dbProvider: parent)
+            } else {
+                guard let site = envelope.sites.first(where: { $0.slug == slug }) else {
+                    throw WakeError.vanished(slug)
+                }
+                let provisioned = try await lifecycle.startSite(site)
+                if provisioned != site.provisioned {
+                    _ = try? await persistence.mutate { env in
+                        if let i = env.sites.firstIndex(where: { $0.id == site.id }) {
+                            env.sites[i].provisioned = provisioned
+                        }
+                    }
+                }
+            }
+            Self.log.info("wake: \(slug, privacy: .public) started on request")
+        } catch {
+            failure = SiteLifecycle.message(for: error)
+            Self.log.error("wake: \(slug, privacy: .public) failed — \(failure ?? "", privacy: .public)")
+        }
+        let now = Date()
+        stateLock.withLock {
+            wakesInFlight.remove(slug)
+            lastAccess[slug] = now
+            if let failure { wakeFailures[slug] = failure } else { wakeFailures.removeValue(forKey: slug) }
+        }
+    }
+
+    private enum WakeError: Error, CustomStringConvertible {
+        case vanished(String)
+        var description: String {
+            switch self {
+            case .vanished(let slug): return "\(slug) is no longer in the store."
             }
         }
     }
@@ -418,8 +690,18 @@ public final class HTTPSProxy: @unchecked Sendable {
                       inbound: NWConnection, upstreamBytes: Data,
                       host: String, target: Route, on connQueue: DispatchQueue) {
         guard let candidate = candidates.first else {
-            sendHTMLResponse(to: inbound, status: "502 Bad Gateway",
-                             html: Self.stoppedSitePage(host: host, route: target))
+            // Every upstream is down. Wake the instance on the spot (issue #16)
+            // and answer with a self-refreshing "waking up" page; with no
+            // lifecycle wired up (never the case in either real host process)
+            // fall back to the pre-#16 "site is stopped" page.
+            if beginWake(route: target) {
+                let failure = target.slug.flatMap { slug in stateLock.withLock { wakeFailures[slug] } }
+                sendHTMLResponse(to: inbound, status: "503 Service Unavailable",
+                                 html: Self.wakingPage(host: host, route: target, failure: failure))
+            } else {
+                sendHTMLResponse(to: inbound, status: "502 Bad Gateway",
+                                 html: Self.stoppedSitePage(host: host, route: target))
+            }
             return
         }
         let isDirect = candidates.count > 1
@@ -528,7 +810,8 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// Shared shell for the styled proxy pages. `refresh` adds a meta-refresh
     /// so "start the site from the app" feels instant (#6).
     private static func proxyPage(title: String, heading: String, bodyHTML: String,
-                                  refreshSeconds: Int?) -> String {
+                                  refreshSeconds: Int?, badge: String = "WP CONTAINER · 502",
+                                  spinner: Bool = false) -> String {
         let refreshTag = refreshSeconds.map { "<meta http-equiv=\"refresh\" content=\"\($0)\">" } ?? ""
         return """
         <!doctype html>
@@ -554,18 +837,25 @@ public final class HTTPSProxy: @unchecked Sendable {
           code, pre { font: .85rem/1.5 ui-monospace, "SF Mono", Menlo, monospace; }
           pre { background: rgba(0,0,0,.05); padding: .7rem .9rem; border-radius: 10px; overflow-x: auto; user-select: all; }
           .hint { font-size: .8rem; opacity: .75; }
+          .spinner { display: inline-block; width: 1rem; height: 1rem; margin-right: .5rem;
+                     vertical-align: -.15rem; border-radius: 50%;
+                     border: 2px solid rgba(255,149,0,.25); border-top-color: #b25000;
+                     animation: spin .8s linear infinite; }
+          @keyframes spin { to { transform: rotate(360deg); } }
+          @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
           @media (prefers-color-scheme: dark) {
             body { background: #1c1c1e; color: #f5f5f7; }
             main { background: #2c2c2e; box-shadow: 0 10px 40px rgba(0,0,0,.4); }
             .badge { background: rgba(255,159,10,.2); color: #ffb340; }
             p { color: #98989d; }
             pre { background: rgba(255,255,255,.08); }
+            .spinner { border-color: rgba(255,159,10,.25); border-top-color: #ffb340; }
           }
         </style>
         </head>
         <body><main>
-        <span class="badge">WP CONTAINER · 502</span>
-        <h1>\(heading)</h1>
+        <span class="badge">\(badge)</span>
+        <h1>\(spinner ? "<span class=\"spinner\"></span>" : "")\(heading)</h1>
         \(bodyHTML)
         </main></body>
         </html>
@@ -589,6 +879,32 @@ public final class HTTPSProxy: @unchecked Sendable {
         return proxyPage(title: "\(name) is stopped — WP Container",
                          heading: "\(name) is stopped",
                          bodyHTML: body, refreshSeconds: 3)
+    }
+
+    /// Known host whose containers are down, and we've just triggered a start
+    /// (issue #16). The meta-refresh doubles as the wake progress poll: the next
+    /// reload either lands on the live site or re-renders this page.
+    ///
+    /// `failure` carries the PREVIOUS wake attempt's error when there was one, so
+    /// a wake that can't succeed (e.g. a shared-database env whose parent server
+    /// refuses to boot) says why instead of spinning forever. The refresh keeps
+    /// going regardless — each reload re-triggers a wake, which is the desired
+    /// retry behaviour for a transient failure.
+    static func wakingPage(host: String, route: Route, failure: String?) -> String {
+        let name = htmlEscape(route.displayName ?? route.slug ?? host)
+        var body = "<p>It was stopped to free up memory. Starting it now — this usually takes a couple of seconds.</p>"
+        body += "<p class=\"hint\">This page reloads every 2 seconds and will show \(route.isEnv ? "the environment" : "the site") as soon as it answers.</p>"
+        if let failure {
+            body += "<p><strong>The last start attempt failed:</strong></p>"
+            body += "<pre><code>\(htmlEscape(failure))</code></pre>"
+            if let slug = route.slug {
+                body += "<p class=\"hint\">Retrying on every reload. To see the full output, run <code>wp-container start \(htmlEscape(slug))</code>.</p>"
+            }
+        }
+        return proxyPage(title: "Waking up \(name)… — WP Container",
+                         heading: "Waking up \(name)…",
+                         bodyHTML: body, refreshSeconds: 2,
+                         badge: "WP CONTAINER · WAKING", spinner: true)
     }
 
     /// Wholly-unmapped host → say so (styled, no slug hint available).
