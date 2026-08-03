@@ -12,6 +12,10 @@ struct EnvDetailView: View {
 
     @State private var confirmingDelete = false
     @State private var keepWorktree = false
+    /// Who holds this env's `127.0.0.1:<port>` socket — the proxy, somebody else,
+    /// or nobody (issue #16 follow-through). Re-read on appear rather than computed
+    /// inline: it touches the filesystem and probes a port.
+    @State private var portOwnership: ProxyControl.EnvPortOwnership = .unknown
 
     private var parent: Site? { vm.store.site(id: env.parentSiteID) }
 
@@ -30,7 +34,7 @@ struct EnvDetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     overviewCard
-                    IdleStopCard(configured: env.idleStopMinutes, isEnv: true) { minutes in
+                    IdleStopCard(configured: env.idleStopMinutes, isEnv: true, envPort: env.port) { minutes in
                         vm.setIdleStop(env, minutes: minutes)
                     }
                     LogsView(env: env)
@@ -40,6 +44,13 @@ struct EnvDetailView: View {
                 .frame(maxWidth: 860, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+        }
+        // Same pattern as IntegrationsCard: the proxy may have been started or
+        // killed by another process since this view was built, and `vm.proxyPort`
+        // is only refreshed when somebody asks.
+        .task(id: env.id) {
+            vm.refreshProxyLiveness()
+            portOwnership = ProxyControl.envPortOwnership(env.port)
         }
     }
 
@@ -141,6 +152,35 @@ struct EnvDetailView: View {
                         Link(env.localURL.absoluteString, destination: env.localURL)
                         CopyButton(value: env.localURL.absoluteString)
                     }
+                }
+                // This URL is the reverse proxy's to serve: an environment's
+                // container publishes no port of its own (issue #16
+                // follow-through), so unless the proxy holds the socket the link
+                // either refuses or — worse, and silently — reaches whatever else
+                // took the port. Distinguish the two: only the first is fixed by
+                // starting a proxy.
+                switch portOwnership {
+                case .noProxy:
+                    HStack(spacing: 6) {
+                        Text("The reverse proxy serves this URL and isn’t running.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                        Button("Start Proxy") {
+                            Task {
+                                await vm.ensureProxyRunning()
+                                portOwnership = ProxyControl.envPortOwnership(env.port)
+                            }
+                        }
+                        .buttonStyle(.link).font(.caption2)
+                    }
+                case .conflicted:
+                    Text("The proxy is running but doesn’t own port \(env.port), so this URL "
+                         + "and idle-stop aren’t being served. If this environment was started "
+                         + "by an older build, stop and start it once; otherwise something else "
+                         + "is holding the port.")
+                        .font(.caption2).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                case .owned, .unknown:
+                    EmptyView()
                 }
                 InfoRow(label: "Local port") {
                     Text(String(env.port)).monospaced()

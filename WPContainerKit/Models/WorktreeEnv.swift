@@ -35,7 +35,8 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
     public var memoryLimitMB: Int?
     /// Optional per-env auto-stop-when-idle timeout in minutes (issue #16).
     /// nil = the built-in default (`IdlePolicy.defaultEnvMinutes`, 15 minutes —
-    /// envs are the many-of-them case this exists for); 0 = explicitly off;
+    /// envs are the many-of-them case this exists for, and the proxy owns their
+    /// port so every request to them is observed); 0 = explicitly off;
     /// > 0 = stop after that many idle minutes. Deliberately NOT inherited from
     /// the parent site, whose own default is off.
     public var idleStopMinutes: Int?
@@ -145,9 +146,9 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         self.cpuLimit = try? c.decodeIfPresent(Int.self, forKey: .cpuLimit)
         self.memoryLimitMB = try? c.decodeIfPresent(Int.self, forKey: .memoryLimitMB)
         // Absent in envs written before issue #16 — nil means "use the default",
-        // which is OFF, so an existing env is never auto-stopped until somebody
-        // opts it in (see `IdlePolicy`: an env's advertised URL bypasses the
-        // proxy, so the idle clock can't see browser traffic to it).
+        // which for an env is 15 minutes (see `IdlePolicy`). Safe for an existing
+        // record: an env's advertised URL now runs through the proxy, so the idle
+        // clock sees browser traffic to it, and the next request wakes it.
         self.idleStopMinutes = try? c.decodeIfPresent(Int.self, forKey: .idleStopMinutes)
         self.lastActivityAt = try? c.decodeIfPresent(Date.self, forKey: .lastActivityAt)
         // Absent in envs written before issue #17 — they keep their own DB
@@ -256,4 +257,9 @@ extension WorktreeEnv: RunnableInstance {
     public var extraMounts: [Mount] {
         [SiteRecipe.shadowMount(worktreePath: worktreePath, repoRelPath: repoRelPath)]
     }
+    /// An env's wp container does NOT publish a host port (issue #16
+    /// follow-through). The reverse proxy binds `127.0.0.1:<port>` for it and
+    /// relays to the container's vmnet IP, which is what makes the env's ONE
+    /// advertised URL both idle-trackable and wakeable. See `publishesPort`.
+    public var publishesPort: Bool { false }
 }

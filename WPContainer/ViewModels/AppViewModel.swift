@@ -530,9 +530,31 @@ public final class AppViewModel {
         }
     }
 
+    /// The single in-flight `ensureProxyRunning()` run, so concurrent callers
+    /// await one attempt instead of racing (issue #16 follow-through).
+    ///
+    /// This became load-bearing when env starts and env creation started calling
+    /// it: the early-out checks (`ProxyControl.current()`, `proxy.boundPort`) both
+    /// read state that only becomes true AFTER the `await proxy.start()` inside,
+    /// and every caller is on the MainActor — so two entries that suspend at that
+    /// await both proceed to `start()`, double-binding listeners and spinning two
+    /// refresh + idle loops in one process.
+    private var ensureProxyTask: Task<Void, Never>?
+
     /// Start the in-app HTTPS proxy unless an external `proxy serve` already owns
     /// the listener.
     public func ensureProxyRunning() async {
+        if let existing = ensureProxyTask { await existing.value; return }
+        let task = Task { @MainActor [weak self] in
+            await self?.startProxyIfNeeded()
+            return ()
+        }
+        ensureProxyTask = task
+        await task.value
+        ensureProxyTask = nil
+    }
+
+    private func startProxyIfNeeded() async {
         if let status = ProxyControl.current() { proxyPort = status.port; return }
         if proxy.boundPort != nil { proxyPort = proxy.boundPort; return }
         do {
@@ -559,10 +581,13 @@ public final class AppViewModel {
         }
     }
 
-    /// Whether any site depends on the reverse proxy for its URL to work at
-    /// all (HTTPS or a custom domain — both route through the proxy, §2f/§2i).
+    /// Whether anything depends on the reverse proxy for its URL to work at all:
+    /// an HTTPS or custom-domain site (both route through the proxy, §2f/§2i), or
+    /// ANY worktree env — an env's container publishes no host port, so the proxy
+    /// is what serves its `127.0.0.1:<port>` URL (issue #16 follow-through).
     private var anySiteNeedsProxy: Bool {
-        store.sites.contains { $0.httpsEnabled || $0.customDomain != nil }
+        if !store.envs.isEmpty { return true }
+        return store.sites.contains { $0.httpsEnabled || $0.customDomain != nil }
     }
 
     /// Start the proxy whenever anything needs it — correctness must never
@@ -572,10 +597,23 @@ public final class AppViewModel {
         if anySiteNeedsProxy { await ensureProxyRunning() }
     }
 
-    /// Cheap liveness refresh for proxy status lines: adopt an externally-owned
-    /// listener (e.g. `wp-container proxy serve`) if one has appeared.
+    /// Cheap liveness refresh for proxy status lines, in BOTH directions: adopt an
+    /// externally-owned listener (e.g. `wp-container proxy serve`) if one has
+    /// appeared, and clear a recorded port that no longer accepts.
+    ///
+    /// Clearing matters as much as adopting now that env URLs depend on the proxy:
+    /// this value is what the env pane and the Idle stop card read to decide
+    /// whether to warn, and a stale non-nil made both of them quietly reassuring
+    /// about a proxy that had died.
     public func refreshProxyLiveness() {
-        if proxyPort == nil { proxyPort = ProxyControl.current()?.port }
+        if let port = proxyPort {
+            // Our own in-process listener is authoritative for us; otherwise the
+            // recorded port must actually be accepting.
+            if proxy.boundPort == port { return }
+            if !ProxyControl.isPortAccepting(port) { proxyPort = ProxyControl.current()?.port }
+            return
+        }
+        proxyPort = ProxyControl.current()?.port
     }
 
     /// Install the local CA as a trusted root (prompts for admin), then refresh.
@@ -928,6 +966,9 @@ public final class AppViewModel {
     /// or nil on failure (error surfaced via `lastError`).
     public func createEnvAwaiting(parent: Site, repoRelPath: String, branch: String, from: String? = nil,
                                   provision: Bool = true, isolatedDB: Bool = false) async -> WorktreeEnv? {
+        // The new env's URL is served by the proxy, so make sure there is one
+        // before the sheet shows that URL as a link (issue #16 follow-through).
+        await ensureProxyRunning()
         // Allocate the port AND reserve the env descriptor in ONE locked store
         // mutation (#3 follow-up) — same pattern the CLI/MCP worktree-create use.
         // The reserved record keeps the final env's UUID so `upsertEnv` (success)
@@ -1009,13 +1050,15 @@ public final class AppViewModel {
             // idle sweep can't park it before they've done anything with it. Wakes
             // deliberately don't stamp — that would let the sweep feed itself.
             await store.recordActivity(id: site.id)
+            let envs = includeEnvs ? store.envs(forSite: site.id) : []
             // An HTTPS/custom-domain site is unreachable without the reverse
             // proxy — ensure it's listening whenever such a site starts (covers
-            // proxy crashed/killed/never-started cases, §2f fix).
-            if site.httpsEnabled || site.customDomain != nil {
+            // proxy crashed/killed/never-started cases, §2f fix). So is every
+            // worktree env in the fan-out, whose port the proxy now owns outright
+            // (issue #16 follow-through).
+            if site.httpsEnabled || site.customDomain != nil || !envs.isEmpty {
                 await ensureProxyRunning()
             }
-            let envs = includeEnvs ? store.envs(forSite: site.id) : []
             let outcome = await lifecycle.startSiteWithEnvs(site, envs: envs)
             if outcome.provisioned != site.provisioned {
                 var updated = site
@@ -1129,6 +1172,8 @@ public final class AppViewModel {
     public func createEnv(parent: Site, repoRelPath: String, branch: String, from: String? = nil,
                           provision: Bool = true, isolatedDB: Bool = false) {
         Task {
+            // The env's URL is served by the proxy (issue #16 follow-through).
+            await ensureProxyRunning()
             // Port + env reservation in one locked mutation (#3 follow-up).
             guard let (_, reserved) = await store.allocatePort(reserve: { port, envelope in
                 WorktreeEnvService.reservedDescriptor(parent: parent, repoRelPath: repoRelPath, branch: branch, port: port, into: &envelope)
@@ -1163,6 +1208,11 @@ public final class AppViewModel {
 
     public func startEnv(_ env: WorktreeEnv) {
         Task {
+            // An env's URL is SERVED BY THE PROXY (issue #16 follow-through): its
+            // container publishes no host port, so without a listener on
+            // `127.0.0.1:<port>` the env starts fine but nothing answers. Same
+            // treatment HTTPS/custom-domain sites already get.
+            await ensureProxyRunning()
             // Guarded start (issue #5): a double-click / dot-spam start while
             // one is already in flight is silently ignored by the lifecycle.
             // The parent rides along as `dbProvider` so a shared-database env can
