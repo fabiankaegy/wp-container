@@ -111,6 +111,8 @@ struct SiteDetailView: View {
         }
     }
 
+    private var envCount: Int { vm.store.envs(forSite: site.id).count }
+
     @ViewBuilder
     private var startStopButton: some View {
         if site.status.isRunning {
@@ -122,23 +124,39 @@ struct SiteDetailView: View {
             .controlSize(.large)
             .buttonStyle(.bordered)
             .tint(.red)
+        } else if site.status.isTransitional {
+            Button {} label: {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text(site.status.label)
+                }
+                .frame(minWidth: 68)
+            }
+            .controlSize(.large)
+            .buttonStyle(.borderedProminent)
+            .disabled(true)
+        } else if envCount > 0 {
+            // Env fan-out is opt-in (issue #18): the primary action starts
+            // just this site; the attached menu offers the coupled behavior
+            // for sites that actually have worktree envs to bring up.
+            Menu {
+                Button("Start with Environments", systemImage: "play.fill") { vm.startSiteWithEnvs(site) }
+            } label: {
+                Label("Start", systemImage: "play.fill").frame(minWidth: 68)
+            } primaryAction: {
+                vm.startSite(site)
+            }
+            .controlSize(.large)
+            .buttonStyle(.borderedProminent)
+            .fixedSize()
         } else {
             Button {
                 vm.startSite(site)
             } label: {
-                if site.status.isTransitional {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
-                        Text(site.status.label)
-                    }
-                    .frame(minWidth: 68)
-                } else {
-                    Label("Start", systemImage: "play.fill").frame(minWidth: 68)
-                }
+                Label("Start", systemImage: "play.fill").frame(minWidth: 68)
             }
             .controlSize(.large)
             .buttonStyle(.borderedProminent)
-            .disabled(site.status.isTransitional)
         }
     }
 

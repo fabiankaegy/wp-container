@@ -346,6 +346,12 @@ struct SidebarSiteRow: View {
         } else {
             Button("Start", systemImage: "play.fill") { vm.startSite(site) }
                 .disabled(site.status.isTransitional)
+            // Env fan-out is opt-in (issue #18) — only worth offering when the
+            // site actually has worktree envs to bring up alongside it.
+            if envCount > 0 {
+                Button("Start with Environments", systemImage: "play.fill") { vm.startSiteWithEnvs(site) }
+                    .disabled(site.status.isTransitional)
+            }
         }
 
         Divider()
