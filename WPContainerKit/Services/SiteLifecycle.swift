@@ -993,6 +993,12 @@ public actor SiteLifecycle {
         // answered", distinct from "port never accepted a connection".
         var observed = "the port never accepted a connection"
         var delay = Duration.milliseconds(200)
+        // For a container-IP probe: when the first failure was, and whether we have
+        // already re-checked the address. A container that dies (or is restarted by
+        // something else) after reporting an IP would otherwise burn the entire
+        // budget re-probing an address nothing is on, in 5s timeouts.
+        var failingSince: ContinuousClock.Instant?
+        var reResolved = false
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
             do {
@@ -1014,6 +1020,26 @@ public actor SiteLifecycle {
                 }
             } catch {
                 observed = "kept failing with: \(error.localizedDescription)"
+            }
+            if failingSince == nil { failingSince = ContinuousClock.now }
+            // ~20s of unbroken failure against a container IP: re-ask who that
+            // container is. Either the address moved (adopt it and carry on) or the
+            // container is gone (say so now rather than at the 120s mark).
+            if !inst.publishesPort, !reResolved, let since = failingSince,
+               ContinuousClock.now - since >= .seconds(20) {
+                reResolved = true
+                guard let ip = try? await cli.ipAddress(of: inst.wpContainerName), !ip.isEmpty else {
+                    throw LifecycleError.httpNotReady(
+                        observed: "the container stopped reporting an IP address — it may have exited "
+                            + "(check `container logs \(inst.wpContainerName)`)")
+                }
+                if let url = URL(string: "http://\(ip):80/"), url != request.url {
+                    request.url = url
+                    // A new address is a fresh start, not a continuation.
+                    failingSince = nil
+                    reResolved = false
+                    delay = .milliseconds(200)
+                }
             }
             try await Task.sleep(for: delay)
             delay = min(delay * 2, .seconds(1))
