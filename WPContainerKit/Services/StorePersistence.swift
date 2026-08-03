@@ -50,6 +50,63 @@ public actor StorePersistence {
         }
     }
 
+    /// Like `mutate`, but `body` reports whether it actually changed anything and
+    /// the file is only rewritten when it did.
+    ///
+    /// Exists for the throttled activity stamp below: an unconditional `mutate`
+    /// would rewrite `sites.json` on every wp-cli call and every MCP tool call,
+    /// and every one of those writes wakes the app's `DispatchSource` watcher and
+    /// makes it reload. A no-op write is not free here.
+    @discardableResult
+    public func mutateIfChanged(_ body: @Sendable (inout StoreEnvelope) -> Bool) throws -> StoreEnvelope {
+        try ensureDirectory()
+        return try withLock {
+            var envelope = (try? readUnlocked()) ?? StoreEnvelope()
+            guard body(&envelope) else { return envelope }
+            envelope.version = StoreEnvelope.currentVersion
+            try writeUnlocked(envelope)
+            return envelope
+        }
+    }
+
+    /// Stamp `lastActivityAt` on the site or env with this id (issue #16),
+    /// skipping the write when the existing stamp is already newer than
+    /// `minimumInterval`.
+    ///
+    /// Every surface that represents deliberate use calls this — wp-cli, MCP tool
+    /// dispatch, magic-login, explicit starts — which is what lets the idle sweep
+    /// see an agent that drives an environment without ever going through the
+    /// proxy. The throttle keeps a chatty agent from turning that into a
+    /// write-per-call; one minute of granularity is nothing against timeouts
+    /// measured in minutes.
+    ///
+    /// Deliberately best-effort and non-throwing: failing to record activity must
+    /// never fail the operation the user actually asked for. The cost of a lost
+    /// stamp is bounded — the worst case is an instance being stopped a bit early
+    /// and woken again on the next request.
+    public func recordActivity(instanceID: UUID, now: Date = Date(),
+                               minimumInterval: TimeInterval = 60) {
+        _ = try? mutateIfChanged { envelope in
+            func isFresh(_ stamp: Date?) -> Bool {
+                guard let stamp else { return false }
+                // `> now` guards a clock that jumped backwards: a stamp from the
+                // future would otherwise suppress every write forever.
+                return stamp <= now && now.timeIntervalSince(stamp) < minimumInterval
+            }
+            if let i = envelope.sites.firstIndex(where: { $0.id == instanceID }) {
+                guard !isFresh(envelope.sites[i].lastActivityAt) else { return false }
+                envelope.sites[i].lastActivityAt = now
+                return true
+            }
+            if let i = envelope.envs.firstIndex(where: { $0.id == instanceID }) {
+                guard !isFresh(envelope.envs[i].lastActivityAt) else { return false }
+                envelope.envs[i].lastActivityAt = now
+                return true
+            }
+            return false
+        }
+    }
+
     /// Allocate a free port and let `reserve` record it into the envelope,
     /// entirely inside the cross-process lock (fixes #3: allocating a port from
     /// a snapshot read earlier, then writing later, lets two concurrent

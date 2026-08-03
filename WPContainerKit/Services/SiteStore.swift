@@ -112,6 +112,41 @@ public final class SiteStore {
         await apply { env in env.envs.removeAll { $0.id == id } }
     }
 
+    /// Stamp an instance's `lastActivityAt` (issue #16) — throttled and
+    /// best-effort, see `StorePersistence.recordActivity`. Called for explicit
+    /// user-driven starts so the idle sweep counts them as activity; NOT called
+    /// for wake-triggered starts, which are the sweep undoing itself and must not
+    /// extend their own deadline.
+    ///
+    /// Updates the in-memory record too rather than reloading: the whole point is
+    /// to be cheap enough to call on every interaction.
+    public func recordActivity(id: UUID, now: Date = Date()) async {
+        await persistence.recordActivity(instanceID: id, now: now)
+        if let i = sites.firstIndex(where: { $0.id == id }) { sites[i].lastActivityAt = now }
+        if let i = envs.firstIndex(where: { $0.id == id }) { envs[i].lastActivityAt = now }
+    }
+
+    /// Set an instance's idle-stop timeout by ID inside the locked
+    /// read-modify-write (issue #16). NOT `upsertSite(_:)` with a caller's
+    /// snapshot: that writes back every field the view happened to be holding and
+    /// would clobber a concurrent `pendingSchemaDrops` tombstone (#17) or provisioned
+    /// flip. Matches `wp-container idle`'s mutate-by-id shape.
+    public func setIdleStopMinutes(_ minutes: Int?, siteID: UUID) async {
+        await apply { env in
+            if let i = env.sites.firstIndex(where: { $0.id == siteID }) {
+                env.sites[i].idleStopMinutes = minutes
+            }
+        }
+    }
+
+    public func setIdleStopMinutes(_ minutes: Int?, envID: UUID) async {
+        await apply { store in
+            if let i = store.envs.firstIndex(where: { $0.id == envID }) {
+                store.envs[i].idleStopMinutes = minutes
+            }
+        }
+    }
+
     /// Record and/or clear a site's shared-schema tombstones in one locked write
     /// (issue #17). `adding` is a schema a deletion could not drop because the DB
     /// server was down; `removing` are the ones a create just dropped for real.

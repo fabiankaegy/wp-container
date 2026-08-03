@@ -29,6 +29,7 @@ struct WPContainerCLI: AsyncParsableCommand {
             MailpitCommand.self,
             DBCommand.self,
             LimitsCommand.self,
+            IdleCommand.self,
             DomainCommand.self,
             ResolveSiteCommand.self,
             SetupCommand.self,
@@ -291,6 +292,11 @@ struct StartCommand: AsyncParsableCommand {
             guard let resolved = resolveTarget(target, in: envelope) else { throw CLIErrorJSON("not_found", detail: target) }
             switch resolved {
             case .site(let site):
+                // An explicit start is the clearest possible activity signal, so
+                // the idle sweep can't park what somebody just asked for (issue
+                // #16). Wake-triggered starts deliberately do NOT stamp — that
+                // would let the sweep extend its own deadline.
+                await ctx.persistence.recordActivity(instanceID: site.id)
                 // Env fan-out is opt-in (issue #18) — an empty envs list makes
                 // `startSiteWithEnvs` start only the parent, reusing the same
                 // claim/warning/image-prefetch plumbing.
@@ -318,6 +324,7 @@ struct StartCommand: AsyncParsableCommand {
                 // as `dbProvider` so a shared-database env can boot the server it
                 // borrows when the parent site is down (issue #17).
                 let parent = envelope.sites.first { $0.id == env.parentSiteID }
+                await ctx.persistence.recordActivity(instanceID: env.id)
                 _ = try await ctx.lifecycle.startInstance(env, pullPolicy: policy, dbProvider: parent)
                 for warning in await ctx.lifecycle.drainWarnings(for: env.id) {
                     FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
@@ -349,16 +356,28 @@ struct StopCommand: AsyncParsableCommand {
         do {
             let envelope = try await ctx.load()
             guard let resolved = resolveTarget(target, in: envelope) else { throw CLIErrorJSON("not_found", detail: target) }
+            // Teardown problems the stop path recorded (issue #16): a container
+            // that survived both `container stop` and `container delete` is
+            // still holding its VM's memory, so it must not stay invisible.
+            var ids: [UUID] = []
             switch resolved {
             case .site(let site):
                 let envs = envelope.envs.filter { $0.parentSiteID == site.id }
                 await ctx.lifecycle.stopSiteWithEnvs(site, envs: envs)
+                ids = [site.id] + envs.map(\.id)
             case .env(let env):
                 await ctx.lifecycle.stop(env)
+                ids = [env.id]
                 // A shared DB container would otherwise linger after its last
                 // user stopped (issue #17) — that memory is the whole point.
                 if let parent = envelope.sites.first(where: { $0.id == env.parentSiteID }) {
                     await ctx.lifecycle.stopSharedDatabaseIfUnused(parent: parent)
+                    ids.append(parent.id)
+                }
+            }
+            for id in ids {
+                for warning in await ctx.lifecycle.drainWarnings(for: id) {
+                    FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
                 }
             }
             if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(target) stopped"))) }
@@ -590,6 +609,10 @@ struct WPCommand: AsyncParsableCommand {
             let envelope = try await ctx.load()
             guard let resolved = resolveTarget(target, in: envelope) else { throw CLIErrorJSON("not_found", detail: target) }
             let inst = resolved.instance
+            // wp-cli against an instance is deliberate use of it, and it is
+            // invisible to the proxy — record it so the idle sweep doesn't park
+            // an environment somebody is actively scripting against (issue #16).
+            await ctx.persistence.recordActivity(instanceID: inst.instanceID)
             guard let dbHost = try await ctx.cli.ipAddress(of: inst.dbContainerName) else {
                 throw CLIErrorJSON("not_running", detail: "start \(target) first")
             }

@@ -46,8 +46,105 @@ since it now serves a whole family of environments.
   their cap and stay there. Restarting a site resets this completely.
 - **Stopped sites cost zero.** Containers are ephemeral (`--rm`): stopping a
   site tears the VMs down entirely — no idle daemon, no background VM. This
-  is the single most effective lever: **stop sites you're not working on**
-  (one click in the menu bar).
+  is the single most effective lever: **stop sites you're not working on** —
+  one click in the menu bar, or opt into having it done for you (see below).
+- **A running VM cannot shrink.** Apple documents that
+  [memory freed inside the container is never relinquished to the host](https://github.com/apple/container/blob/main/docs/technical-overview.md#releasing-container-memory-to-macos),
+  and there is no host-side ballooning in `apple/containerization`
+  ([#65](https://github.com/apple/containerization/issues/65)). So a VM's host
+  footprint is its **peak** touched memory, and a full stop is the only way to
+  reset it. Every stop/wake cycle resets the high-water mark for free.
+
+## Auto-stop when idle, wake on request (opt-in)
+
+Because a running idle VM can't give memory back, and because VM boot is ~1s,
+WP Container can stop what nobody is using and start it again when someone asks.
+
+**It is off by default for everything.** Turn it on per site or per environment.
+Read the next section before you do — what counts as "in use" is narrower than
+you might assume.
+
+- **Who enforces it:** the reverse proxy — it sees every request it routes, so it
+  knows when each site/environment was last reached through it. It runs either
+  inside the app or headless via `wp-container proxy serve`; with no proxy
+  listening nothing is stopped and nothing is woken. Both the Idle stop card and
+  `wp-container idle` say so when that's the case.
+- **Recommended value:** **15 minutes**, for environments you create and then
+  finish with — an agent's branch environment is the case this exists for. Each
+  one is a ~500 MB VM, a fleet of them is real memory, and losing one costs ~1s
+  on the next request.
+- **Extra safety on sites:** a site is never auto-stopped while any of its
+  branch environments are running (its MariaDB container may be serving them),
+  and an idle-stop of a site stops only the site, never its environments.
+- **Envs release the shared DB too:** after an env is idle-stopped, the parent's
+  shared MariaDB container is retired as soon as nothing holds a lease on it, the
+  parent's own wp container is down, and no sibling env is borrowing it. Without
+  that, idling envs would reclaim only half the memory.
+- **Waking:** hitting a stopped **proxied hostname** serves a "Waking up …" page
+  that reloads every 2 seconds and lands on the live site once WordPress answers.
+  Repeated requests during the wake trigger exactly one start. A shared-database
+  env woken while its parent site is down boots the parent's DB container first.
+
+### What counts as activity — and what doesn't
+
+| Counted | Not counted |
+|---|---|
+| Requests to `https://<slug>.localhost` or a custom domain | Requests to `http://127.0.0.1:<port>` |
+| `wp-container wp …` (and the `wp` shim/router) | Anything inside the container you started yourself (`container exec`) |
+| MCP tool calls scoped to the site/env | |
+| `wp-container login` / the `login_link` MCP tool | |
+| An explicit start (CLI, MCP `site_start`, the app's Start button) | |
+
+The reason for that split: only traffic through the proxy is visible to it, and
+the other signals are recorded as a `lastActivityAt` stamp in `sites.json` (at
+most one write a minute) so they work across processes. The idle clock is the
+latest of those, plus the moment the proxy first saw the instance running.
+
+**This matters most for branch environments,** which the app, the CLI and the
+JSON payloads all advertise as `http://127.0.0.1:<port>` — and which WordPress
+itself has pinned as its `home`/`siteurl`. If you work in an environment by
+opening that URL in a browser, the idle clock never sees you, and
+wake-on-request can't help either, because the proxy isn't in that path. So:
+
+- Driving an env over wp-cli/MCP (agents): tracking works, turn it on.
+- Browsing an env at `<slug>.localhost`: tracking works, turn it on.
+- Browsing an env at `127.0.0.1:<port>`: leave it off.
+
+Configure it per instance:
+
+```bash
+wp-container idle <slug>                 # report (site or env slug)
+wp-container idle <slug> --minutes 15    # stop after 15 idle minutes
+wp-container idle <slug> --off           # never auto-stop
+wp-container idle <slug> --default       # back to the built-in default (off)
+```
+
+…or in the app: **Idle stop** on a site's Settings tab, and on an environment's
+detail pane (Default / Never / 15 (recommended) / 5 / 30 / 60 min). The setting
+is stored per instance in `sites.json`, not in app preferences, precisely so a
+headless proxy enforces the same policy.
+
+Agents: `get_site_info` and `worktree_list` report `idleStopMinutes` /
+`effectiveIdleStopMinutes` (0 = never), and the **`set_idle_stop`** tool sets
+them — so an agent can opt its own environment in when it creates it and out
+when it's still working.
+
+Expected impact once enabled across a fleet: memory cost becomes roughly
+`~500 MB × environments touched in the last N minutes` instead of
+`× environments that exist`.
+
+### Verified teardown
+
+`container stop` returning success is not proof the VM is gone: a container was
+observed sitting in `container list --all` as `stopped` while its shim and
+`com.apple.Virtualization.VirtualMachine` process stayed alive holding ~219 MB.
+Every stop now polls for the container to actually disappear, escalates a
+still-stopped survivor to `container delete`, and reports anything that outlives
+both (CLI stderr, the `site_stop` MCP payload, the app's error banner) rather
+than pretending the memory was reclaimed. A name that reappears *running* is
+treated as concurrently restarted by another process and left alone — deleting it
+would kill a container we no longer own. Quitting the app skips this pass so
+shutdown isn't delayed by it.
 
 ### Practical sizing
 
@@ -58,7 +155,10 @@ since it now serves a whole family of environments.
 | 64 GB+ | as many as you realistically need |
 
 Rule of thumb: a plain running site settles around **0.5–1.5 GB** of real
-host memory; add ~0.7–1 GB for Elasticsearch.
+host memory; add ~0.7–1 GB for Elasticsearch. With auto-stop-when-idle enabled
+(below — it's opt-in), what counts toward these numbers is what you've *touched
+recently* rather than what exists, so a fleet of 30 branch environments costs
+whatever the handful you actually used in the last 15 minutes cost.
 
 ## CPU
 
@@ -104,12 +204,28 @@ host memory; add ~0.7–1 GB for Elasticsearch.
    ES's production recommendation and we deliberately don't tune it.
 4. **VM boot time** (~1s) is part of every container start — that's the cost
    of the stronger isolation. See docs/ACCEPTANCE.md for full start-time
-   breakdowns and the ongoing start-latency optimization (issue #9).
-5. **IPs are dynamic**: every container start gets a fresh IP on the
+   breakdowns and the ongoing start-latency optimization (issue #9). It is also
+   what the auto-stop/wake trade is priced against: a woken environment costs
+   that boot plus WordPress's first-request warmup, which is why the waking page
+   refreshes rather than blocking the request.
+5. **Idle-stop can't see every kind of use** — see the table above. A direct
+   `127.0.0.1:<port>` hit is the notable blind spot, which is why the feature is
+   opt-in. Nothing is stopped while the lifecycle has an action in flight for the
+   instance or while a wake is in progress.
+6. **The idle clock is per-proxy-process and in memory.** "When did I first see
+   this running" is an observation, not a stored fact, so restarting the app or
+   the headless proxy — or a certificate re-issue, which reloads the listener —
+   reseeds every clock, and nothing can be stopped for at least one full timeout
+   afterwards. An instance started while no proxy was running is first seen when
+   one next comes up, and gets a fresh window rather than an immediate stop. The
+   persisted `lastActivityAt` stamps do survive restarts; only the
+   first-seen-running observation doesn't. Erring toward "leave it running" is
+   the intended bias for a memory optimisation.
+7. **IPs are dynamic**: every container start gets a fresh IP on the
    `192.168.64.0/24` bridge. The app re-discovers them on every start —
    anything you hardcode against a container IP will break on restart. Use
    the published localhost ports or `<slug>.localhost` names instead.
-6. **Ports**: each site publishes on `127.0.0.1:<port>` (8881+). Localhost
+8. **Ports**: each site publishes on `127.0.0.1:<port>` (8881+). Localhost
    only — other devices on your network can't reach sites directly (the
    HTTPS proxy also binds locally). LAN sharing would need an explicit
    opt-in feature.
@@ -117,6 +233,7 @@ host memory; add ~0.7–1 GB for Elasticsearch.
 ## Inspecting usage yourself
 
 ```bash
+wp-container idle <slug>     # the auto-stop timeout in force for one instance
 container ls                 # running containers + configured CPU/RAM caps
 container stats              # live resource usage per container
 ps axo rss,comm | grep Virtualization   # real host memory per VM
