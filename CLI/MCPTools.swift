@@ -108,6 +108,12 @@ enum MCPTools {
         Tool(name: "mailpit_toggle",
              description: "Enable or disable the per-site Mailpit email catcher. When on, all outgoing WordPress mail is captured by Mailpit (SMTP) instead of being sent; browse or read it via its web UI + REST API (GET <mailboxUrl>/api/v1/messages). Writes/removes a managed mail-routing handler (in the site's private php/ folder, never the project tree) and restarts the site to apply when running. The mailbox URL is returned here and in get_site_info.",
              inputSchema: obj(["enabled": bool("Turn Mailpit on (true) or off (false).")], required: ["enabled"])),
+        Tool(name: "set_idle_stop",
+             description: "Set how long a site or worktree environment may sit unused before the reverse proxy stops it to free its VM's memory (it is started again on the next request to its <slug>.localhost hostname). Off by default for everything. Recommended for environments you create and finish with: 15 minutes. Activity is counted from proxied requests plus wp-cli, MCP tool calls and magic-login — requests straight to http://127.0.0.1:<port> are NOT visible to it, so prefer the <slug>.localhost URL when you enable this. Omit `minutes` to restore the default, or pass 0 to never auto-stop.",
+             inputSchema: obj([
+                "minutes": int("Auto-stop after this many idle minutes; 0 = never. Omit to restore the built-in default (off)."),
+                "slug": str("Site or environment slug (defaults to the scoped site)."),
+             ])),
         Tool(name: "db_import",
              description: "Import a .sql/.sql.gz dump into a site's database: safety backup (one command away from undone) → import → URL migration (source detected from the dump's `home` option, or source_url) → optional scrub of personal data (users/comments/admin email) → media handling (remote proxy handler, folder copy, or skip) → optional local admin/password login. Auto-starts the site if it isn't running. On failure the pre-import backup is automatically re-imported (rollback) before the error is returned. Sites only (not worktree environments) in this version. No streaming progress — returns the final summary.",
              inputSchema: obj([

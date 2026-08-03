@@ -213,14 +213,25 @@ struct IdleCommand: AsyncParsableCommand {
         discussion: """
         A stopped container is the only way to give its memory back to macOS \
         (Apple `container` never releases guest memory), and VM boot is ~1s — so \
-        idle environments are parked and woken again on the next request by \
+        an idle instance can be parked and woken again on the next request by \
         whichever process hosts the HTTPS proxy (the app, or \
-        `wp-container proxy serve`). Hitting a parked URL in the browser serves a \
-        "waking up" page that refreshes into the live site.
+        `wp-container proxy serve`). Hitting a parked <slug>.localhost URL in the \
+        browser serves a "waking up" page that refreshes into the live site.
 
-        Defaults: worktree environments 15 minutes, parent sites OFF. A parent \
-        site is never auto-stopped while any of its environments are running. \
-        Accepts a site slug or an env slug.
+        OFF BY DEFAULT for both sites and environments — this is opt-in. 15 \
+        minutes is the recommended value for environments you create and finish \
+        with (an agent's branch environment, say).
+
+        What counts as activity: requests to the proxied hostnames \
+        (<slug>.localhost or a custom domain), plus wp-cli, MCP tool calls and \
+        magic-login links. Requests straight to http://127.0.0.1:<port> are NOT \
+        visible — and that is the URL worktree environments are advertised at — so \
+        if you browse an environment that way, leave this off or expect it to be \
+        parked while you are looking at it. Wake-on-request likewise only works \
+        through the proxied hostname.
+
+        A parent site is never auto-stopped while any of its environments are \
+        running. Accepts a site slug or an env slug.
         """
     )
     @Argument(help: "Site slug or env slug.") var slug: String
@@ -285,6 +296,7 @@ struct IdleCommand: AsyncParsableCommand {
                     "idleStopMinutes": configured as Any? ?? NSNull(),
                     "effectiveIdleStopMinutes": effective,
                     "enforced": proxyRunning,
+                    "note": IdlePolicy.activityCaveat,
                 ]))
             } else {
                 var line = "\(slug): auto-stop when idle \(IdlePolicy.label(configured: configured, isEnv: isEnv))."
@@ -292,6 +304,9 @@ struct IdleCommand: AsyncParsableCommand {
                     line += " The proxy isn’t running, so nothing is enforcing it — start the app or run `wp-container proxy serve`."
                 }
                 emitLine(line)
+                // Print the caveat only when the setting is actually on: it is the
+                // difference between "works" and "parks an env you're browsing".
+                if effective > 0 { emitLine(IdlePolicy.activityCaveat) }
             }
         } catch { throw failCommand(error, json: output.json) }
     }
