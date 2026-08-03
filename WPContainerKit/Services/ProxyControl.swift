@@ -14,6 +14,9 @@ public enum ProxyControl {
     }
     public static var pidFileURL: URL { directory.appendingPathComponent("proxy.pid") }
     public static var portFileURL: URL { directory.appendingPathComponent("proxy.port") }
+    /// Which env ports the live proxy actually holds (issue #16 follow-through).
+    /// See `EnvPortReport`.
+    public static var envPortsFileURL: URL { directory.appendingPathComponent("proxy-env-ports.json") }
 
     public struct Status: Sendable {
         public let pid: pid_t
@@ -40,6 +43,9 @@ public enum ProxyControl {
         guard let port, isPortAccepting(port) else {
             try? FileManager.default.removeItem(at: pidURL)
             try? FileManager.default.removeItem(at: portURL)
+            // The env-port report belongs to that dead owner too; a stale one
+            // would claim ports nothing is serving.
+            clearEnvPorts()
             return nil
         }
         return Status(pid: pid, port: port)
@@ -47,11 +53,120 @@ public enum ProxyControl {
 
     public static var isRunning: Bool { current() != nil }
 
+    // MARK: - Env-port ownership report (issue #16 follow-through)
+
+    /// Which `127.0.0.1:<env port>` sockets the live proxy holds, and which it
+    /// wanted but could not take.
+    ///
+    /// Dropping `-p` from env containers turned a loud `container run` failure
+    /// ("port already allocated") into a SILENT misroute: if some other process
+    /// holds an env's port, that env's URL quietly serves whatever that process
+    /// is, and neither its idle clock nor wake-on-request works. An os_log
+    /// warning inside the proxy is invisible to the CLI, the MCP payloads and the
+    /// app, so the proxy publishes this alongside its pidfile instead.
+    ///
+    /// Best-effort and advisory ONLY: it is rewritten on every reconcile (~3s) and
+    /// removed on a clean stop, but a crashed proxy leaves it behind — so every
+    /// consumer MUST gate on `current() != nil` first, which is exactly what
+    /// `envPortOwnership(_:)` does.
+    public struct EnvPortReport: Sendable, Codable {
+        public var ownedPorts: [Int]
+        public var conflictedPorts: [Int]
+        public init(ownedPorts: [Int], conflictedPorts: [Int]) {
+            self.ownedPorts = ownedPorts
+            self.conflictedPorts = conflictedPorts
+        }
+    }
+
+    /// What we can say about one env port right now.
+    public enum EnvPortOwnership: Sendable, Equatable {
+        /// No proxy is accepting at all — nothing serves any env URL.
+        case noProxy
+        /// A live proxy holds this port: the URL works, idle-stop and wake apply.
+        case owned
+        /// A live proxy wanted this port and could not take it — a pre-upgrade env
+        /// container still publishing it, or a foreign process squatting on it.
+        case conflicted
+        /// A proxy is up but hasn't reported on this port yet (a brand-new env
+        /// between creation and the next reconcile). Deliberately NOT a warning.
+        case unknown
+    }
+
+    /// Publish the report (best-effort; a failure here must never affect serving).
+    public static func writeEnvPorts(owned: [UInt16], conflicted: [UInt16]) {
+        let report = EnvPortReport(ownedPorts: owned.map(Int.init).sorted(),
+                                   conflictedPorts: conflicted.map(Int.init).sorted())
+        guard let data = try? JSONEncoder().encode(report) else { return }
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try? data.write(to: envPortsFileURL, options: .atomic)
+    }
+
+    public static func clearEnvPorts() {
+        try? FileManager.default.removeItem(at: envPortsFileURL)
+    }
+
+    /// The report as written by the live proxy, or nil when there is none.
+    public static func envPorts() -> EnvPortReport? {
+        guard let data = try? Data(contentsOf: envPortsFileURL) else { return nil }
+        return try? JSONDecoder().decode(EnvPortReport.self, from: data)
+    }
+
+    /// Resolve one env port to a statement we are willing to make out loud.
+    public static func envPortOwnership(_ port: Int) -> EnvPortOwnership {
+        guard current() != nil else { return .noProxy }
+        guard let report = envPorts() else { return .unknown }
+        if report.ownedPorts.contains(port) { return .owned }
+        if report.conflictedPorts.contains(port) { return .conflicted }
+        return .unknown
+    }
+
+    /// Why a worktree environment needs a live proxy, phrased for a warnings
+    /// channel (issue #16 follow-through).
+    ///
+    /// An env's container publishes no host port of its own — the proxy binds
+    /// `127.0.0.1:<port>` and relays to the container — so with nothing listening
+    /// the env runs perfectly but its URL refuses connections. wp-cli and MCP
+    /// workflows are unaffected, which is exactly why this is a warning and not an
+    /// error: the start itself succeeded.
+    public static let envNeedsProxyWarning =
+        "Environment URLs are served by the WP Container reverse proxy, and none is "
+        + "running — http://127.0.0.1:<port> will refuse connections until one is. "
+        + "Launch WPContainer.app or run `wp-container proxy serve`. "
+        + "(wp-cli and MCP work either way.)"
+
+    /// A proxy IS running but does not hold this env's port — the failure mode
+    /// that would otherwise be silent (see `EnvPortReport`).
+    public static func envPortConflictWarning(port: Int) -> String {
+        "The reverse proxy is running but does not own 127.0.0.1:\(port), so this "
+        + "environment's URL and its idle-stop/wake are NOT being served. Either an "
+        + "environment container started by an older build still publishes that port "
+        + "(stop and start it once), or another process is holding it "
+        + "(`lsof -nP -iTCP:\(port) -sTCP:LISTEN`). Run `wp-container https status` "
+        + "for the proxy's own view."
+    }
+
+    /// The warning to surface for an env whose URL was just handed to somebody,
+    /// or nil when there is nothing to say.
+    ///
+    /// Pass the env's `port` to get the precise answer. Without it this can only
+    /// answer "is a proxy up at all", which is a FALSE NEGATIVE during the
+    /// pre-upgrade transition and for a squatted port. `.unknown` stays silent on
+    /// purpose: a port the reconcile hasn't reached yet is the happy path a few
+    /// seconds early, and crying wolf there is worse than a brief silence.
+    public static func envProxyWarning(port: Int? = nil) -> String? {
+        guard let port else { return current() == nil ? envNeedsProxyWarning : nil }
+        switch envPortOwnership(port) {
+        case .noProxy:              return envNeedsProxyWarning
+        case .conflicted:           return envPortConflictWarning(port: port)
+        case .owned, .unknown:      return nil
+        }
+    }
+
     /// True when something ACCEPTS a TCP connection on 127.0.0.1:`port`.
     /// Non-blocking connect with a short (250ms) timeout — the proxy is local:
     /// a live listener accepts effectively instantly and ECONNREFUSED returns
     /// immediately, so this never noticeably delays launch.
-    static func isPortAccepting(_ port: UInt16) -> Bool {
+    public static func isPortAccepting(_ port: UInt16) -> Bool {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { return false }
         defer { close(fd) }
@@ -92,6 +207,9 @@ public enum ProxyControl {
     public static func release() {
         try? FileManager.default.removeItem(at: pidFileURL)
         try? FileManager.default.removeItem(at: portFileURL)
+        // The env-port report is part of this owner's record; leaving it would
+        // have consumers believing ports are served after the proxy is gone.
+        clearEnvPorts()
     }
 
     /// Release ownership only if THIS process holds the pidfile (#4) — safe to

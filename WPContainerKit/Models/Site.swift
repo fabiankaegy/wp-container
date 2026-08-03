@@ -40,7 +40,9 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     public var memoryLimitMB: Int?
     /// Optional per-site auto-stop-when-idle timeout in minutes (issue #16).
     /// nil = the built-in default (`IdlePolicy.defaultSiteMinutes`, i.e. OFF —
-    /// auto-stopping a parent site is strictly opt-in); 0 = explicitly off;
+    /// a site publishes its own port, so a direct `127.0.0.1:<port>` hit is
+    /// invisible to the idle clock and auto-stopping a site stays opt-in;
+    /// worktree envs, whose port the proxy owns, default to ON); 0 = explicitly off;
     /// > 0 = stop after that many idle minutes. Enforced by the HTTPS proxy,
     /// which also wakes the site on the next request.
     public var idleStopMinutes: Int?

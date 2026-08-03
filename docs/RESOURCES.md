@@ -55,24 +55,26 @@ since it now serves a whole family of environments.
   footprint is its **peak** touched memory, and a full stop is the only way to
   reset it. Every stop/wake cycle resets the high-water mark for free.
 
-## Auto-stop when idle, wake on request (opt-in)
+## Auto-stop when idle, wake on request
 
 Because a running idle VM can't give memory back, and because VM boot is ~1s,
-WP Container can stop what nobody is using and start it again when someone asks.
+WP Container stops what nobody is using and starts it again when someone asks.
 
-**It is off by default for everything.** Turn it on per site or per environment.
-Read the next section before you do — what counts as "in use" is narrower than
-you might assume.
+**Branch environments: on by default, 15 minutes. Sites: off by default.** The
+asymmetry is about what can be *observed*, not about which matters more — see
+the next section.
 
 - **Who enforces it:** the reverse proxy — it sees every request it routes, so it
   knows when each site/environment was last reached through it. It runs either
   inside the app or headless via `wp-container proxy serve`; with no proxy
   listening nothing is stopped and nothing is woken. Both the Idle stop card and
   `wp-container idle` say so when that's the case.
-- **Recommended value:** **15 minutes**, for environments you create and then
-  finish with — an agent's branch environment is the case this exists for. Each
-  one is a ~500 MB VM, a fleet of them is real memory, and losing one costs ~1s
-  on the next request.
+- **Environments need the proxy to be reachable at all.** An environment's
+  container publishes no host port: the proxy binds `127.0.0.1:<env port>` itself
+  and relays to the container's vmnet IP. That is what makes the one URL every
+  surface advertises both trackable and wakeable. The app starts the proxy
+  whenever an environment starts; the CLI and MCP print a warning if none is
+  running (the environment still starts — wp-cli and MCP don't need HTTP).
 - **Extra safety on sites:** a site is never auto-stopped while any of its
   branch environments are running (its MariaDB container may be serving them),
   and an idle-stop of a site stops only the site, never its environments.
@@ -80,35 +82,44 @@ you might assume.
   shared MariaDB container is retired as soon as nothing holds a lease on it, the
   parent's own wp container is down, and no sibling env is borrowing it. Without
   that, idling envs would reclaim only half the memory.
-- **Waking:** hitting a stopped **proxied hostname** serves a "Waking up …" page
-  that reloads every 2 seconds and lands on the live site once WordPress answers.
-  Repeated requests during the wake trigger exactly one start. A shared-database
-  env woken while its parent site is down boots the parent's DB container first.
+- **Waking:** hitting any stopped URL the proxy serves — an environment's
+  `http://127.0.0.1:<port>` included — returns a "Waking up …" page that reloads
+  every 2 seconds and lands on the live site once WordPress answers (a 503 with
+  `Retry-After` for non-browser clients). Repeated requests during the wake
+  trigger exactly one start. A shared-database env woken while its parent site is
+  down boots the parent's DB container first.
 
 ### What counts as activity — and what doesn't
 
 | Counted | Not counted |
 |---|---|
-| Requests to `https://<slug>.localhost` or a custom domain | Requests to `http://127.0.0.1:<port>` |
-| `wp-container wp …` (and the `wp` shim/router) | Anything inside the container you started yourself (`container exec`) |
+| Requests to `https://<slug>.localhost` or a custom domain | Requests to a **site's** `http://127.0.0.1:<port>` |
+| Requests to an **environment's** `http://127.0.0.1:<port>` | Requests to a mailbox's direct `http://127.0.0.1:<mailpitPort>` |
+| Requests to `<slug>-mail.localhost` (the mailbox is proxied too) | Anything inside the container you started yourself (`container exec`) |
+| `wp-container wp …` (and the `wp` shim/router) | |
 | MCP tool calls scoped to the site/env | |
 | `wp-container login` / the `login_link` MCP tool | |
 | An explicit start (CLI, MCP `site_start`, the app's Start button) | |
 
-The reason for that split: only traffic through the proxy is visible to it, and
-the other signals are recorded as a `lastActivityAt` stamp in `sites.json` (at
-most one write a minute) so they work across processes. The idle clock is the
-latest of those, plus the moment the proxy first saw the instance running.
+Mailbox requests count as activity (they pass through the proxy like any other
+route) but never *wake* anything: an unread inbox says nothing about whether
+WordPress should be booted.
 
-**This matters most for branch environments,** which the app, the CLI and the
-JSON payloads all advertise as `http://127.0.0.1:<port>` — and which WordPress
-itself has pinned as its `home`/`siteurl`. If you work in an environment by
-opening that URL in a browser, the idle clock never sees you, and
-wake-on-request can't help either, because the proxy isn't in that path. So:
+Only traffic through the proxy is visible to it; the other signals are recorded
+as a `lastActivityAt` stamp in `sites.json` (at most one write a minute) so they
+work across processes. The idle clock is the latest of those, plus the moment the
+proxy first saw the instance running.
 
-- Driving an env over wp-cli/MCP (agents): tracking works, turn it on.
-- Browsing an env at `<slug>.localhost`: tracking works, turn it on.
-- Browsing an env at `127.0.0.1:<port>`: leave it off.
+**Environments have no blind spot left.** Their advertised
+`http://127.0.0.1:<port>` URL — the one the app, the CLI, the JSON payloads and
+WordPress's own `home`/`siteurl` all use — is a socket the proxy holds, so
+browsing an environment keeps it alive and reopening a parked one wakes it, at
+the exact URL you already have in a tab. That is why the default is on.
+
+**Sites still have one.** A site's container publishes its own port, so a request
+to `http://127.0.0.1:<port>` goes straight to it and the proxy never sees it.
+Its `<slug>.localhost` and custom-domain URLs do go through the proxy. So if you
+enable idle-stop on a site, use its proxied URL.
 
 Configure it per instance:
 
@@ -116,7 +127,8 @@ Configure it per instance:
 wp-container idle <slug>                 # report (site or env slug)
 wp-container idle <slug> --minutes 15    # stop after 15 idle minutes
 wp-container idle <slug> --off           # never auto-stop
-wp-container idle <slug> --default       # back to the built-in default (off)
+wp-container idle <slug> --default       # back to the built-in default
+                                         # (environments 15 min, sites off)
 ```
 
 …or in the app: **Idle stop** on a site's Settings tab, and on an environment's
@@ -126,8 +138,30 @@ headless proxy enforces the same policy.
 
 Agents: `get_site_info` and `worktree_list` report `idleStopMinutes` /
 `effectiveIdleStopMinutes` (0 = never), and the **`set_idle_stop`** tool sets
-them — so an agent can opt its own environment in when it creates it and out
-when it's still working.
+them — so an agent that will leave an environment idle for longer than the
+timeout while still needing it can turn it off, and back on when it's done.
+
+### When the proxy can't take an environment's port
+
+An environment whose container is still *running* from an older build publishes
+its own port, so the proxy can't take that socket. The same thing happens if any
+other process is holding it. Either way:
+
+- The proxy logs one warning per port (also on stderr for
+  `wp-container proxy serve`) and retries every few seconds.
+- A pre-upgrade environment keeps working through its own published port. One
+  squatted by an unrelated process does not — its URL serves whatever that process
+  is, which is why this is reported rather than left to os_log.
+- Such an environment is **never idle-stopped**: the proxy can't see traffic to a
+  port it doesn't own, so it refuses to judge it idle at all.
+- `wp-container https status` lists which environment ports the proxy serves and
+  which it couldn't take; `wp-container start <env>`, `worktree create` and
+  `wp-container login <env>` say so too, and the app flags it on the environment's
+  detail pane and Idle stop card.
+
+Stop and start that environment once and the proxy takes the socket, from which
+point the URL, the idle timeout and wake-on-request all apply. For a foreign
+squatter, find it with `lsof -nP -iTCP:<port> -sTCP:LISTEN`.
 
 Expected impact once enabled across a fleet: memory cost becomes roughly
 `~500 MB × environments touched in the last N minutes` instead of
@@ -155,10 +189,10 @@ shutdown isn't delayed by it.
 | 64 GB+ | as many as you realistically need |
 
 Rule of thumb: a plain running site settles around **0.5–1.5 GB** of real
-host memory; add ~0.7–1 GB for Elasticsearch. With auto-stop-when-idle enabled
-(below — it's opt-in), what counts toward these numbers is what you've *touched
-recently* rather than what exists, so a fleet of 30 branch environments costs
-whatever the handful you actually used in the last 15 minutes cost.
+host memory; add ~0.7–1 GB for Elasticsearch. With auto-stop-when-idle (on by
+default for branch environments), what counts toward these numbers is what you've
+*touched recently* rather than what exists, so a fleet of 30 branch environments
+costs whatever the handful you actually used in the last 15 minutes cost.
 
 ## CPU
 
@@ -208,15 +242,18 @@ whatever the handful you actually used in the last 15 minutes cost.
    what the auto-stop/wake trade is priced against: a woken environment costs
    that boot plus WordPress's first-request warmup, which is why the waking page
    refreshes rather than blocking the request.
-5. **Idle-stop can't see every kind of use** — see the table above. A direct
-   `127.0.0.1:<port>` hit is the notable blind spot, which is why the feature is
-   opt-in. Nothing is stopped while the lifecycle has an action in flight for the
-   instance or while a wake is in progress.
+5. **Idle-stop can't see every kind of use** — see the table above. The one
+   remaining blind spot is a direct hit on a **site's** published
+   `127.0.0.1:<port>`, which is why sites stay opt-in; an environment's port is
+   the proxy's, so nothing about an environment is invisible. Nothing is stopped
+   while the lifecycle has an action in flight for the instance or while a wake is
+   in progress.
 6. **The idle clock is per-proxy-process and in memory.** "When did I first see
    this running" is an observation, not a stored fact, so restarting the app or
-   the headless proxy — or a certificate re-issue, which reloads the listener —
-   reseeds every clock, and nothing can be stopped for at least one full timeout
-   afterwards. An instance started while no proxy was running is first seen when
+   the headless proxy reseeds every clock, and nothing can be stopped for at least
+   one full timeout afterwards. (A certificate re-issue does *not* — it rebinds the
+   443/80 listeners and leaves the clocks, and the per-environment sockets, alone.)
+   An instance started while no proxy was running is first seen when
    one next comes up, and gets a fresh window rather than an immediate stop. The
    persisted `lastActivityAt` stamps do survive restarts; only the
    first-seen-running observation doesn't. Erring toward "leave it running" is
@@ -225,16 +262,29 @@ whatever the handful you actually used in the last 15 minutes cost.
    `192.168.64.0/24` bridge. The app re-discovers them on every start —
    anything you hardcode against a container IP will break on restart. Use
    the published localhost ports or `<slug>.localhost` names instead.
-8. **Ports**: each site publishes on `127.0.0.1:<port>` (8881+). Localhost
-   only — other devices on your network can't reach sites directly (the
-   HTTPS proxy also binds locally). LAN sharing would need an explicit
-   opt-in feature.
+8. **Ports**: each site publishes on `127.0.0.1:<port>` (8881+). A branch
+   environment's port on the same range is bound by the reverse proxy instead of
+   by the container, so its URL only answers while a proxy is running. Localhost
+   only either way — other devices on your network can't reach sites or
+   environments directly. LAN sharing would need an explicit opt-in feature.
+9. **Environment URLs are HTTP/1.1 with `Connection: close` — no keep-alive, no
+   HTTP upgrade, and no bypass.** The proxy serves one request per connection and
+   rewrites the header, so **WebSockets to an environment URL cannot work** and
+   every request pays a fresh TCP connect. That's fine for serving WordPress, and
+   a site's own published `127.0.0.1:<port>` is unaffected (it doesn't go through
+   the proxy at all), but it is a real limit on environments specifically. Accepted
+   deliberately rather than fixed: keep-alive and upgrade support means connection
+   pooling and framing state in the proxy, and the truncation bugs that shaped the
+   current relay are a warning about how carefully that has to be done. If you need
+   a WebSocket against a branch checkout, run it on the parent site.
 
 ## Inspecting usage yourself
 
 ```bash
 wp-container idle <slug>     # the auto-stop timeout in force for one instance
+wp-container https status    # proxy liveness + which environment ports it serves
 container ls                 # running containers + configured CPU/RAM caps
 container stats              # live resource usage per container
 ps axo rss,comm | grep Virtualization   # real host memory per VM
+lsof -nP -iTCP:<env port> -sTCP:LISTEN  # who actually holds an environment's port
 ```

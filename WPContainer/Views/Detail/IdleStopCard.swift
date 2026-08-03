@@ -7,10 +7,11 @@ import WPContainerKit
 /// trade is memory for a moment of latency.
 ///
 /// Follows `ResourcesCard`'s Default/override shape — the picker's "Default"
-/// state persists `nil`, which currently resolves to OFF for both sites and envs.
-/// The card states plainly what the idle clock can and cannot see, because
-/// enabling it on an instance you only ever reach at `127.0.0.1:<port>` would
-/// look like a bug rather than a limitation (see `IdlePolicy`).
+/// state persists `nil`, which resolves to 15 minutes for an environment (whose
+/// every request the proxy sees) and to OFF for a site. The card states plainly
+/// what the idle clock can and cannot see, because a site you only ever reach at
+/// `127.0.0.1:<port>` would look like a bug rather than a limitation (see
+/// `IdlePolicy`).
 struct IdleStopCard: View {
     @Environment(AppViewModel.self) private var vm
 
@@ -18,6 +19,10 @@ struct IdleStopCard: View {
     let configured: Int?
     /// Envs and sites have different defaults and different copy.
     let isEnv: Bool
+    /// For an ENV: the port whose ownership decides whether this policy is being
+    /// enforced at all (issue #16 follow-through). nil for sites, whose enforcement
+    /// only needs a proxy to exist.
+    var envPort: Int? = nil
     let onChange: (Int?) -> Void
 
     private var selection: Binding<Int?> {
@@ -31,6 +36,28 @@ struct IdleStopCard: View {
     /// Enforced by whichever process hosts the proxy — with no proxy listening
     /// nothing stops anything, so say so rather than lying with a picker.
     private var proxyRunning: Bool { vm.proxyPort != nil }
+
+    /// Why this setting is NOT currently in force, or nil when it is.
+    ///
+    /// For an env there are two distinct answers, and the second one is the whole
+    /// reason the proxy publishes its port report: a running proxy that does not
+    /// own the env's socket cannot see its traffic, and so deliberately refuses to
+    /// judge it idle (see `HTTPSProxy.sweepIdleInstances`).
+    private var enforcementProblem: String? {
+        guard let envPort else {
+            return proxyRunning ? nil
+                : "The reverse proxy isn’t running, so nothing is enforcing this yet."
+        }
+        switch ProxyControl.envPortOwnership(envPort) {
+        case .noProxy:
+            return "The reverse proxy isn’t running, so nothing is enforcing this yet."
+        case .conflicted:
+            return "The proxy doesn’t own port \(envPort), so it can’t see this environment’s "
+                + "traffic and won’t stop it. Stop and start the environment once."
+        case .owned, .unknown:
+            return nil
+        }
+    }
 
     var body: some View {
         SectionCard(title: "Idle stop", systemImage: "moon.zzz") {
@@ -57,12 +84,12 @@ struct IdleStopCard: View {
                 }
 
                 if effective > 0 {
-                    Text(IdlePolicy.activityCaveat)
+                    Text(IdlePolicy.activityNote(isEnv: isEnv))
                         .font(.caption2).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                if effective > 0 && !proxyRunning {
-                    Text("The reverse proxy isn’t running, so nothing is enforcing this yet.")
+                if effective > 0, let notEnforced = enforcementProblem {
+                    Text(notEnforced)
                         .font(.caption2).foregroundStyle(.tertiary)
                 }
             }
@@ -76,8 +103,8 @@ struct IdleStopCard: View {
 
     private var detailText: String {
         if isEnv {
-            return "Off by default. Turn it on for environments you create and finish with — an agent’s branch environment, say — and its ~500 MB comes back when nobody is using it. Opening its <slug>.localhost URL starts it again in about a second."
+            return "On by default (\(IdlePolicy.defaultEnvMinutes) minutes). An environment nobody is using gives its ~500 MB back, and the next request to its URL starts it again in about a second behind a page that refreshes into the site."
         }
-        return "Off by default — you’re usually working in a site. When on, it is never stopped while any of its environments are running, and opening its URL starts it again."
+        return "Off by default — you’re usually working in a site. When on, it is never stopped while any of its environments are running, and opening its proxied URL starts it again."
     }
 }
