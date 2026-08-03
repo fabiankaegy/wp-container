@@ -303,6 +303,29 @@ public final class AppViewModel {
         }
     }
 
+    // MARK: - Idle stop (issue #16)
+
+    /// Persist a site's auto-stop-when-idle timeout. nil = follow the default
+    /// (off for sites), 0 = never, > 0 = minutes. Nothing to restart: the proxy
+    /// re-reads the store every few seconds and enforces from there.
+    public func setIdleStop(_ site: Site, minutes: Int?) {
+        Task {
+            var updated = site
+            updated.idleStopMinutes = minutes
+            await store.upsertSite(updated)
+        }
+    }
+
+    /// Same for a worktree env (whose default is 15 minutes — envs are the
+    /// many-of-them case the feature exists for).
+    public func setIdleStop(_ env: WorktreeEnv, minutes: Int?) {
+        Task {
+            var updated = env
+            updated.idleStopMinutes = minutes
+            await store.upsertEnv(updated)
+        }
+    }
+
     /// Persist an add-on flag change and restart the site when it is running so
     /// the new container recipe takes effect.
     private func toggleAddon(_ site: Site, _ apply: @escaping (inout Site) -> Void) {

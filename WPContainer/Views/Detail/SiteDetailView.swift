@@ -87,6 +87,9 @@ struct SiteDetailView: View {
                 IntegrationsCard(site: site)
                 DevelopmentCard(site: site)
                 ResourcesCard(site: site)
+                IdleStopCard(configured: site.idleStopMinutes, isEnv: false) { minutes in
+                    vm.setIdleStop(site, minutes: minutes)
+                }
                 SoftwareCard(site: site)
                 DomainCard(site: site)
                 dangerZone

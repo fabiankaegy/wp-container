@@ -48,7 +48,7 @@ enum MCPTools {
                 "raw": bool("Emit the value verbatim (for booleans/numbers) instead of a quoted string."),
              ], required: ["name", "value"])),
         Tool(name: "get_site_info",
-             description: "Full site descriptor: paths, URL, port, status, image, DB credentials, provisioned flag, a loginHint (prefer login_link over the wp-login form), plus active plugins & theme when running.",
+             description: "Full site descriptor: paths, URL, port, status, image, DB credentials, provisioned flag, a loginHint (prefer login_link over the wp-login form), the auto-stop-when-idle timeout (idleStopMinutes / effectiveIdleStopMinutes, where 0 means never), plus active plugins & theme when running.",
              inputSchema: obj([:])),
         Tool(name: "login_link",
              description: "Mint a one-time browser login link (magic link) for the scoped site. Opening the returned URL in a browser starts a logged-in wp-admin session — no wp-login.php form, no credentials to type. The link is single-use and expires in 15 minutes. Prefer this over driving the login form.",
