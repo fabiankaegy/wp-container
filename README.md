@@ -23,7 +23,8 @@ installation lives in a normal folder on your Mac** — drop your git-managed
 ~/WP Container Sites/my-blog/
 ├── wordpress/        ← the entire WP install, host-visible (mounted to /var/www/html)
 │   └── wp-content/   ← your git repos go here
-├── database/         ← MariaDB data, survives restarts
+├── database/         ← MariaDB data, survives restarts (also serves the
+│                       branch environments' schemas)
 └── wp                ← per-site wp-cli shim
 ```
 
@@ -49,7 +50,11 @@ Sites are provisioned automatically (no install wizard) and log in with
 - **Branch environments (git worktrees)** — spin up an isolated, fully-running clone
   of a site for any branch of a repo inside `wp-content`, in ~5 seconds (APFS
   copy-on-write + a bind mount that shadows the repo path with the worktree
-  checkout). The parent site keeps running untouched. Built for AI agents:
+  checkout). The parent site keeps running untouched. An env's database is its
+  own schema on the parent site's existing MariaDB container, so it runs **one**
+  container instead of two — see
+  [Shared databases](#branch-environments-share-the-parents-database). Built for
+  AI agents:
   ```bash
   wp-container worktree create --site my-blog \
     --repo wp-content/plugins/my-plugin --branch feature-x --json
@@ -158,6 +163,37 @@ measured usage, and the limitations to be aware of are documented in
 [docs/RESOURCES.md](docs/RESOURCES.md). Short version: caps aren't
 reservations, stopped sites cost zero, and stopping unused sites is the lever
 that matters.
+
+### Branch environments share the parent's database
+
+A branch environment does **not** run a MariaDB container of its own. It gets its
+own schema (`wpc_<env-slug>`) on the parent site's existing server, cloned from
+the parent's data at creation time. That halves the container count per env —
+2 VMs → 1 — and since a MariaDB VM costs ~470 MB of real memory regardless of how
+much data it holds, the marginal cost of env #5 or #10 is close to zero.
+
+Practical consequences:
+
+- An env's database is only available while the parent's `wpc-<site>-db`
+  container is running. Starting an env starts that container if it isn't up;
+  stopping the last running env of a stopped site shuts it down again. Stopping or
+  deleting an env never touches the parent's database container itself.
+- Deleting an env drops exactly its own `wpc_*` schema. If the server happens to
+  be down at that moment, the name is recorded on the parent site and dropped the
+  next time an env is created for it. Only names recorded that way are ever
+  dropped — never "every `wpc_*` schema the store doesn't recognise", which would
+  race an environment being created alongside it and destroy a live database.
+- The env's WordPress finds its schema through `WORDPRESS_DB_NAME`, so nothing on
+  disk is edited. If a project ships its own `wp-config.php` with a hardcoded
+  `define('DB_NAME', …)` the env would silently write into the parent's database —
+  so creation detects that and falls back to a dedicated container, with a
+  warning saying so.
+
+Pass `--isolated-db` (CLI), `isolated_db: true` (MCP), or switch on **Isolated
+database** in the New Branch Environment sheet to opt out and get a dedicated
+container. It's worth it for a genuinely large database: an isolated env off a
+*stopped* parent copy-on-write-clones the `database/` folder, which is instant at
+any size, whereas the shared path is always a logical dump and restore.
 
 ## Development
 

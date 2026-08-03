@@ -176,7 +176,13 @@ enum MCPToolDispatch {
             "provisioned": site.provisioned,
             "mailpitEnabled": site.mailpitEnabled,
             "mailboxUrl": site.mailboxURL?.absoluteString as Any? ?? NSNull(),
-            "db": ["name": SiteRecipe.dbName, "user": SiteRecipe.dbUser, "password": SiteRecipe.dbPassword],
+            // Read off the instance rather than the `SiteRecipe` constants (#17).
+            // `resolveSite` only ever returns a SITE, which always owns its
+            // `wordpress` schema — going through the instance just means this
+            // can't drift if envs ever become addressable here. Worktree envs
+            // report their own schema via `worktree_create`/`worktree_list`.
+            "db": ["name": site.databaseName, "container": site.dbContainerName,
+                   "user": SiteRecipe.dbUser, "password": SiteRecipe.dbPassword],
             "admin": ["user": SiteRecipe.adminUser, "password": SiteRecipe.adminPassword],
             "loginHint": "Use the login_link tool for a one-time browser login URL instead of the wp-login form.",
         ]
@@ -367,6 +373,7 @@ enum MCPToolDispatch {
         let parentSlug = args["site"]?.stringValue ?? slug
         let from = args["from"]?.stringValue
         let provision = args["provision"]?.boolValue ?? true
+        let isolatedDB = args["isolated_db"]?.boolValue ?? false
         let envelope = try await ctx.load()
         guard let parent = envelope.sites.first(where: { $0.slug == parentSlug }) else {
             throw ToolError("site_not_found", "No site with slug \(parentSlug).")
@@ -384,22 +391,35 @@ enum MCPToolDispatch {
         }
         let env: WorktreeEnv
         do {
-            env = try await ctx.worktrees.create(parent: parent, parentIsRunning: running.contains(parent.wpContainerName),
-                                                 repoRelPath: repo, branch: branch, from: from,
-                                                 port: reserved.port, reserved: reserved, provision: provision)
+            let outcome = try await ctx.worktrees.create(parent: parent, parentIsRunning: running.contains(parent.wpContainerName),
+                                                        repoRelPath: repo, branch: branch, from: from,
+                                                        port: reserved.port, reserved: reserved, provision: provision,
+                                                        isolatedDB: isolatedDB)
+            env = outcome.env
+            let reaped = outcome.reapedSchemas
             _ = try await ctx.persistence.mutate { store in
                 store.envs.removeAll { $0.id == env.id }
                 store.envs.append(env)
+                // Clear exactly the tombstones whose DROP succeeded (#17).
+                if !reaped.isEmpty, let i = store.sites.firstIndex(where: { $0.id == parent.id }) {
+                    store.sites[i].pendingSchemaDrops.removeAll { reaped.contains($0) }
+                }
             }
         } catch {
             _ = try? await ctx.persistence.mutate { store in store.envs.removeAll { $0.id == reserved.id } }
             throw error
         }
         let d = WorktreeDescriptor(from: env)
-        return MCPResult.json([
+        var payload: [String: Any] = [
             "url": d.url, "port": d.port, "path": d.path, "worktreePath": d.worktreePath,
             "branch": d.branch, "envSlug": d.envSlug, "containers": d.containers,
-        ])
+            // So an agent can see WHERE this env's data actually lives (#17).
+            "database": ["name": env.databaseName, "container": env.dbContainerName,
+                         "shared": env.sharedDatabase],
+        ]
+        let warnings = await ctx.lifecycle.drainWarnings(for: env.id)
+        if !warnings.isEmpty { payload["warnings"] = warnings }
+        return MCPResult.json(payload)
     }
 
     private static func worktreeList(_ args: [String: Value], ctx: CLIContext, slug: String) async throws -> CallTool.Result {
@@ -423,8 +443,18 @@ enum MCPToolDispatch {
         let keepBranch = args["keepBranch"]?.boolValue ?? true
         let keepWorktree = args["keepWorktree"]?.boolValue ?? false
         let parent = envelope.sites.first { $0.id == env.parentSiteID }
-        await ctx.worktrees.delete(env, parent: parent, keepBranch: keepBranch, keepWorktree: keepWorktree)
-        _ = try await ctx.persistence.mutate { store in store.envs.removeAll { $0.id == env.id } }
+        let outcome = await ctx.worktrees.delete(env, parent: parent, keepBranch: keepBranch, keepWorktree: keepWorktree)
+        _ = try await ctx.persistence.mutate { store in
+            store.envs.removeAll { $0.id == env.id }
+            // The DB server was down, so the env's schema is still there (#17).
+            // Tombstone it for the next shared-env create to reap.
+            if let orphan = outcome.tombstonedSchema, let parent,
+               let i = store.sites.firstIndex(where: { $0.id == parent.id }),
+               !store.sites[i].pendingSchemaDrops.contains(orphan) {
+                store.sites[i].pendingSchemaDrops.append(orphan)
+            }
+        }
+        if let parent { await ctx.lifecycle.stopSharedDatabaseIfUnused(parent: parent) }
         return MCPResult.json(["ok": true, "envSlug": envSlug])
     }
 

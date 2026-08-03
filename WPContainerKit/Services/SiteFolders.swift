@@ -34,11 +34,16 @@ public enum SiteFolders {
         return builtInDefaultSitesRoot
     }
 
-    /// Ensure `wordpress/` and `database/` exist for a runnable instance.
+    /// Ensure `wordpress/` (and, for an instance that owns its DB container,
+    /// `database/`) exist. A shared-database worktree env has no mariadb data
+    /// directory of its own, so `.envs/<branch>/database/` is never created for
+    /// it (issue #17).
     public static func ensure(for inst: any RunnableInstance) throws {
         let fm = FileManager.default
         try fm.createDirectory(at: inst.wordpressFolder, withIntermediateDirectories: true)
-        try fm.createDirectory(at: inst.databaseFolder, withIntermediateDirectories: true)
+        if inst.ownsDatabaseContainer {
+            try fm.createDirectory(at: inst.databaseFolder, withIntermediateDirectories: true)
+        }
     }
 
     /// APFS copy-on-write clone (`cp -Rc`), falling back to a regular copy if

@@ -112,6 +112,24 @@ public final class SiteStore {
         await apply { env in env.envs.removeAll { $0.id == id } }
     }
 
+    /// Record and/or clear a site's shared-schema tombstones in one locked write
+    /// (issue #17). `adding` is a schema a deletion could not drop because the DB
+    /// server was down; `removing` are the ones a create just dropped for real.
+    /// Read-modify-write on the LIVE record, never a caller's snapshot, so two
+    /// concurrent env operations can't clobber each other's list.
+    public func updatePendingSchemaDrops(siteID: UUID, adding: String? = nil, removing: [String] = []) async {
+        guard adding != nil || !removing.isEmpty else { return }
+        await apply { env in
+            guard let i = env.sites.firstIndex(where: { $0.id == siteID }) else { return }
+            if !removing.isEmpty {
+                env.sites[i].pendingSchemaDrops.removeAll { removing.contains($0) }
+            }
+            if let adding, !env.sites[i].pendingSchemaDrops.contains(adding) {
+                env.sites[i].pendingSchemaDrops.append(adding)
+            }
+        }
+    }
+
     /// Allocate a free port and reserve it in ONE cross-process-locked
     /// read-modify-write, matching the CLI (#3 follow-up). `reserve` MUST record
     /// the port in the envelope (append the new site/env, or a placeholder a

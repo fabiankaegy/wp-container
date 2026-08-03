@@ -268,14 +268,47 @@ struct DomainClear: AsyncParsableCommand {
 struct ResolveSiteCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "resolve-site", abstract: "Resolve a filesystem path to the site/env whose wordpress/ tree contains it.")
     @Option(name: .long, help: "Absolute path to resolve (default: cwd).") var path: String?
+    @Option(name: .long, help: "Body version of the global `wp` router making this call. Set automatically by the router; a version too old to honor the resolved database name is refused for shared-database environments.")
+    var routerVersion: Int?
     @OptionGroup var output: JSONOptions
 
     func run() async throws {
         let ctx = CLIContext()
         let target = path ?? FileManager.default.currentDirectoryPath
+        // The global `wp` router calls this on every invocation, which makes it
+        // the one reliable place to heal a router left behind by an older build
+        // (issue #17: a v1 router ignores the `dbName` below and would run
+        // wp-cli against a shared env's PARENT database). Note the staleness
+        // BEFORE healing — the process that just called us is still running the
+        // OLD body, which the rewrite can't retroactively fix.
+        let staleRouterOnDisk = WPCLIShim.routerNeedsRefresh
+        WPCLIShim.refreshRouterIfStale()
+        // A caller that announced its version is trusted at its word; one that
+        // didn't is presumed stale only when a stale router file was actually
+        // sitting there (so a human running `resolve-site` by hand, or anyone
+        // with no router installed, is never refused).
+        let callerIsStaleRouter: Bool
+        if let routerVersion { callerIsStaleRouter = routerVersion < WPCLIShim.routerVersion }
+        else { callerIsStaleRouter = staleRouterOnDisk }
         do {
             let envelope = try await ctx.load()
             if let match = SiteResolver.resolve(path: target, in: envelope) {
+                // Refuse rather than hand a shared env's paths to a router that
+                // will pair them with a hardcoded WORDPRESS_DB_NAME=wordpress —
+                // that is one silent write into the PARENT site's database. Sites
+                // and isolated envs keep working with an old router.
+                if callerIsStaleRouter, match.dbName != SiteRecipe.dbName {
+                    let message = "the global `wp` router is out of date and would run wp-cli against "
+                        + "\(match.slug)'s PARENT database instead of its own schema. It has just been "
+                        + "refreshed — rerun your command (or run `wp-container setup wp`)."
+                    // The old router pipes our stderr to /dev/null, so also write
+                    // straight to the terminal — the one channel it can't swallow.
+                    if let tty = FileHandle(forWritingAtPath: "/dev/tty") {
+                        tty.write(Data(("wp: " + message + "\n").utf8))
+                        try? tty.close()
+                    }
+                    throw CLIErrorJSON("stale_router", detail: message)
+                }
                 if output.json { emitLine(CLIJSON.string(match)) }
                 else { emitLine("\(match.kind) \(match.slug) — \(match.wordpressPath)\(match.subpath.isEmpty ? "" : "/\(match.subpath)")") }
             } else {

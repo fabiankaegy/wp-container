@@ -569,15 +569,13 @@ public final class AppViewModel {
     /// improvements ship automatically on the next launch (PLAN.md §2e).
     private func refreshStaleShims() {
         for site in store.sites where WPCLIShim.shimNeedsRefresh(siteRoot: site.path) {
-            _ = try? WPCLIShim.writeShim(slug: site.slug, siteRoot: site.path,
-                                         cliImage: WordPressImageCatalog.cliImage(for: site.imageTag))
+            _ = try? WPCLIShim.writeShim(for: site, siteRoot: site.path, slug: site.slug)
         }
         for site in store.sites {
             guard let root = site.agentToolsRoot else { continue }
             let url = URL(fileURLWithPath: root)
             if WPCLIShim.shimNeedsRefresh(siteRoot: url) {
-                _ = try? WPCLIShim.writeShim(slug: site.slug, siteRoot: url, wordpressFolder: site.wordpressFolder,
-                                             cliImage: WordPressImageCatalog.cliImage(for: site.imageTag))
+                _ = try? WPCLIShim.writeShim(for: site, siteRoot: url, slug: site.slug)
             }
         }
         if WPCLIShim.routerInstalled { _ = try? WPCLIShim.writeRouter() }
@@ -585,8 +583,7 @@ public final class AppViewModel {
 
     /// Open an interactive wp-cli shell for the site in Terminal.app (§2e).
     public func openWPCLI(_ site: Site) {
-        let command = WPCLIShim.interactiveTerminalCommand(slug: site.slug, wordpressFolder: site.wordpressFolder,
-                                                            cliImage: WordPressImageCatalog.cliImage(for: site.imageTag))
+        let command = WPCLIShim.interactiveTerminalCommand(for: site, slug: site.slug)
         SystemActions.openTerminalRunning(command)
     }
 
@@ -855,7 +852,8 @@ public final class AppViewModel {
     /// Awaitable worktree-env creation for the "New Branch Environment" sheet:
     /// returns the created (already-started) env so the sheet can show its URL,
     /// or nil on failure (error surfaced via `lastError`).
-    public func createEnvAwaiting(parent: Site, repoRelPath: String, branch: String, from: String? = nil, provision: Bool = true) async -> WorktreeEnv? {
+    public func createEnvAwaiting(parent: Site, repoRelPath: String, branch: String, from: String? = nil,
+                                  provision: Bool = true, isolatedDB: Bool = false) async -> WorktreeEnv? {
         // Allocate the port AND reserve the env descriptor in ONE locked store
         // mutation (#3 follow-up) — same pattern the CLI/MCP worktree-create use.
         // The reserved record keeps the final env's UUID so `upsertEnv` (success)
@@ -870,13 +868,21 @@ public final class AppViewModel {
         // inside `create`); the "environment ready" notification stands in.
         suppressStatusNotify.insert(reserved.id)
         do {
-            let env = try await worktrees.create(parent: parent, parentIsRunning: parent.status.isRunning,
-                                                 repoRelPath: repoRelPath, branch: branch, from: from,
-                                                 port: reserved.port, reserved: reserved, provision: provision)
+            let outcome = try await worktrees.create(parent: parent, parentIsRunning: parent.status.isRunning,
+                                                    repoRelPath: repoRelPath, branch: branch, from: from,
+                                                    port: reserved.port, reserved: reserved, provision: provision,
+                                                    isolatedDB: isolatedDB)
+            let env = outcome.env
             await store.upsertEnv(env)
+            // Clear exactly the tombstones whose DROP succeeded (#17).
+            await store.updatePendingSchemaDrops(siteID: parent.id, removing: outcome.reapedSchemas)
             notifications.notifyEnvReady(branch: env.branch, parent: parent.name,
                                          url: env.localURL, faviconFolder: env.wordpressFolder)
             clearSuppressionSoon(env.id)
+            // e.g. the shared-database safety fallback (#17) — surfaced without
+            // failing the creation.
+            let warnings = await lifecycle.drainWarnings(for: env.id)
+            if !warnings.isEmpty { lastError = warnings.joined(separator: "\n") }
             return env
         } catch {
             await store.removeEnv(id: reserved.id)
@@ -976,6 +982,15 @@ public final class AppViewModel {
                 group.addTask { await lifecycle.stop(env) }
             }
         }
+        // An orphan env's parent site was already stopped, so its shared DB
+        // container (issue #17) is nobody's `stopCore` responsibility — retire it
+        // here, after every stop above has settled, or quitting the app would
+        // leave a MariaDB VM running.
+        let orphanParents = Set(orphanEnvs.filter { !$0.ownsDatabaseContainer }.map(\.parentSiteID))
+        for parentID in orphanParents {
+            guard let parent = store.site(id: parentID) else { continue }
+            await lifecycle.stopSharedDatabaseIfUnused(parent: parent)
+        }
     }
 
     /// First-run offer to install the `wp-container` CLI. Fires at most once
@@ -1013,7 +1028,8 @@ public final class AppViewModel {
 
     // MARK: - Worktree env actions
 
-    public func createEnv(parent: Site, repoRelPath: String, branch: String, from: String? = nil, provision: Bool = true) {
+    public func createEnv(parent: Site, repoRelPath: String, branch: String, from: String? = nil,
+                          provision: Bool = true, isolatedDB: Bool = false) {
         Task {
             // Port + env reservation in one locked mutation (#3 follow-up).
             guard let (_, reserved) = await store.allocatePort(reserve: { port, envelope in
@@ -1025,13 +1041,19 @@ public final class AppViewModel {
             let parentRunning = parent.status.isRunning
             suppressStatusNotify.insert(reserved.id)
             do {
-                let env = try await worktrees.create(parent: parent, parentIsRunning: parentRunning,
-                                                     repoRelPath: repoRelPath, branch: branch, from: from,
-                                                     port: reserved.port, reserved: reserved, provision: provision)
+                let outcome = try await worktrees.create(parent: parent, parentIsRunning: parentRunning,
+                                                        repoRelPath: repoRelPath, branch: branch, from: from,
+                                                        port: reserved.port, reserved: reserved, provision: provision,
+                                                        isolatedDB: isolatedDB)
+                let env = outcome.env
                 await store.upsertEnv(env)
+                // Clear exactly the tombstones whose DROP succeeded (#17).
+                await store.updatePendingSchemaDrops(siteID: parent.id, removing: outcome.reapedSchemas)
                 notifications.notifyEnvReady(branch: env.branch, parent: parent.name,
                                              url: env.localURL, faviconFolder: env.wordpressFolder)
                 clearSuppressionSoon(env.id)
+                let warnings = await lifecycle.drainWarnings(for: env.id)
+                if !warnings.isEmpty { lastError = warnings.joined(separator: "\n") }
             } catch {
                 await store.removeEnv(id: reserved.id)
                 clearSuppressionSoon(reserved.id)
@@ -1045,13 +1067,23 @@ public final class AppViewModel {
         Task {
             // Guarded start (issue #5): a double-click / dot-spam start while
             // one is already in flight is silently ignored by the lifecycle.
-            do { _ = try await lifecycle.startInstance(env) }
+            // The parent rides along as `dbProvider` so a shared-database env can
+            // boot the server it borrows when the parent site is down (#17).
+            let parent = store.site(id: env.parentSiteID)
+            do { _ = try await lifecycle.startInstance(env, dbProvider: parent) }
             catch { lastError = SiteLifecycleErrorText(error) }
         }
     }
 
     public func stopEnv(_ env: WorktreeEnv) {
-        Task { await lifecycle.stop(env) }
+        Task {
+            await lifecycle.stop(env)
+            // Retire a shared DB container nothing needs any more, or a stopped
+            // env would leave its parent's ~470 MB server behind (#17).
+            if let parent = store.site(id: env.parentSiteID) {
+                await lifecycle.stopSharedDatabaseIfUnused(parent: parent)
+            }
+        }
     }
 
     /// Delete an env. The git branch is ALWAYS kept; `keepWorktree` optionally
@@ -1059,8 +1091,14 @@ public final class AppViewModel {
     public func deleteEnv(_ env: WorktreeEnv, keepWorktree: Bool = false) {
         Task {
             let parent = store.site(id: env.parentSiteID)
-            await worktrees.delete(env, parent: parent, keepBranch: true, keepWorktree: keepWorktree)
+            let outcome = await worktrees.delete(env, parent: parent, keepBranch: true, keepWorktree: keepWorktree)
             await store.removeEnv(id: env.id)
+            if let parent {
+                // The DB server was down, so the schema is still there (#17) —
+                // tombstone it for the next shared-env create to reap.
+                await store.updatePendingSchemaDrops(siteID: parent.id, adding: outcome.tombstonedSchema)
+                await lifecycle.stopSharedDatabaseIfUnused(parent: parent)
+            }
             if selection == env.id { selection = env.parentSiteID }
             try? await ca.removeLeafCoverage(["\(env.envSlug).localhost"])
         }

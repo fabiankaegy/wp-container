@@ -100,6 +100,9 @@ public enum SiteRecipe {
     }
 
     // MARK: - Database container
+    /// `container run` args for the DB container OWNED by `inst`. Never call
+    /// this for a shared-database env (issue #17) — pass the owning parent site
+    /// instead, so the name, folders, labels and caps are all the owner's.
     public static func runDatabaseArgs(_ inst: any RunnableInstance) -> [String] {
         // VALIDATED: mariadb must run as 999:999 when bind-mounting database/,
         // otherwise the same virtiofs chown restriction kills its entrypoint
@@ -109,12 +112,84 @@ public enum SiteRecipe {
         args += labelArgs(for: inst)
         args += [
             "-v", "\(inst.databaseFolder.path):/var/lib/mysql",
+            // The OWNER's primary schema — deliberately the constant, not
+            // `inst.databaseName`: env schemas are created separately by
+            // `createEnvDatabaseArgs` on this same server (issue #17).
             "-e", "MARIADB_DATABASE=\(dbName)",
             "-e", "MARIADB_USER=\(dbUser)",
             "-e", "MARIADB_PASSWORD=\(dbPassword)",
             "-e", "MARIADB_ROOT_PASSWORD=\(dbRootPassword)",
             databaseImage,
+            // mariadbd arguments (the image's entrypoint forwards a leading `-…`
+            // to the server). This server now hosts a whole FAMILY of envs, each
+            // with its own apache prefork pool, so the stock 151 is too tight:
+            // ~10 envs × ~10 workers ≈ 100 worst case, plus wp-cli one-shots.
+            "--max-connections=\(maxConnections)",
         ]
+        return args
+    }
+
+    /// `max_connections` for a DB server that may host a parent site plus every
+    /// one of its worktree envs (issue #17).
+    public static let maxConnections = 300
+
+    // MARK: - Shared env schemas (issue #17, empirically validated)
+    //
+    // All three run as a ONE-SHOT `mariadb:11` container connecting over the
+    // container network to the server's IP as root. No bind mount (so no
+    // 999:999 uid workaround), `--rm`, and no resource caps.
+
+    /// Root credentials + host flags shared by the one-shot schema recipes.
+    private static func mariadbClientFlags(dbHost: String) -> [String] {
+        ["-h", dbHost, "-uroot", "-p\(dbRootPassword)"]
+    }
+
+    /// `CREATE DATABASE IF NOT EXISTS <schema>` + grant it to the shared
+    /// `wordpress` user (no per-env users: envs of one site are already clones of
+    /// each other's data with a coupled lifecycle).
+    public static func createEnvDatabaseArgs(dbHost: String, schema: String) -> [String] {
+        var args = ["run", "--rm", databaseImage, "mariadb"]
+        args += mariadbClientFlags(dbHost: dbHost)
+        args += ["-e", """
+        CREATE DATABASE IF NOT EXISTS `\(schema)`; \
+        GRANT ALL PRIVILEGES ON `\(schema)`.* TO '\(dbUser)'@'%'; \
+        FLUSH PRIVILEGES;
+        """]
+        return args
+    }
+
+    /// Server-side logical clone `from` → `to` on the SAME server, staged through
+    /// the one-shot container's own ephemeral `/tmp` — nothing is buffered through
+    /// a Swift `String` or written into a host mount (a strict improvement on the
+    /// old `liveDatabaseTransfer`).
+    ///
+    /// Deliberately NOT a pipeline: POSIX `sh` reports only the LAST element's
+    /// exit status, so `mariadb-dump | mariadb` exits 0 even when the dump aborted
+    /// mid-stream (lost connection, `max_allowed_packet`) — silently producing a
+    /// truncated clone that looks like a success. `set -e` plus two sequential
+    /// redirects makes a dump failure fail the whole command.
+    public static func cloneDatabaseArgs(dbHost: String, from: String, to: String) -> [String] {
+        let flags = mariadbClientFlags(dbHost: dbHost).joined(separator: " ")
+        let dump = "/tmp/wpc-clone.sql"
+        return [
+            "run", "--rm", "--entrypoint", "/bin/sh", databaseImage, "-c",
+            "set -e; mariadb-dump \(flags) --single-transaction --quick \(from) > \(dump); "
+                + "mariadb \(flags) \(to) < \(dump)",
+        ]
+    }
+
+    /// `DROP DATABASE IF EXISTS <schema>`. Callers MUST gate this on
+    /// `WorktreeEnv.isManagedSchemaName` — dropping the wrong name would take
+    /// out a sibling env or the parent site itself.
+    ///
+    /// There is deliberately NO "list the `wpc_%` schemas" counterpart: dropping
+    /// whatever a listing shows minus whatever the store claims races any
+    /// concurrent env creation, whose schema exists before its record does. Only
+    /// names we tombstoned ourselves are ever dropped (`Site.pendingSchemaDrops`).
+    public static func dropEnvDatabaseArgs(dbHost: String, schema: String) -> [String] {
+        var args = ["run", "--rm", databaseImage, "mariadb"]
+        args += mariadbClientFlags(dbHost: dbHost)
+        args += ["-e", "DROP DATABASE IF EXISTS `\(schema)`;"]
         return args
     }
 
@@ -161,7 +236,11 @@ public enum SiteRecipe {
             "-e", "WORDPRESS_DB_HOST=\(dbHost)",
             "-e", "WORDPRESS_DB_USER=\(dbUser)",
             "-e", "WORDPRESS_DB_PASSWORD=\(dbPassword)",
-            "-e", "WORDPRESS_DB_NAME=\(dbName)",
+            // Per-instance, NOT the constant: a shared-database env points at
+            // its own `wpc_*` schema on the parent's server (issue #17). The
+            // image's wp-config template reads DB_NAME from this env var, so
+            // nothing on disk needs editing.
+            "-e", "WORDPRESS_DB_NAME=\(inst.databaseName)",
         ]
         if let xdebugClientHost {
             args += ["-e", "XDEBUG_CLIENT_HOST=\(xdebugClientHost)"]
@@ -262,7 +341,10 @@ public enum SiteRecipe {
             "-e", "WORDPRESS_DB_HOST=\(dbHost)",
             "-e", "WORDPRESS_DB_USER=\(dbUser)",
             "-e", "WORDPRESS_DB_PASSWORD=\(dbPassword)",
-            "-e", "WORDPRESS_DB_NAME=\(dbName)",
+            // Per-instance (issue #17): every one-shot wp-cli invocation for a
+            // shared-database env must target the env's schema, never the
+            // parent's `wordpress`.
+            "-e", "WORDPRESS_DB_NAME=\(inst.databaseName)",
         ]
         return args
     }
