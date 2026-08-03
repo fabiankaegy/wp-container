@@ -273,6 +273,11 @@ struct ResolveSiteCommand: AsyncParsableCommand {
     func run() async throws {
         let ctx = CLIContext()
         let target = path ?? FileManager.default.currentDirectoryPath
+        // The global `wp` router calls this on every invocation, which makes it
+        // the one reliable place to heal a router left behind by an older build
+        // (issue #17: a v1 router ignores the `dbName` below and would run
+        // wp-cli against a shared env's PARENT database).
+        WPCLIShim.refreshRouterIfStale()
         do {
             let envelope = try await ctx.load()
             if let match = SiteResolver.resolve(path: target, in: envelope) {

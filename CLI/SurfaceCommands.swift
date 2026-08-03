@@ -89,8 +89,7 @@ struct ShimCommand: AsyncParsableCommand {
         let ctx = CLIContext()
         do {
             let site = try await loadSite(slug, ctx)
-            let url = try WPCLIShim.writeShim(slug: site.slug, siteRoot: site.path,
-                                              cliImage: WordPressImageCatalog.cliImage(for: site.imageTag))
+            let url = try WPCLIShim.writeShim(for: site, siteRoot: site.path, slug: site.slug)
             if output.json { emitLine(MCPJSON.string(["ok": true, "path": url.path])) }
             else { emitLine("Wrote wp shim to \(url.path).") }
         } catch { throw failCommand(error, json: output.json) }

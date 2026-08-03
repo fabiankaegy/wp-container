@@ -238,8 +238,7 @@ struct CreateCommand: AsyncParsableCommand {
             }
             try SiteFolders.ensure(for: created)
             // Write the per-site wp-cli shim at <site>/wp (§2e).
-            try? WPCLIShim.writeShim(slug: created.slug, siteRoot: created.path,
-                                     cliImage: WordPressImageCatalog.cliImage(for: created.imageTag))
+            try? WPCLIShim.writeShim(for: created, siteRoot: created.path, slug: created.slug)
             let resolvedGroupName = created.groupID.flatMap { id in updated.groups.first { $0.id == id }?.name }
             if output.json { emitLine(CLIJSON.string(SiteJSON(from: created, group: resolvedGroupName))) }
             else { emitLine("Created \(created.slug) at \(created.path.path) (port \(created.port))\(resolvedGroupName.map { " in group \"\($0)\"" } ?? "").") }
