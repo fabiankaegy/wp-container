@@ -32,6 +32,23 @@ public protocol RunnableInstance: Sendable {
     /// (e.g. a worktree checkout that shadows the primary one).
     var extraMounts: [Mount] { get }
     var isProvisioned: Bool { get }
+    /// The container that hosts this instance's MariaDB server. Defaults to the
+    /// instance's own `wpc-<containerSlug>-db`; a shared-database worktree env
+    /// (issue #17) overrides it to the PARENT site's container.
+    ///
+    /// A protocol REQUIREMENT (with a default implementation) rather than an
+    /// extension-only member on purpose: extension-only members dispatch
+    /// STATICALLY, so an override on `WorktreeEnv` would be invisible to the
+    /// lifecycle's `any RunnableInstance` call sites.
+    var dbContainerName: String { get }
+    /// The MySQL schema WordPress connects to (`WORDPRESS_DB_NAME`). Defaults to
+    /// the shared `wordpress` constant; a shared-database env overrides it with
+    /// its own persisted `wpc_*` schema on the parent's server (issue #17).
+    var databaseName: String { get }
+    /// Whether this instance OWNS its database container — i.e. may create it on
+    /// start and stop/delete it on stop/delete. False for a shared-database env,
+    /// whose DB container belongs to its parent site (issue #17).
+    var ownsDatabaseContainer: Bool { get }
     /// Whether this instance runs from the Xdebug-enabled derived image (§2c).
     var xdebugEnabled: Bool { get }
     /// Whether this instance runs a per-instance Elasticsearch sidecar (§2c).
@@ -57,6 +74,10 @@ public protocol RunnableInstance: Sendable {
 public extension RunnableInstance {
     var wpContainerName: String { "wpc-\(containerSlug)-wp" }
     var dbContainerName: String { "wpc-\(containerSlug)-db" }
+    /// Default: the single `wordpress` schema on the instance's own server.
+    var databaseName: String { SiteRecipe.dbName }
+    /// Default: the instance runs (and therefore owns) its own DB container.
+    var ownsDatabaseContainer: Bool { true }
     /// Per-instance Elasticsearch sidecar container name (§2c).
     var esContainerName: String { "wpc-\(containerSlug)-es" }
     /// Per-instance Mailpit container name (issue #10).

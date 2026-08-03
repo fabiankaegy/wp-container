@@ -11,6 +11,10 @@ public enum LifecycleError: Error, Sendable, CustomStringConvertible {
     case elasticsearchNotReady
     case elasticsearchIPUnavailable
     case mailpitIPUnavailable
+    /// A shared-database env was started without its parent's descriptor while
+    /// the parent's DB container wasn't already up, so there is nothing to
+    /// connect to and nothing that may legitimately start it (issue #17).
+    case sharedDatabaseUnavailable(container: String)
 
     public var description: String {
         switch self {
@@ -21,6 +25,8 @@ public enum LifecycleError: Error, Sendable, CustomStringConvertible {
         case .elasticsearchNotReady: return "The Elasticsearch container did not become ready in time."
         case .elasticsearchIPUnavailable: return "Could not resolve the Elasticsearch container's IP address."
         case .mailpitIPUnavailable: return "Could not resolve the Mailpit container's IP address."
+        case .sharedDatabaseUnavailable(let name):
+            return "This environment shares its parent site's database container (\(name)), which is not running — start the parent site first."
         }
     }
 }
@@ -60,6 +66,12 @@ public actor SiteLifecycle {
 
     /// Instances with a lifecycle action currently in flight (issue #5).
     private var inFlight: Set<UUID> = []
+
+    /// In-flight DB-container boots keyed by CONTAINER NAME (issue #17), so a
+    /// coupled start of a parent site plus N shared-database envs issues exactly
+    /// one `container run` for the one server they share. See
+    /// `ensureDatabaseContainer`.
+    private var dbBoots: [String: Task<Void, Error>] = [:]
 
     /// Image-pull fallback warnings recorded per instance (issue #18) — e.g. a
     /// pull that failed but degraded to a local image. Drained by callers that
@@ -123,8 +135,14 @@ public actor SiteLifecycle {
     /// a brand-new env (fresh UUID, nothing to dedupe against, and markRunning
     /// must wait for the URL fixes). UI/CLI actions go through the guarded
     /// wrappers (`startSite`, `startInstance`, `startSiteWithEnvs`).
+    ///
+    /// - Parameter dbProvider: the instance that OWNS the DB container `inst`
+    ///   borrows — i.e. the parent site of a shared-database env (issue #17).
+    ///   Required whenever `!inst.ownsDatabaseContainer` and that container is
+    ///   not already up; ignored otherwise.
     @discardableResult
-    public func startContainers(_ inst: any RunnableInstance, pullPolicy: PullPolicy = .ifMissing) async throws -> String {
+    public func startContainers(_ inst: any RunnableInstance, pullPolicy: PullPolicy = .ifMissing,
+                                dbProvider: (any RunnableInstance)? = nil) async throws -> String {
         let timer = PhaseTimer(inst.containerSlug)
         emit(inst.instanceID, .starting)
         do {
@@ -184,7 +202,7 @@ public actor SiteLifecycle {
             // Launch the wp container's dependencies CONCURRENTLY (issue #9):
             // db run + IP, es run + IP (no green gate), Xdebug derived image.
             // WP needs only the IP VALUES at `container run` time.
-            async let dbAddresses = launchDatabase(inst)
+            async let dbAddresses = launchDatabase(inst, provider: dbProvider)
             async let esURL = launchElasticsearch(inst)
             async let mailHost = launchMailpit(inst)
             async let xdebugImage = ensureXdebugImage(inst)
@@ -219,10 +237,30 @@ public actor SiteLifecycle {
         }
     }
 
-    /// Run the DB container and resolve its (IP, gateway) as soon as assigned.
-    /// The IP changes on every restart — re-inspect each start, never cache.
-    private func launchDatabase(_ inst: any RunnableInstance) async throws -> (ip: String, gateway: String?) {
-        try await cli.run(SiteRecipe.runDatabaseArgs(inst))
+    /// Resolve the (IP, gateway) of the DB container this instance talks to,
+    /// starting it first when the instance owns it. The IP changes on every
+    /// restart — re-inspect each start, never cache.
+    ///
+    /// Shared-database env (issue #17): there is no `container run` for the env
+    /// at all. If the parent's container is already up we just read its address;
+    /// if it isn't, we boot it from the PROVIDER's descriptor (its name, data
+    /// folder, labels and caps) — so starting one env of a stopped site boots a
+    /// single DB VM that every sibling env then shares.
+    private func launchDatabase(_ inst: any RunnableInstance,
+                                provider: (any RunnableInstance)?) async throws -> (ip: String, gateway: String?) {
+        // Whoever may legitimately `container run` this name: the instance
+        // itself, or the parent site it borrows the container from.
+        let owner: (any RunnableInstance)?
+        if inst.ownsDatabaseContainer {
+            owner = inst
+        } else if let provider, provider.dbContainerName == inst.dbContainerName,
+                  provider.ownsDatabaseContainer {
+            owner = provider
+        } else {
+            owner = nil
+        }
+        try await ensureDatabaseContainer(named: inst.dbContainerName, owner: owner)
+
         var delay = Duration.milliseconds(100)
         let deadline = ContinuousClock.now.advanced(by: .seconds(15))
         while ContinuousClock.now < deadline {
@@ -235,6 +273,34 @@ public actor SiteLifecycle {
             delay = min(delay * 2, .milliseconds(500))
         }
         throw LifecycleError.databaseIPUnavailable
+    }
+
+    /// Boot the named DB container if it isn't already running, at most ONCE per
+    /// name process-wide.
+    ///
+    /// Shared databases (issue #17) turn a coupled start into N+1 instances all
+    /// wanting the SAME `wpc-<parent>-db` up: without dedupe the parent and its
+    /// envs race on `container run --name`, and every loser fails the whole
+    /// instance start. The in-flight `Task` map collapses them onto one boot; a
+    /// container that already exists but is not running (a crash left it behind)
+    /// is deleted and recreated rather than waited on forever.
+    ///
+    /// `owner` is nil when nobody present may create it — a shared-database env
+    /// started without its parent's descriptor. That's only fatal if the
+    /// container isn't already up.
+    private func ensureDatabaseContainer(named name: String, owner: (any RunnableInstance)?) async throws {
+        if let inFlight = dbBoots[name] { return try await inFlight.value }
+        let task = Task<Void, Error> { [cli] in
+            let existing = try await cli.inspect(name).first
+            if let existing, existing.isRunning { return }
+            guard let owner else { throw LifecycleError.sharedDatabaseUnavailable(container: name) }
+            if existing != nil { _ = try? await cli.run(SiteRecipe.deleteArgs(name)) }
+            try SiteFolders.ensure(for: owner)
+            try await cli.run(SiteRecipe.runDatabaseArgs(owner))
+        }
+        dbBoots[name] = task
+        defer { dbBoots[name] = nil }
+        try await task.value
     }
 
     /// Start the Elasticsearch sidecar (when enabled) and return the
@@ -291,11 +357,15 @@ public actor SiteLifecycle {
     /// Guarded start for a single instance (worktree envs, §2b): containers up,
     /// then flip to `.running`. Returns false when another action for the
     /// instance was already in flight (the start was ignored, issue #5).
+    ///
+    /// Pass `dbProvider` (the parent site) when starting a shared-database env
+    /// (issue #17) so its DB container can be booted if the parent is down.
     @discardableResult
-    public func startInstance(_ inst: any RunnableInstance, pullPolicy: PullPolicy = .ifMissing) async throws -> Bool {
+    public func startInstance(_ inst: any RunnableInstance, pullPolicy: PullPolicy = .ifMissing,
+                              dbProvider: (any RunnableInstance)? = nil) async throws -> Bool {
         guard claim(inst.instanceID) else { return false }
         defer { release(inst.instanceID) }
-        _ = try await startContainers(inst, pullPolicy: pullPolicy)
+        _ = try await startContainers(inst, pullPolicy: pullPolicy, dbProvider: dbProvider)
         markRunning(inst.instanceID)
         return true
     }
@@ -425,7 +495,9 @@ public actor SiteLifecycle {
             for env in claimedEnvs {
                 group.addTask {
                     do {
-                        _ = try await self.startContainers(env, pullPolicy: pullPolicy)
+                        // `dbProvider: site` — a shared-database env borrows the
+                        // parent's DB container and may need it booted (#17).
+                        _ = try await self.startContainers(env, pullPolicy: pullPolicy, dbProvider: site)
                         await self.markRunning(env.id)
                         return .env(slug: env.envSlug, error: nil)
                     } catch {
@@ -484,11 +556,46 @@ public actor SiteLifecycle {
         // es sidecar is stopped best-effort whether or not the flag is
         // currently set (it may have been toggled off since start).
         await withTaskGroup(of: Void.self) { group in
-            for name in [inst.wpContainerName, inst.esContainerName, inst.mailContainerName, inst.dbContainerName] {
+            for name in Self.ownedContainerNames(of: inst) {
                 group.addTask { [cli] in _ = try? await cli.run(SiteRecipe.stopArgs(name)) }
             }
         }
         emit(inst.instanceID, .stopped)
+    }
+
+    /// Every container this instance may stop or delete. A shared-database env
+    /// (issue #17) is deliberately EXCLUDED from its DB container: that server
+    /// belongs to the parent site and to every sibling env, so tearing it down
+    /// from an env would take them all offline. See
+    /// `stopSharedDatabaseIfUnused` for the counterpart that does retire it once
+    /// nothing needs it.
+    private static func ownedContainerNames(of inst: any RunnableInstance) -> [String] {
+        var names = [inst.wpContainerName, inst.esContainerName, inst.mailContainerName]
+        if inst.ownsDatabaseContainer { names.append(inst.dbContainerName) }
+        return names
+    }
+
+    /// Retire a shared DB container that nothing needs any more (issue #17,
+    /// trade-off #2): after stopping an env whose database lives on the parent's
+    /// server, stop that server too — but ONLY when the parent's own wp container
+    /// is down AND no sibling shared-database env is still running. Otherwise a
+    /// stopped env would leave a ~470 MB DB VM behind forever, which is the whole
+    /// memory win this change exists for.
+    ///
+    /// Callers pass the parent and its CURRENT env list (they hold the store);
+    /// idempotent and best-effort, so it is safe to call on every env stop.
+    public func stopSharedDatabaseIfUnused(parent: Site, siblingEnvs: [WorktreeEnv]) async {
+        let records = (try? await cli.list(all: true)) ?? []
+        let running = Set(records.filter(\.isRunning).map(\.name))
+        guard running.contains(parent.dbContainerName) else { return }
+        guard !running.contains(parent.wpContainerName) else { return }
+        let stillNeeded = siblingEnvs.contains { env in
+            !env.ownsDatabaseContainer
+                && env.dbContainerName == parent.dbContainerName
+                && running.contains(env.wpContainerName)
+        }
+        guard !stillNeeded else { return }
+        _ = try? await cli.run(SiteRecipe.stopArgs(parent.dbContainerName))
     }
 
     /// Stop + best-effort delete (non --rm leftovers, prior crash, …).
@@ -497,7 +604,8 @@ public actor SiteLifecycle {
     /// its own error, exactly as before issue #5).
     public func deleteContainers(_ inst: any RunnableInstance) async {
         await withTaskGroup(of: Void.self) { group in
-            for name in [inst.wpContainerName, inst.esContainerName, inst.mailContainerName, inst.dbContainerName] {
+            // Never the parent's DB container for a shared-database env (#17).
+            for name in Self.ownedContainerNames(of: inst) {
                 group.addTask { [cli] in
                     _ = try? await cli.run(SiteRecipe.stopArgs(name))
                     _ = try? await cli.run(SiteRecipe.deleteArgs(name))

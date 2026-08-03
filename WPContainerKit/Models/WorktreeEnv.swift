@@ -33,6 +33,20 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
     /// Inherited per-site resource caps (issue #11); nil = `container` defaults.
     public var cpuLimit: Int?
     public var memoryLimitMB: Int?
+    /// Whether this env lives as an extra SCHEMA on the parent site's MariaDB
+    /// container instead of running one of its own (issue #17). The default for
+    /// newly created envs; `--isolated-db` opts out. Records written before
+    /// issue #17 decode as `false`, so they keep their dedicated container.
+    ///
+    /// INVARIANT: only ever true together with a non-nil `databaseSchema` — both
+    /// the memberwise init and `init(from:)` normalize it, so the derived
+    /// `databaseName` can never silently fall back to the parent's `wordpress`
+    /// schema (the one genuinely corrupting failure mode here).
+    public private(set) var sharedDatabase: Bool
+    /// The persisted `wpc_*` schema this env owns on the parent's server, or nil
+    /// when the env has its own DB container. PERSISTED, never recomputed from
+    /// the slug at use time (issue #17).
+    public private(set) var databaseSchema: String?
 
     /// Runtime-derived; NOT persisted.
     public var status: SiteStatus = .stopped
@@ -41,7 +55,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         case id, parentSiteID, parentSlug, envSlug, repoRelPath, branch,
              worktreePath, envPath, port, imageTag, createdAt, provisioned,
              xdebugEnabled, elasticsearchEnabled, cpuLimit, memoryLimitMB,
-             mailpitEnabled, mailpitPort
+             mailpitEnabled, mailpitPort, sharedDatabase, databaseSchema
     }
 
     public init(
@@ -63,6 +77,8 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         mailpitPort: Int? = nil,
         cpuLimit: Int? = nil,
         memoryLimitMB: Int? = nil,
+        sharedDatabase: Bool = false,
+        databaseSchema: String? = nil,
         status: SiteStatus = .stopped
     ) {
         self.id = id
@@ -83,6 +99,9 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         self.mailpitPort = mailpitPort
         self.cpuLimit = cpuLimit
         self.memoryLimitMB = memoryLimitMB
+        // Enforce the shared-DB invariant at the only two entry points.
+        self.databaseSchema = databaseSchema
+        self.sharedDatabase = sharedDatabase && databaseSchema != nil
         self.status = status
     }
 
@@ -109,14 +128,81 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         // Absent in envs written before issue #11.
         self.cpuLimit = try? c.decodeIfPresent(Int.self, forKey: .cpuLimit)
         self.memoryLimitMB = try? c.decodeIfPresent(Int.self, forKey: .memoryLimitMB)
+        // Absent in envs written before issue #17 — they keep their own DB
+        // container, so the default MUST be false/nil.
+        let schema = try? c.decodeIfPresent(String.self, forKey: .databaseSchema)
+        self.databaseSchema = schema
+        self.sharedDatabase = ((try? c.decode(Bool.self, forKey: .sharedDatabase)) ?? false) && schema != nil
     }
 
     public var wordpressFolder: URL { envPath.appendingPathComponent("wordpress", isDirectory: true) }
+    /// Where an ISOLATED env's mariadb data directory lives. A shared-database
+    /// env never materializes this folder (issue #17) — `SiteFolders.ensure`
+    /// skips it, and `SiteRecipe.runDatabaseArgs` is never called for the env.
     public var databaseFolder: URL { envPath.appendingPathComponent("database", isDirectory: true) }
 
     /// Compose the env slug from a parent slug + branch slug.
     public static func makeSlug(parentSlug: String, branch: String) -> String {
         "\(parentSlug)-wt-\(Slug.make(branch))"
+    }
+
+    /// Bind this env to `schema` on its parent site's DB server (issue #17), the
+    /// only way to flip `sharedDatabase` on. Called once by
+    /// `WorktreeEnvService.create` BEFORE the containers start, so the record the
+    /// caller persists already carries the chosen schema. Refuses a name that
+    /// isn't one of ours, keeping the invariant unbreakable from the outside.
+    public mutating func adoptSharedDatabase(schema: String) {
+        guard Self.isManagedSchemaName(schema) else { return }
+        databaseSchema = schema
+        sharedDatabase = true
+    }
+
+    // MARK: - Shared-database schema naming (issue #17)
+
+    /// MySQL's identifier length cap.
+    public static let maxSchemaNameLength = 64
+    /// Prefix every managed env schema carries. The `DROP DATABASE` guard keys
+    /// off it, so it must never be empty.
+    public static let schemaPrefix = "wpc_"
+
+    /// The schema name for a shared-database env: `wpc_` + the env slug with
+    /// dashes turned into underscores. When that exceeds MySQL's 64-char
+    /// identifier cap it is truncated and suffixed with `_<6-hex>`, a STABLE
+    /// hash of the full env slug, so two long slugs sharing a prefix can't
+    /// collide. Result is always ≤ 64 chars.
+    ///
+    /// Call this ONCE, at creation, and persist the result (`databaseSchema`) —
+    /// never recompute it from the slug at use time.
+    public static func schemaName(forEnvSlug slug: String) -> String {
+        let sanitized = String(slug.map { ch in
+            (ch.isASCII && (ch.isLetter || ch.isNumber)) ? ch : Character("_")
+        })
+        let full = schemaPrefix + sanitized
+        guard full.count > maxSchemaNameLength else { return full }
+        let hash = String(format: "%06x", stableHash(slug) & 0xFFFFFF)
+        let keep = maxSchemaNameLength - hash.count - 1 // "_" + hash
+        return String(full.prefix(keep)) + "_" + hash
+    }
+
+    /// Whether a name is one of OUR managed env schemas — the blast-radius guard
+    /// in front of every `DROP DATABASE` (never `wordpress`, never a sibling
+    /// site's anything). Prefix + charset + length, all three.
+    public static func isManagedSchemaName(_ name: String) -> Bool {
+        guard name.hasPrefix(schemaPrefix), name.count > schemaPrefix.count,
+              name.count <= maxSchemaNameLength else { return false }
+        return name.allSatisfy { ($0.isASCII && ($0.isLetter || $0.isNumber)) || $0 == "_" }
+    }
+
+    /// FNV-1a (64-bit). Deterministic across processes and releases — Swift's
+    /// `Hasher` is per-process seeded and therefore unusable for a name that
+    /// gets written to disk.
+    static func stableHash(_ s: String) -> UInt64 {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in s.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x0000_0100_0000_01b3
+        }
+        return hash
     }
 }
 
@@ -127,6 +213,19 @@ extension WorktreeEnv: RunnableInstance {
     public var envLabel: String? { envSlug }
     public var displayName: String { branch }
     public var isProvisioned: Bool { provisioned }
+    /// A shared-database env talks to the PARENT site's DB container (issue #17).
+    public var dbContainerName: String {
+        sharedDatabase ? "wpc-\(parentSlug)-db" : "wpc-\(envSlug)-db"
+    }
+    /// The env's own schema on the shared server, or the plain `wordpress`
+    /// schema on its own server. The `sharedDatabase`/`databaseSchema` invariant
+    /// makes the `??` unreachable.
+    public var databaseName: String {
+        sharedDatabase ? (databaseSchema ?? SiteRecipe.dbName) : SiteRecipe.dbName
+    }
+    /// A shared-database env must never create, stop or delete the container it
+    /// borrows from its parent.
+    public var ownsDatabaseContainer: Bool { !sharedDatabase }
     /// The worktree checkout shadows the primary checkout inside the env container.
     /// Mount construction is isolated in `SiteRecipe` so integration can adjust it.
     public var extraMounts: [Mount] {
