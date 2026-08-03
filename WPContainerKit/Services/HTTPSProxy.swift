@@ -127,6 +127,11 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// the forwarder) logs once instead of every 3 seconds. Cleared when the port
     /// finally binds, so a later regression is reported again.
     private var portBindWarned: Set<UInt16> = []
+    /// Whether the proxy is currently meant to hold env ports at all. `stop()`
+    /// clears it, `start()` sets it — so a reconcile already queued when `stop()`
+    /// landed releases the sockets instead of re-taking them. `reload()` leaves it
+    /// alone, which is what keeps env sockets across a cert swap.
+    private var acceptingEnvPorts = false
     /// `wpc-…` container name → current vmnet IP, refreshed alongside the host
     /// map so upstream connections dial containers directly instead of the
     /// lossy published-port forwarder (see `Route.containerName`). IPs churn on
@@ -425,6 +430,7 @@ public final class HTTPSProxy: @unchecked Sendable {
         await refreshContainerIPs()
         // Take ownership of every current env's `127.0.0.1:<port>` socket. From
         // here the refresh loop keeps the set in sync.
+        stateLock.withLock { acceptingEnvPorts = true }
         syncEnvPortListeners()
 
         startRefreshLoop()
@@ -480,6 +486,7 @@ public final class HTTPSProxy: @unchecked Sendable {
         // Full teardown gives the env sockets back too — anything else would
         // leave a dead process's ports held for the next owner.
         let listeners = stateLock.withLock { () -> [NWListener] in
+            acceptingEnvPorts = false
             let all = Array(envPortListeners.values)
             envPortListeners.removeAll()
             portBindWarned.removeAll()
@@ -573,15 +580,18 @@ public final class HTTPSProxy: @unchecked Sendable {
 
     private func reconcileEnvPortListeners() {
         let (desired, bound) = stateLock.withLock {
-            (portMap, Set(envPortListeners.keys))
+            // Stopped: desire nothing, so the loop below closes everything.
+            (acceptingEnvPorts ? portMap : [:], Set(envPortListeners.keys))
         }
-        for port in bound.subtracting(desired.keys) {
-            let listener = stateLock.withLock { () -> NWListener? in
-                portBindWarned.remove(port)
-                return envPortListeners.removeValue(forKey: port)
-            }
-            listener?.cancel()
+        // Forget the complaint history for anything no longer wanted — including
+        // ports we never managed to bind, which are not in `bound`. Otherwise a
+        // port later reallocated to a different env would silently skip its
+        // warning.
+        let stale = stateLock.withLock { () -> [NWListener] in
+            portBindWarned = portBindWarned.filter { desired[$0] != nil }
+            return bound.subtracting(desired.keys).compactMap { envPortListeners.removeValue(forKey: $0) }
         }
+        stale.forEach { $0.cancel() }
         for port in Set(desired.keys).subtracting(bound) {
             openEnvPortListener(port, slug: desired[port]?.slug)
         }
