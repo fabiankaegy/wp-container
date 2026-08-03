@@ -17,6 +17,7 @@ struct NewBranchEnvSheet: View {
     @State private var fromRef = ""
     @State private var knownBranches: [String] = []
     @State private var provision = true
+    @State private var isolatedDB = false
 
     @State private var phase: Phase = .idle
     @State private var errorText: String?
@@ -107,6 +108,12 @@ struct NewBranchEnvSheet: View {
                 Toggle("Seed runtime dependencies", isOn: $provision)
                     .disabled(phase == .working)
                 Text("Copies the parent's gitignored deps (vendor/, built assets, provisioned plugins) into the checkout so the env boots into a working site. Turn off for a bare checkout.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section {
+                Toggle("Isolated database", isOn: $isolatedDB)
+                    .disabled(phase == .working)
+                Text("By default the environment gets its own database on \(site.name)'s existing database server — one container instead of two, saving around 470 MB. Turn this on to run a separate server, which is faster to set up for a very large database.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if phase == .working {
@@ -222,7 +229,7 @@ struct NewBranchEnvSheet: View {
         let env = await vm.createEnvAwaiting(parent: site, repoRelPath: repo.relativePath,
                                              branch: branch.trimmingCharacters(in: .whitespaces),
                                              from: from.isEmpty ? nil : from,
-                                             provision: provision)
+                                             provision: provision, isolatedDB: isolatedDB)
         if let env {
             createdEnv = env
             phase = .done

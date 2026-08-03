@@ -94,6 +94,12 @@ public struct WorktreeDescriptor: Codable, Sendable {
     public let branch: String
     public let envSlug: String
     public let containers: [String]
+    /// The MySQL schema this env's WordPress uses. `wordpress` on its own server,
+    /// or a `wpc_*` schema on the parent site's server when the database is
+    /// shared (issue #17) — in which case `containers` lists the PARENT's db
+    /// container, because that is genuinely the one it talks to.
+    public let databaseName: String
+    public let sharedDatabase: Bool
 
     public init(from env: WorktreeEnv) {
         self.url = env.localURL.absoluteString
@@ -103,6 +109,8 @@ public struct WorktreeDescriptor: Codable, Sendable {
         self.branch = env.branch
         self.envSlug = env.envSlug
         self.containers = [env.wpContainerName, env.dbContainerName]
+        self.databaseName = env.databaseName
+        self.sharedDatabase = env.sharedDatabase
     }
 }
 
