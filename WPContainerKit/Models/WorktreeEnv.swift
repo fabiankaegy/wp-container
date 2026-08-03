@@ -179,7 +179,10 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         })
         let full = schemaPrefix + sanitized
         guard full.count > maxSchemaNameLength else { return full }
-        let hash = String(format: "%06x", stableHash(slug) & 0xFFFFFF)
+        // Built by hand rather than `String(format: "%06x", …)`: `%x` reads only
+        // 32 bits off the vararg list, so feeding it a UInt64 is a trap.
+        let digits = String(stableHash(slug) & 0xFF_FFFF, radix: 16)
+        let hash = String(repeating: "0", count: max(0, 6 - digits.count)) + digits
         let keep = maxSchemaNameLength - hash.count - 1 // "_" + hash
         return String(full.prefix(keep)) + "_" + hash
     }
