@@ -28,7 +28,7 @@ import Foundation
 ///
 /// A SITE still publishes its own port, so a request straight to
 /// `http://127.0.0.1:<port>` bypasses the proxy and is invisible to the idle
-/// clock. That is the one remaining blind spot (see `activityCaveat`), and it is
+/// clock. That is the one remaining blind spot (see `activityNote(isEnv:)`), and it is
 /// why sites stay opt-in — plus you are usually *working* in a site, whereas the
 /// proxied `https://<slug>.localhost` / custom-domain URL is what a site is
 /// normally opened at anyway.
@@ -46,9 +46,10 @@ public enum IdlePolicy {
     /// site is only ever auto-stopped when the user explicitly opts in.
     public static let defaultSiteMinutes = 0
 
-    /// The value we recommend when somebody does opt in — long enough that a
-    /// short pause in an agent's work never costs a restart, short enough that a
-    /// forgotten environment doesn't hold ~500 MB all afternoon.
+    /// The value we recommend — the env default, and what a site should pick if it
+    /// opts in. Long enough that a short pause in an agent's work never costs a
+    /// restart, short enough that a forgotten environment doesn't hold ~500 MB all
+    /// afternoon.
     public static let recommendedMinutes = 15
 
     /// The minute values the app pickers and the docs advertise (besides
