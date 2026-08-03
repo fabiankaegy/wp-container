@@ -1305,24 +1305,28 @@ public final class HTTPSProxy: @unchecked Sendable {
     private func dial(candidates: ArraySlice<DialCandidate>,
                       inbound: NWConnection, upstreamBytes: Data,
                       host: String, target: Route, wantsHTML: Bool,
-                      attempt: Int = 1, resolvedOnDemand: Bool = false,
+                      attempt: Int = 1, triedContainerIP: String? = nil,
                       on connQueue: DispatchQueue) {
         guard let candidate = candidates.first else {
             Task { [weak self] in
                 guard let self else { inbound.cancel(); return }
-                // Last chance before we render a page ABOUT the env instead of the
-                // env: ask `container inspect` for its address directly. The
-                // periodic cache is a 3s poll, and an env started moments ago (by a
-                // wake, by the CLI, by another process) simply isn't in it yet.
-                // Guarded by `resolvedOnDemand` so a genuinely down upstream can't
-                // ping-pong between here and the dial.
-                if !resolvedOnDemand, let name = target.containerName,
-                   let ip = await self.refreshContainerIP(name) {
+                // Last chance before we render a page ABOUT the instance instead of
+                // the instance: ask `container inspect` for its address directly.
+                // The periodic cache is a 3s poll, and something started moments ago
+                // (by a wake, by the CLI, by another process) simply isn't in it yet.
+                //
+                // Only worth it for an address we have NOT already failed against.
+                // `ip != triedContainerIP` is what keeps this from re-dialing the
+                // same dead IP for another full deadline — which would otherwise add
+                // ~10s to every stopped SITE's page, since a site always has a
+                // container-IP candidate to burn first.
+                if let name = target.containerName,
+                   let ip = await self.refreshContainerIP(name), ip != triedContainerIP {
                     let retry = DialCandidate(host: ip, port: target.containerPort, isContainerIP: true)
                     connQueue.async {
                         self.dial(candidates: [retry][...], inbound: inbound,
                                   upstreamBytes: upstreamBytes, host: host, target: target,
-                                  wantsHTML: wantsHTML, resolvedOnDemand: true, on: connQueue)
+                                  wantsHTML: wantsHTML, triedContainerIP: ip, on: connQueue)
                     }
                     return
                 }
@@ -1356,17 +1360,21 @@ public final class HTTPSProxy: @unchecked Sendable {
             if evictHint, candidate.isContainerIP, let name = target.containerName {
                 self.stateLock.withLock { _ = self.containerIPs.removeValue(forKey: name) }
             }
+            // Whichever address we just failed against, remember it if it was the
+            // container's — the empty-candidate path uses it to avoid re-dialing an
+            // IP that has already had its chance.
+            let tried = candidate.isContainerIP ? candidate.host : triedContainerIP
             if attempt < maxAttempts {
                 // Same candidate, one more time: a first connect lost to a slow
                 // vmnet path usually succeeds immediately afterwards.
                 self.dial(candidates: candidates, inbound: inbound,
                           upstreamBytes: upstreamBytes, host: host, target: target,
                           wantsHTML: wantsHTML, attempt: attempt + 1,
-                          resolvedOnDemand: resolvedOnDemand, on: connQueue)
+                          triedContainerIP: tried, on: connQueue)
             } else {
                 self.dial(candidates: candidates.dropFirst(), inbound: inbound,
                           upstreamBytes: upstreamBytes, host: host, target: target,
-                          wantsHTML: wantsHTML, resolvedOnDemand: resolvedOnDemand,
+                          wantsHTML: wantsHTML, triedContainerIP: tried,
                           on: connQueue)
             }
         }
