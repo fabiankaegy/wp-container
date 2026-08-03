@@ -43,6 +43,7 @@ public enum WorktreeError: Error, Sendable, CustomStringConvertible {
         if let e = error as? GitError { return e.description }
         if let e = error as? WorktreeError { return e.description }
         if let e = error as? SiteFoldersError { return e.description }
+        if let e = error as? ImageUnavailableError { return e.description }
         return "\(error)"
     }
 }
