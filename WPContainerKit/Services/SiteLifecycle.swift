@@ -53,9 +53,18 @@ public actor SiteLifecycle {
 
     private let cli: ContainerCLI
     private let xdebug: XdebugImageService
+    /// Shared across every caller in the process — parent site, every env,
+    /// `WorktreeEnvService.create` — so image-pull dedupe spans the whole
+    /// coupled start, not just one instance (issue #18).
+    private let images: ImagePullService
 
     /// Instances with a lifecycle action currently in flight (issue #5).
     private var inFlight: Set<UUID> = []
+
+    /// Image-pull fallback warnings recorded per instance (issue #18) — e.g. a
+    /// pull that failed but degraded to a local image. Drained by callers that
+    /// want to surface them (never thrown; these are not failures).
+    private var pendingWarnings: [UUID: [String]] = [:]
 
     /// Immutable Sendable stream — readable from any context without `await`.
     public nonisolated let events: AsyncStream<StatusEvent>
@@ -64,9 +73,24 @@ public actor SiteLifecycle {
     public init(cli: ContainerCLI) {
         self.cli = cli
         self.xdebug = XdebugImageService(cli: cli)
+        self.images = ImagePullService(cli: cli)
         var cont: AsyncStream<StatusEvent>.Continuation!
         self.events = AsyncStream(bufferingPolicy: .bufferingNewest(64)) { cont = $0 }
         self.continuation = cont
+    }
+
+    /// Record image-pull warnings for an instance (internal bookkeeping; see
+    /// `drainWarnings`).
+    private func recordWarnings(_ new: [String], for id: UUID) {
+        guard !new.isEmpty else { return }
+        pendingWarnings[id, default: []].append(contentsOf: new)
+    }
+
+    /// Drain and clear any warnings recorded for the instance since the last
+    /// drain (image-pull fallbacks, etc.). Callers surface these to the user
+    /// however is appropriate for their layer (stderr, MCP payload, …).
+    public func drainWarnings(for id: UUID) -> [String] {
+        pendingWarnings.removeValue(forKey: id) ?? []
     }
 
     private func emit(_ id: UUID, _ status: SiteStatus) {
@@ -100,7 +124,7 @@ public actor SiteLifecycle {
     /// must wait for the URL fixes). UI/CLI actions go through the guarded
     /// wrappers (`startSite`, `startInstance`, `startSiteWithEnvs`).
     @discardableResult
-    public func startContainers(_ inst: any RunnableInstance) async throws -> String {
+    public func startContainers(_ inst: any RunnableInstance, pullPolicy: PullPolicy = .ifMissing) async throws -> String {
         let timer = PhaseTimer(inst.containerSlug)
         emit(inst.instanceID, .starting)
         do {
@@ -124,20 +148,29 @@ public actor SiteLifecycle {
             RemoteMediaService.cleanupLegacyMuPlugin(wordpressFolder: inst.wordpressFolder,
                                                      phpConfFolder: inst.phpConfFolder)
 
-            // Pull every needed image CONCURRENTLY (issue #9). A pull of an
-            // already-present tag is a ~1s registry revalidation; they used to
-            // run back-to-back. The wp-cli image rides along here so the first
-            // wp-cli use on a php8.4 site pulls wordpress:cli-php8.4 on the
-            // same progress path as the base images.
-            var images = [SiteRecipe.databaseImage, inst.imageTag, SiteRecipe.cliImage(for: inst)]
-            if inst.elasticsearchEnabled { images.append(SiteRecipe.elasticsearchImage) }
-            if inst.mailpitEnabled { images.append(SiteRecipe.mailpitImage) }
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                for image in images {
-                    group.addTask { [cli] in try await cli.run(SiteRecipe.pullImageArgs(image)) }
+            // Ensure every needed image is present CONCURRENTLY (issue #9),
+            // routed through the shared `ImagePullService` (issue #18): it
+            // dedupes in-flight pulls per tag across the whole process and
+            // short-circuits to zero network when the tag is already local
+            // under `.ifMissing`. `startSiteWithEnvs` pre-resolves the site's
+            // whole image set before the env fan-out even starts, so in the
+            // common coupled-start case every call here is a cache hit. The
+            // wp-cli image rides along here so the first wp-cli use on a
+            // php8.4 site pulls wordpress:cli-php8.4 on the same path as the
+            // base images.
+            var imageTags = [SiteRecipe.databaseImage, inst.imageTag, SiteRecipe.cliImage(for: inst)]
+            if inst.elasticsearchEnabled { imageTags.append(SiteRecipe.elasticsearchImage) }
+            if inst.mailpitEnabled { imageTags.append(SiteRecipe.mailpitImage) }
+            var imageWarnings: [String] = []
+            try await withThrowingTaskGroup(of: String?.self) { group in
+                for tag in imageTags {
+                    group.addTask { [images] in try await images.ensure(tag, policy: pullPolicy) }
                 }
-                try await group.waitForAll()
+                for try await warning in group {
+                    if let warning { imageWarnings.append(warning) }
+                }
             }
+            recordWarnings(imageWarnings, for: inst.instanceID)
             timer.mark("images")
 
             // First-ever start: pre-seed WordPress core into the mount (see
@@ -259,10 +292,10 @@ public actor SiteLifecycle {
     /// then flip to `.running`. Returns false when another action for the
     /// instance was already in flight (the start was ignored, issue #5).
     @discardableResult
-    public func startInstance(_ inst: any RunnableInstance) async throws -> Bool {
+    public func startInstance(_ inst: any RunnableInstance, pullPolicy: PullPolicy = .ifMissing) async throws -> Bool {
         guard claim(inst.instanceID) else { return false }
         defer { release(inst.instanceID) }
-        _ = try await startContainers(inst)
+        _ = try await startContainers(inst, pullPolicy: pullPolicy)
         markRunning(inst.instanceID)
         return true
     }
@@ -271,15 +304,15 @@ public actor SiteLifecycle {
     /// updated) `provisioned` flag so the caller can persist it. If another
     /// action for the site is already in flight the start is ignored (issue #5)
     /// and the flag is returned unchanged.
-    public func startSite(_ site: Site) async throws -> Bool {
+    public func startSite(_ site: Site, pullPolicy: PullPolicy = .ifMissing) async throws -> Bool {
         guard claim(site.id) else { return site.provisioned }
         defer { release(site.id) }
-        return try await startSiteCore(site)
+        return try await startSiteCore(site, pullPolicy: pullPolicy)
     }
 
     /// Unguarded body of `startSite` — called with the guard already held.
-    private func startSiteCore(_ site: Site) async throws -> Bool {
-        let dbHost = try await startContainers(site)
+    private func startSiteCore(_ site: Site, pullPolicy: PullPolicy = .ifMissing) async throws -> Bool {
+        let dbHost = try await startContainers(site, pullPolicy: pullPolicy)
         var provisioned = site.provisioned
         if !provisioned {
             do {
@@ -315,6 +348,9 @@ public actor SiteLifecycle {
         public var parentErrorMessage: String?
         /// Per-env failures as "<envSlug>: <message>".
         public var envErrorMessages: [String]
+        /// Non-fatal warnings (issue #18) — e.g. an image pull that failed but
+        /// fell back to a local copy. Never affects `errorSummary`.
+        public var warnings: [String] = []
 
         /// One human-readable summary, or nil when everything started.
         public var errorSummary: String? {
@@ -333,8 +369,40 @@ public actor SiteLifecycle {
     /// the env starts; every failure is surfaced individually (status events +
     /// the returned messages). Instances with an action already in flight are
     /// skipped (issue #5). Never throws: callers read `errorSummary`.
-    public func startSiteWithEnvs(_ site: Site, envs: [WorktreeEnv]) async -> CoupledStartOutcome {
+    ///
+    /// Pass `envs: []` to start only the parent (the CLI/MCP/app default since
+    /// issue #18 — env fan-out is opt-in via `--with-envs`/`with_envs`).
+    ///
+    /// Before the fan-out, every DISTINCT image tag needed by the parent + all
+    /// envs is resolved exactly once up front (issue #18) via the shared
+    /// `ImagePullService` — the per-instance `ensure` calls inside
+    /// `startContainers` below then hit the local-image cache with zero
+    /// network, so an N-env cold-cache start still issues exactly one pull per
+    /// distinct tag instead of one per (tag × instance).
+    public func startSiteWithEnvs(_ site: Site, envs: [WorktreeEnv],
+                                  pullPolicy: PullPolicy = .ifMissing) async -> CoupledStartOutcome {
         var outcome = CoupledStartOutcome(provisioned: site.provisioned, envErrorMessages: [])
+
+        var neededImages: Set<String> = []
+        func collectImages(_ inst: any RunnableInstance) {
+            neededImages.insert(SiteRecipe.databaseImage)
+            neededImages.insert(inst.imageTag)
+            neededImages.insert(SiteRecipe.cliImage(for: inst))
+            if inst.elasticsearchEnabled { neededImages.insert(SiteRecipe.elasticsearchImage) }
+            if inst.mailpitEnabled { neededImages.insert(SiteRecipe.mailpitImage) }
+        }
+        collectImages(site)
+        for env in envs { collectImages(env) }
+        for tag in neededImages {
+            // Hard failures (e.g. `.never` with a missing image) are swallowed
+            // here — they surface properly per-instance below, when
+            // `startContainers`'s own `ensure` call retries and throws for
+            // real, attributing the failure to whichever instance(s) need it.
+            if let warning = try? await images.ensure(tag, policy: pullPolicy) {
+                outcome.warnings.append(warning)
+            }
+        }
+
         // Claim everything up front, synchronously on the actor (issue #5).
         let startParent = claim(site.id)
         let claimedEnvs = envs.filter { claim($0.id) }
@@ -350,14 +418,14 @@ public actor SiteLifecycle {
         await withTaskGroup(of: Part.self) { group in
             if startParent {
                 group.addTask {
-                    do { return .parent(provisioned: try await self.startSiteCore(site), error: nil) }
+                    do { return .parent(provisioned: try await self.startSiteCore(site, pullPolicy: pullPolicy), error: nil) }
                     catch { return .parent(provisioned: nil, error: Self.message(for: error)) }
                 }
             }
             for env in claimedEnvs {
                 group.addTask {
                     do {
-                        _ = try await self.startContainers(env)
+                        _ = try await self.startContainers(env, pullPolicy: pullPolicy)
                         await self.markRunning(env.id)
                         return .env(slug: env.envSlug, error: nil)
                     } catch {
@@ -375,6 +443,8 @@ public actor SiteLifecycle {
                 }
             }
         }
+        if startParent { outcome.warnings.append(contentsOf: drainWarnings(for: site.id)) }
+        for env in claimedEnvs { outcome.warnings.append(contentsOf: drainWarnings(for: env.id)) }
         return outcome
     }
 
@@ -576,6 +646,7 @@ public actor SiteLifecycle {
     static func message(for error: Error) -> String {
         if let e = error as? ContainerCLIError { return e.description }
         if let e = error as? LifecycleError { return e.description }
+        if let e = error as? ImageUnavailableError { return e.description }
         return "\(error)"
     }
 }

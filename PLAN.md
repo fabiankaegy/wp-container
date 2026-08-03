@@ -127,11 +127,13 @@ first-class in the sidebar:
   Open/WP Admin/Copy URL/Finder, overview, live logs, delete with keep-branch
   semantics + keep-worktree checkbox), plus a context menu (Open, WP Admin,
   Copy URL, Start/Stop, Reveal in Finder, Delete Environment…).
-- **Coupled lifecycle:** starting a site also starts all its worktree envs and
-  stopping it stops them (kit-level `startSiteWithEnvs`/`stopSiteWithEnvs`, so
-  app, CLI `wp-container start|stop <site>` and MCP behave identically; the
-  parent is sequenced first and per-env failures surface individually without
-  aborting the rest). Envs remain individually start/stoppable.
+- **Coupled lifecycle:** stopping a site stops all its worktree envs; starting
+  a site starts only the site by default, with env fan-out opt-in via
+  `--with-envs`/`with_envs`/"Start with Environments" (issue #18; kit-level
+  `startSiteWithEnvs`/`stopSiteWithEnvs`, so app, CLI and MCP behave
+  identically; the parent is sequenced first and per-env failures surface
+  individually without aborting the rest). Envs remain individually
+  start/stoppable.
 - The menu bar extra nests running envs under their parent site row (small
   indent + branch glyph).
 - Each site's detail view keeps its "Branches" card, plus the "New branch
