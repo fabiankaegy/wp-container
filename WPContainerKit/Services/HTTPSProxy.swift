@@ -122,6 +122,11 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// exactly when an env is created, and dropping every env's socket for the
     /// duration of a TLS rebind would break the envs that are already running.
     private var envPortListeners: [UInt16: NWListener] = [:]
+    /// Ports whose listener has actually reached `.ready`. A listener sits in
+    /// `envPortListeners` from the moment it is created, which is BEFORE the bind
+    /// is known to have succeeded — so this, not that, is what may be reported to
+    /// other processes as "the proxy is serving this env".
+    private var envPortReady: Set<UInt16> = []
     /// Ports we have already complained about, so a bind that cannot succeed
     /// (typically a PRE-UPGRADE env container still publishing the port through
     /// the forwarder) logs once instead of every 3 seconds. Cleared when the port
@@ -167,12 +172,17 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// the container stops, so a restart re-seeds a fresh clock.
     ///
     /// IN-MEMORY, deliberately: it is an observation this process made, not a
-    /// fact about the instance. Consequences, both of them fine — a proxy restart
-    /// or `reload()` (a cert re-issue) reseeds every clock, so nothing is stopped
-    /// for at least one full timeout afterwards; and an instance started while no
-    /// proxy was running is first seen whenever a proxy next comes up, which gives
-    /// it a fresh window rather than an immediate stop. Erring toward "leave it
-    /// running" is the right bias for a memory optimisation.
+    /// fact about the instance. Consequences, both of them fine — a proxy PROCESS
+    /// restart reseeds every clock, so nothing is stopped for at least one full
+    /// timeout afterwards; and an instance started while no proxy was running is
+    /// first seen whenever a proxy next comes up, which gives it a fresh window
+    /// rather than an immediate stop. Erring toward "leave it running" is the right
+    /// bias for a memory optimisation.
+    ///
+    /// A `reload()` (cert re-issue) does NOT reseed anything: it goes through
+    /// `stopServing()`, which touches only the listeners and the loops, never this
+    /// dictionary — and since issue #16's follow-through it leaves the per-env
+    /// sockets bound as well.
     private var firstSeenRunning: [String: Date] = [:]
     /// Slugs with a wake currently in flight, so a browser hammering refresh (or
     /// a page issuing twenty parallel asset requests) triggers exactly ONE start.
@@ -489,10 +499,14 @@ public final class HTTPSProxy: @unchecked Sendable {
             acceptingEnvPorts = false
             let all = Array(envPortListeners.values)
             envPortListeners.removeAll()
+            envPortReady.removeAll()
             portBindWarned.removeAll()
             return all
         }
         listeners.forEach { $0.cancel() }
+        // Clean stop ⇒ withdraw the ownership report rather than leaving a file
+        // claiming ports nothing serves.
+        ProxyControl.clearEnvPorts()
     }
 
     /// Tear down the shared 443/80 listeners and the background loops, leaving the
@@ -589,12 +603,36 @@ public final class HTTPSProxy: @unchecked Sendable {
         // warning.
         let stale = stateLock.withLock { () -> [NWListener] in
             portBindWarned = portBindWarned.filter { desired[$0] != nil }
-            return bound.subtracting(desired.keys).compactMap { envPortListeners.removeValue(forKey: $0) }
+            let dropped = bound.subtracting(desired.keys)
+            envPortReady.subtract(dropped)
+            return dropped.compactMap { envPortListeners.removeValue(forKey: $0) }
         }
         stale.forEach { $0.cancel() }
         for port in Set(desired.keys).subtracting(bound) {
             openEnvPortListener(port, slug: desired[port]?.slug)
         }
+        publishEnvPortReport()
+    }
+
+    /// Publish who owns what, for consumers outside this process (see
+    /// `ProxyControl.EnvPortReport`). Runs at the end of every reconcile, and again
+    /// whenever a listener resolves either way, so the CLI, the MCP payloads and
+    /// the app can all state the difference between "no proxy", "served" and "a
+    /// proxy is up but does NOT hold this env's port" — the last of which used to
+    /// be visible only in os_log.
+    ///
+    /// A port is only reported as OWNED once its listener is `.ready`: reporting a
+    /// bind that hasn't landed would be exactly the false reassurance this exists
+    /// to prevent.
+    private func publishEnvPortReport() {
+        let (owned, conflicted, anything) = stateLock.withLock { () -> ([UInt16], [UInt16], Bool) in
+            let wanted = Set(portMap.keys)
+            let owned = wanted.intersection(envPortReady)
+            return (Array(owned), Array(wanted.subtracting(owned)), !wanted.isEmpty)
+        }
+        // Nothing to say and nothing on record: don't create the file at all.
+        guard anything || ProxyControl.envPorts() != nil else { return }
+        ProxyControl.writeEnvPorts(owned: owned, conflicted: conflicted)
     }
 
     /// Bind `127.0.0.1:<port>` for one env.
@@ -621,21 +659,45 @@ public final class HTTPSProxy: @unchecked Sendable {
             warnPortUnavailable(port, slug: slug, reason: "the listener could not be created")
             return
         }
-        listener.stateUpdateHandler = { [weak self] state in
-            guard let self else { return }
+        // EVERY branch is identity-guarded on `listener`. Without that, a late
+        // callback from a listener we already replaced would evict the CURRENT
+        // listener for this port from the table — orphaning a live, bound socket
+        // that no reconcile would ever notice, and (because `ownsLoopbackPort`
+        // reads that table) re-enabling the `127.0.0.1:<port>` fallback candidate,
+        // i.e. the self-dial recursion this design exists to avoid.
+        listener.stateUpdateHandler = { [weak self, weak listener] state in
+            guard let self, let listener else { return }
             switch state {
             case .ready:
-                self.stateLock.withLock { _ = self.portBindWarned.remove(port) }
+                let isCurrent = self.stateLock.withLock { () -> Bool in
+                    guard self.envPortListeners[port] === listener else { return false }
+                    self.portBindWarned.remove(port)
+                    self.envPortReady.insert(port)
+                    return true
+                }
+                guard isCurrent else { listener.cancel(); return }
                 Self.log.info("env port \(port, privacy: .public) is now served by the proxy")
+                self.publishEnvPortReport()
             case .failed(let error):
                 // Drop it so the next refresh tick retries, and say why once.
-                let stale = self.stateLock.withLock { self.envPortListeners.removeValue(forKey: port) }
+                let stale = self.stateLock.withLock { () -> NWListener? in
+                    guard self.envPortListeners[port] === listener else { return nil }
+                    self.envPortReady.remove(port)
+                    return self.envPortListeners.removeValue(forKey: port)
+                }
+                guard stale != nil else { return }
                 stale?.cancel()
                 self.warnPortUnavailable(port, slug: slug, reason: "\(error)")
+                self.publishEnvPortReport()
             case .cancelled:
                 // Either our own teardown (already removed from the map) or an
-                // external cancel; make sure the map can't keep a dead listener.
-                _ = self.stateLock.withLock { self.envPortListeners.removeValue(forKey: port) }
+                // external cancel; make sure the map can't keep a dead listener —
+                // but only if the map still points at THIS one.
+                self.stateLock.withLock {
+                    guard self.envPortListeners[port] === listener else { return }
+                    self.envPortReady.remove(port)
+                    self.envPortListeners.removeValue(forKey: port)
+                }
             default:
                 break
             }
@@ -644,7 +706,16 @@ public final class HTTPSProxy: @unchecked Sendable {
             self?.handle(inbound: connection,
                          context: InboundContext(forwardedProto: "http", pinnedPort: port))
         }
-        stateLock.withLock { envPortListeners[port] = listener }
+        // Re-check the flag we read before the (blocking, up-to-250ms) occupancy
+        // probe: a `stop()` in that window would otherwise leave this listener
+        // bound with nothing tracking it — a leaked socket on a port the next proxy
+        // owner needs.
+        let stored = stateLock.withLock { () -> Bool in
+            guard acceptingEnvPorts else { return false }
+            envPortListeners[port] = listener
+            return true
+        }
+        guard stored else { listener.cancel(); return }
         listener.start(queue: queue)
     }
 
@@ -683,12 +754,32 @@ public final class HTTPSProxy: @unchecked Sendable {
                 let wanted = Set(Self.sanHosts(from: env))
                 let known = self.stateLock.withLock { self.coveredHosts }
                 if wanted != known {
-                    self.stateLock.withLock { self.coveredHosts = wanted }
                     // Exact-set sync (#4): new hostnames get SANs, and SANs of
                     // deleted sites/envs are pruned rather than kept forever.
                     if (try? await self.ca.syncLeafCoverage(Array(wanted))) == true {
-                        try? await self.reload()
-                        return // reload() spins a fresh loop
+                        do {
+                            _ = try await self.reload()
+                            // Only NOW is the new set actually covered by a serving
+                            // listener; recording it earlier would make a failed
+                            // reload permanent by convincing the next tick there is
+                            // nothing to do.
+                            self.stateLock.withLock { self.coveredHosts = wanted }
+                            return // reload() spun a fresh loop; this one is done
+                        } catch {
+                            // A failed reload (unreadable p12, 443 AND 8443 taken)
+                            // used to end the refresh loop for good, because
+                            // `reload()` returns only on success and this branch
+                            // returned regardless. With env ports in the picture
+                            // that is a total outage: stale container IPs, no
+                            // reconciliation, and sockets bound with a routing
+                            // table nobody updates. So: log, re-arm, retry.
+                            Self.log.error("proxy: reload after a certificate change failed — \(SiteLifecycle.message(for: error), privacy: .public). Retrying.")
+                            // `reload()`'s `stopServing()` cancelled THIS task, so
+                            // `continue` would fall straight out of the loop.
+                            self.startRefreshLoop()
+                            self.startIdleLoop()
+                            return
+                        }
                     }
                 }
             }
@@ -934,6 +1025,19 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// would be shown that as a wake failure.
     private func resolveDownstream(route: Route) async -> DownstreamOutcome {
         guard lifecycle != nil, let slug = route.slug else { return .stopped }
+        // A wake WE started is still running: the answer is the waking page, full
+        // stop — decided before `container list` is consulted, because that listing
+        // is exactly what misleads here. `container run -d` returns (and the name
+        // shows as running) seconds before apache accepts a connection, so a
+        // wpRunning check during a wake yields `.runningButUnresponsive` — a page
+        // that says "read the container logs" and, before this fix, did not
+        // refresh. That turned the 2s meta-refresh of the waking page into a
+        // dead end on the exact path this feature exists for.
+        //
+        // `wakesInFlight` is only cleared once `startInstance` returns, and that
+        // await includes `waitForHTTP` — so "waking" here means "not yet serving",
+        // which is precisely the question being asked.
+        if isWaking(slug) { return .waking }
         // FAIL CLOSED on an unreadable container list: "I can't tell" must not be
         // read as "it's down". Waking on that guess would `container run` a name
         // that may well exist and surface the collision as a wake failure.
@@ -947,7 +1051,18 @@ public final class HTTPSProxy: @unchecked Sendable {
             // whole site because a mailbox tab was left open would be a surprise.
             return wpRunning ? .mailboxUnavailable : .stopped
         }
-        if wpRunning { return .runningButUnresponsive }
+        if wpRunning {
+            // Running, but we have no address for it — either the container was
+            // started by somebody else moments ago, or a dial just evicted a stale
+            // hint. Both mean "coming up", not "wedged", so serve the refreshing
+            // waking page. Crucially WITHOUT claiming a wake: `container run`
+            // against an existing name would fail and be shown as a wake error.
+            let known = route.containerName.flatMap { name in
+                stateLock.withLock { containerIPs[name] }
+            }
+            if known == nil { return .waking }
+            return .runningButUnresponsive
+        }
         let claimed: Bool = stateLock.withLock {
             // Count the wake itself as an access, so the instance can't come up
             // and be swept away by an idle clock that predates it.
@@ -992,6 +1107,12 @@ public final class HTTPSProxy: @unchecked Sendable {
                 }
             }
             Self.log.info("wake: \(slug, privacy: .public) started on request")
+            // Resolve the fresh IP NOW, before releasing the wake claim. The
+            // client's next meta-refresh lands ~2s from here and the periodic
+            // refresh runs every 3s, so without this the first request after a
+            // successful wake can still find no candidate — an env has no
+            // published-port fallback to paper over that.
+            if let name = route.containerName { await refreshContainerIP(name) }
         } catch {
             failure = SiteLifecycle.message(for: error)
             Self.log.error("wake: \(slug, privacy: .public) failed — \(failure ?? "", privacy: .public)")
@@ -1002,6 +1123,18 @@ public final class HTTPSProxy: @unchecked Sendable {
             lastAccess[slug] = now
             if let failure { wakeFailures[slug] = failure } else { wakeFailures.removeValue(forKey: slug) }
         }
+    }
+
+    /// Resolve ONE container's vmnet IP right now and fold it into the shared
+    /// cache. The periodic refresh is a 3s poll over every container; this is the
+    /// targeted version for the two moments where waiting up to 3s is the
+    /// difference between serving the site and serving a page about it.
+    @discardableResult
+    private func refreshContainerIP(_ name: String) async -> String? {
+        // `try?` on a throwing call returning `String?` flattens to `String?`.
+        guard let ip = try? await cli.ipAddress(of: name), !ip.isEmpty else { return nil }
+        stateLock.withLock { containerIPs[name] = ip }
+        return ip
     }
 
     private enum WakeError: Error, CustomStringConvertible {
@@ -1126,28 +1259,77 @@ public final class HTTPSProxy: @unchecked Sendable {
         let isContainerIP: Bool
     }
 
+    /// Whether a connect error is a definitive answer FROM THE NETWORK, as opposed
+    /// to our own patience expiring: something at that address said no, or the
+    /// address is not routable. Those are the cases where a cached vmnet IP is
+    /// plausibly stale and re-resolving it is the useful response.
+    ///
+    /// A deadline expiry is deliberately NOT in this set. It says nothing about
+    /// whether the IP is right — and evicting on it is actively harmful now that an
+    /// env has no published-port fallback: it throws away the only address we have
+    /// because one connect was slow. (On this machine that is not hypothetical: the
+    /// macOS 27 beta's L4S handling corrupts ECT(1) SYN checksums to container IPs,
+    /// adding a fixed ~2s penalty to the first connect — exactly the old deadline.)
+    private static func invalidatesIPHint(_ error: NWError?) -> Bool {
+        guard let error else { return false }
+        if case .posix(let code) = error {
+            switch code {
+            case .ECONNREFUSED, .EHOSTUNREACH, .ENETUNREACH, .EHOSTDOWN, .ECONNRESET:
+                return true
+            default:
+                return false
+            }
+        }
+        return false
+    }
+
     /// Try each upstream candidate in order; only when the last one is down does
     /// the friendly "site is stopped" page (#6) — or, since #16, the waking page —
-    /// go out. An EMPTY candidate list takes the same path immediately, which is
-    /// what a parked env whose IP we don't know looks like.
+    /// go out. An EMPTY candidate list first tries to resolve the container's IP on
+    /// demand (a just-started env may not have been picked up by the 3s poll yet)
+    /// and only then answers with a page.
     ///
-    /// Connect explicitly and only forward once the upstream is READY. On
-    /// 127.0.0.1 a refused connect surfaces as `.waiting(ECONNREFUSED)`
-    /// (Network.framework treats it as transient and would retry forever), so
-    /// `.waiting` is treated as down — correct for localhost where a live listener
-    /// accepts immediately. A dead vmnet IP instead just sits in `.preparing`
-    /// while ARP times out, so every attempt also carries a 2s deadline; a failed
-    /// container-IP dial invalidates the IP hint before falling through.
+    /// Connect explicitly and only forward once the upstream is READY. Two very
+    /// different regimes live here:
+    ///
+    /// - A PUBLISHED loopback port, or a container IP with a fallback behind it:
+    ///   be quick. On 127.0.0.1 a refused connect surfaces as
+    ///   `.waiting(ECONNREFUSED)` (Network.framework treats it as transient and
+    ///   would retry forever), so `.waiting` means down — correct for localhost,
+    ///   where a live listener accepts immediately — under a 2s deadline.
+    /// - The container IP as the SOLE candidate (every env): be patient. There is
+    ///   nothing to fall through to, so a single slow connect is the difference
+    ///   between the site and a 502. `.waiting` is treated as "still connecting"
+    ///   until our own (longer) deadline unless the error is a definitive refusal,
+    ///   the deadline is 5s, and the candidate gets one retry.
     private func dial(candidates: ArraySlice<DialCandidate>,
                       inbound: NWConnection, upstreamBytes: Data,
-                      host: String, target: Route, wantsHTML: Bool, on connQueue: DispatchQueue) {
+                      host: String, target: Route, wantsHTML: Bool,
+                      attempt: Int = 1, resolvedOnDemand: Bool = false,
+                      on connQueue: DispatchQueue) {
         guard let candidate = candidates.first else {
-            // Every upstream is down. Deciding what to answer needs a fresh
-            // `container list` (see `resolveDownstream`), so it happens off the
-            // connection queue and the response is dispatched back onto it — the
-            // NWConnection's sends must stay on the queue it was started with.
             Task { [weak self] in
                 guard let self else { inbound.cancel(); return }
+                // Last chance before we render a page ABOUT the env instead of the
+                // env: ask `container inspect` for its address directly. The
+                // periodic cache is a 3s poll, and an env started moments ago (by a
+                // wake, by the CLI, by another process) simply isn't in it yet.
+                // Guarded by `resolvedOnDemand` so a genuinely down upstream can't
+                // ping-pong between here and the dial.
+                if !resolvedOnDemand, let name = target.containerName,
+                   let ip = await self.refreshContainerIP(name) {
+                    let retry = DialCandidate(host: ip, port: target.containerPort, isContainerIP: true)
+                    connQueue.async {
+                        self.dial(candidates: [retry][...], inbound: inbound,
+                                  upstreamBytes: upstreamBytes, host: host, target: target,
+                                  wantsHTML: wantsHTML, resolvedOnDemand: true, on: connQueue)
+                    }
+                    return
+                }
+                // Every upstream is down. Deciding what to answer needs a fresh
+                // `container list` (see `resolveDownstream`), so it happens off the
+                // connection queue and the response is dispatched back onto it — the
+                // NWConnection's sends must stay on the queue it was started with.
                 let outcome = await self.resolveDownstream(route: target)
                 let failure = target.slug.flatMap { slug in
                     self.stateLock.withLock { self.wakeFailures[slug] }
@@ -1159,20 +1341,34 @@ public final class HTTPSProxy: @unchecked Sendable {
             }
             return
         }
-        let isDirect = candidate.isContainerIP
+        // No fallback behind a container IP ⇒ this dial is the env's only chance.
+        let isSoleContainerIP = candidate.isContainerIP && candidates.count == 1
+        let deadlineSeconds: Double = isSoleContainerIP ? 5 : 2
+        let maxAttempts = isSoleContainerIP ? 2 : 1
         let upstream = NWConnection(host: NWEndpoint.Host(candidate.host),
                                     port: NWEndpoint.Port(rawValue: candidate.port)!, using: .tcp)
         let decided = ResumeOnce()
-        let fail: @Sendable () -> Void = { [weak self] in
+        /// `evictHint`: whether to forget the cached IP (see `invalidatesIPHint`).
+        let giveUp: @Sendable (_ evictHint: Bool) -> Void = { [weak self] evictHint in
             upstream.stateUpdateHandler = nil
             upstream.cancel()
             guard let self else { inbound.cancel(); return }
-            if isDirect, let name = target.containerName {
+            if evictHint, candidate.isContainerIP, let name = target.containerName {
                 self.stateLock.withLock { _ = self.containerIPs.removeValue(forKey: name) }
             }
-            self.dial(candidates: candidates.dropFirst(), inbound: inbound,
-                      upstreamBytes: upstreamBytes, host: host, target: target,
-                      wantsHTML: wantsHTML, on: connQueue)
+            if attempt < maxAttempts {
+                // Same candidate, one more time: a first connect lost to a slow
+                // vmnet path usually succeeds immediately afterwards.
+                self.dial(candidates: candidates, inbound: inbound,
+                          upstreamBytes: upstreamBytes, host: host, target: target,
+                          wantsHTML: wantsHTML, attempt: attempt + 1,
+                          resolvedOnDemand: resolvedOnDemand, on: connQueue)
+            } else {
+                self.dial(candidates: candidates.dropFirst(), inbound: inbound,
+                          upstreamBytes: upstreamBytes, host: host, target: target,
+                          wantsHTML: wantsHTML, resolvedOnDemand: resolvedOnDemand,
+                          on: connQueue)
+            }
         }
         upstream.stateUpdateHandler = { [weak self] state in
             switch state {
@@ -1185,18 +1381,27 @@ public final class HTTPSProxy: @unchecked Sendable {
                     self?.relay(from: upstream, to: inbound)
                     self?.relay(from: inbound, to: upstream)
                 })
-            case .waiting, .failed:
+            case .waiting(let error):
+                // On the sole-container-IP path, `.waiting` is the stack saying
+                // "not yet, still retrying" — which is the truth while a guest's
+                // network comes up. Let the deadline decide instead of bailing on
+                // the first hiccup; a definitive refusal still short-circuits.
+                if isSoleContainerIP, !Self.invalidatesIPHint(error) { return }
                 guard decided.tryResume() else { return }
-                fail()
+                giveUp(Self.invalidatesIPHint(error))
+            case .failed(let error):
+                guard decided.tryResume() else { return }
+                giveUp(Self.invalidatesIPHint(error))
             case .cancelled:
                 if decided.tryResume() { inbound.cancel() }
             default:
                 break
             }
         }
-        connQueue.asyncAfter(deadline: .now() + 2) {
+        connQueue.asyncAfter(deadline: .now() + deadlineSeconds) {
             guard decided.tryResume() else { return }
-            fail()
+            // Our patience, not the network's answer: keep the IP hint.
+            giveUp(false)
         }
         upstream.start(queue: connQueue)
     }
@@ -1425,21 +1630,27 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// (issue #16). Distinct from the stopped page on purpose: telling somebody to
     /// start a site that is already started sends them in the wrong direction, and
     /// this is NOT a wake case — `container run` against an existing name just
-    /// fails. No refresh either; something needs looking at.
+    /// fails.
+    ///
+    /// It DOES refresh, on a slower 5s cadence than the waking page. The reasons
+    /// this page appears are mostly self-clearing — a heavy codebase's cold-opcache
+    /// first request, apache restarting, a request storm — and a page that recovers
+    /// by itself beats one that strands the user on instructions they didn't need.
+    /// The slower interval keeps it from hammering an instance already in trouble.
     static func unresponsivePage(host: String, route: Route) -> String {
         let name = htmlEscape(route.displayName ?? route.slug ?? host)
         var body = "<p><code>\(htmlEscape(hostOnly(host)))</code> is running, but its web server didn’t answer.</p>"
         body += "<p>WordPress may still be warming up after a start, or PHP/Apache may have stopped responding.</p>"
         if let slug = route.slug {
             body += """
-            <p>Reload in a moment, or look at the logs:</p>
+            <p>This page retries every 5 seconds. If it doesn’t clear, look at the logs:</p>
             <pre><code>container logs wpc-\(htmlEscape(slug))-wp</code></pre>
             <p class="hint">If it stays unresponsive: <code>wp-container stop \(htmlEscape(slug)) &amp;&amp; wp-container start \(htmlEscape(slug))</code>.</p>
             """
         }
         return proxyPage(title: "\(name) isn’t responding — WP Container",
                          heading: "\(name) isn’t responding",
-                         bodyHTML: body, refreshSeconds: nil)
+                         bodyHTML: body, refreshSeconds: 5)
     }
 
     /// A `<slug>-mail.localhost` route whose site is up but whose Mailpit
