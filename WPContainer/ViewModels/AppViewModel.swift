@@ -38,6 +38,12 @@ public final class AppViewModel {
     /// notification instead of a bare "started"). Keyed by instance UUID.
     @ObservationIgnored private var suppressStatusNotify: Set<UUID> = []
 
+    /// Instances currently being stopped by the proxy's idle sweep (issue #16), so
+    /// the automatic stop doesn't post a "Stopped <name>" notification. Separate
+    /// from `suppressStatusNotify` because it is cleared by the `.stopped` event
+    /// itself rather than by that set's short create-flow timer.
+    @ObservationIgnored private var suppressIdleStopNotify: Set<UUID> = []
+
     public var selection: UUID?
     public var systemStatus: SystemCheckResult?
     public var lastError: String?
@@ -307,41 +313,53 @@ public final class AppViewModel {
     // MARK: - Idle stop (issue #16)
 
     /// Persist a site's auto-stop-when-idle timeout. nil = follow the default
-    /// (off for sites), 0 = never, > 0 = minutes. Nothing to restart: the proxy
-    /// re-reads the store every few seconds and enforces from there.
+    /// (off), 0 = never, > 0 = minutes. Nothing to restart: the proxy re-reads the
+    /// store every few seconds and enforces from there.
+    ///
+    /// Mutates by ID inside the locked read-modify-write rather than upserting the
+    /// view's whole `Site` snapshot, which could clobber a concurrent write to an
+    /// unrelated field (a `pendingSchemaDrops` tombstone, a `provisioned` flip).
     public func setIdleStop(_ site: Site, minutes: Int?) {
-        Task {
-            var updated = site
-            updated.idleStopMinutes = minutes
-            await store.upsertSite(updated)
-        }
+        Task { await store.setIdleStopMinutes(minutes, siteID: site.id) }
     }
 
-    /// Same for a worktree env (whose default is 15 minutes — envs are the
-    /// many-of-them case the feature exists for).
+    /// Same for a worktree env.
     public func setIdleStop(_ env: WorktreeEnv, minutes: Int?) {
-        Task {
-            var updated = env
-            updated.idleStopMinutes = minutes
-            await store.upsertEnv(updated)
-        }
+        Task { await store.setIdleStopMinutes(minutes, envID: env.id) }
     }
 
     /// Keep the generic "Stopped <name>" banner out of automatic idle stops.
     /// The status event still flows (the sidebar/detail flip to Stopped as
     /// usual) — only the notification is suppressed, because a notification
     /// about something the user did not do reads as a failure rather than as the
-    /// memory housekeeping it is. Awaited by the proxy, so the suppression is
-    /// always recorded before the `.stopped` event arrives.
+    /// memory housekeeping it is.
+    ///
+    /// The proxy calls this from inside `SiteLifecycle.stop`'s `beforeStopping`
+    /// hook, i.e. only after the claim succeeded — so a stop that no-ops because
+    /// another action held the claim never arms suppression and never swallows an
+    /// unrelated notification. It is awaited, so the flag is always set before the
+    /// `.stopping`/`.stopped` events it covers.
+    ///
+    /// Cleared on ARRIVAL of that `.stopped` event rather than on a timer: the
+    /// verify/escalate pass makes the duration of a stop genuinely unbounded from
+    /// here, so any fixed window is either too short (un-suppresses early and the
+    /// banner escapes) or too long (swallows the next real stop). The long timer is
+    /// only a leak guard for a stop that never emits at all.
     private func installIdleStopHook() {
         proxy.setWillIdleStopHook { [weak self] id in
             await MainActor.run {
                 guard let self else { return }
-                self.suppressStatusNotify.insert(id)
-                // Generous window: `.stopped` is now emitted only after the
-                // teardown verify/escalate pass, which can take several seconds.
-                self.clearSuppressionSoon(id, after: .seconds(30))
+                self.suppressIdleStopNotify.insert(id)
+                self.clearIdleSuppressionEventually(id)
             }
+        }
+    }
+
+    /// Backstop only — the normal clear happens when `.stopped` arrives.
+    private func clearIdleSuppressionEventually(_ id: UUID) {
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(300))
+            self?.suppressIdleStopNotify.remove(id)
         }
     }
 
@@ -665,7 +683,17 @@ public final class AppViewModel {
     /// and not while an explicit create flow owns the instance (that flow posts
     /// its own "created"/"ready" notification instead of a bare "started").
     private func notifyStatusTransition(_ event: SiteLifecycle.StatusEvent, prior: SiteStatus?) {
+        // Idle-stop suppression is consumed by the `.stopped` event it was armed
+        // for — checked (and cleared) before the `NSApp.isActive` early return so
+        // an app that happens to be frontmost still clears the flag instead of
+        // leaving it to swallow a later, genuine stop.
+        var suppressedByIdleStop = false
+        if suppressIdleStopNotify.contains(event.instanceID) {
+            suppressedByIdleStop = true
+            if event.status == .stopped { suppressIdleStopNotify.remove(event.instanceID) }
+        }
         guard !NSApp.isActive else { return }
+        guard !suppressedByIdleStop else { return }
         guard !suppressStatusNotify.contains(event.instanceID) else { return }
         switch event.status {
         case .running where prior != .running:
@@ -977,6 +1005,10 @@ public final class AppViewModel {
 
     private func startSiteCoupled(_ site: Site, includeEnvs: Bool) {
         Task {
+            // A start the user clicked is unambiguous activity (issue #16), so the
+            // idle sweep can't park it before they've done anything with it. Wakes
+            // deliberately don't stamp — that would let the sweep feed itself.
+            await store.recordActivity(id: site.id)
             // An HTTPS/custom-domain site is unreachable without the reverse
             // proxy — ensure it's listening whenever such a site starts (covers
             // proxy crashed/killed/never-started cases, §2f fix).
@@ -1035,12 +1067,17 @@ public final class AppViewModel {
         let runningSiteIDs = Set(runningSites.map(\.id))
         let orphanEnvs = store.envs.filter { $0.status.isRunning && !runningSiteIDs.contains($0.parentSiteID) }
         let siteEnvs = runningSites.map { ($0, store.envs(forSite: $0.id)) }
+        // `verifyTeardown: false` — quit must not inherit the per-instance
+        // verify/escalate polling (issue #16): it is bounded per stop, but N
+        // instances would add up to a Dock icon bouncing for a minute, and macOS
+        // will kill us anyway if `applicationShouldTerminate` takes too long.
+        // Quitting keeps exactly its pre-#16 behaviour: issue the stops, go.
         await withTaskGroup(of: Void.self) { group in
             for (site, envs) in siteEnvs {
-                group.addTask { await lifecycle.stopSiteWithEnvs(site, envs: envs) }
+                group.addTask { await lifecycle.stopSiteWithEnvs(site, envs: envs, verifyTeardown: false) }
             }
             for env in orphanEnvs {
-                group.addTask { await lifecycle.stop(env) }
+                group.addTask { _ = await lifecycle.stop(env, verifyTeardown: false) }
             }
         }
         // An orphan env's parent site was already stopped, so its shared DB
@@ -1131,6 +1168,7 @@ public final class AppViewModel {
             // The parent rides along as `dbProvider` so a shared-database env can
             // boot the server it borrows when the parent site is down (#17).
             let parent = store.site(id: env.parentSiteID)
+            await store.recordActivity(id: env.id)
             do { _ = try await lifecycle.startInstance(env, dbProvider: parent) }
             catch { lastError = SiteLifecycleErrorText(error) }
         }

@@ -69,10 +69,17 @@ public final class HTTPSProxy: @unchecked Sendable {
         /// shared-database env needs as `dbProvider` when it is woken while the
         /// parent site is down (issue #17).
         public let parentSlug: String?
+        /// Whether this route serves the Mailpit web UI (`<slug>-mail.localhost`,
+        /// issue #10) rather than WordPress. Never a wake trigger: an unreachable
+        /// mailbox says nothing about whether the instance should be started, and
+        /// starting a whole site because somebody had a mailbox tab open would be
+        /// a surprise.
+        public let isMailbox: Bool
 
         public init(port: Int, slug: String? = nil, displayName: String? = nil,
                     containerName: String? = nil, containerPort: UInt16 = 80,
-                    isEnv: Bool = false, parentSlug: String? = nil) {
+                    isEnv: Bool = false, parentSlug: String? = nil,
+                    isMailbox: Bool = false) {
             self.port = port
             self.slug = slug
             self.displayName = displayName
@@ -80,6 +87,7 @@ public final class HTTPSProxy: @unchecked Sendable {
             self.containerPort = containerPort
             self.isEnv = isEnv
             self.parentSlug = parentSlug
+            self.isMailbox = isMailbox
         }
     }
 
@@ -104,14 +112,25 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// Slug → when the proxy last resolved a route for it. Every HTTP request
     /// already passes through `route(forHost:)`, which makes it the one free
     /// instrumentation point for "is anybody using this environment?".
+    ///
+    /// IN-MEMORY, and only ever sees traffic THIS proxy routed. Work that reaches
+    /// an instance another way — `http://127.0.0.1:<port>` (which is how worktree
+    /// envs are advertised everywhere), wp-cli, MCP — is invisible here and is
+    /// covered by the persisted `lastActivityAt` stamp instead. See `IdlePolicy`.
     private var lastAccess: [String: Date] = [:]
     /// Slug → when the IP-refresh loop FIRST saw its wp container running.
     ///
     /// Without this, an instance nobody ever opened in a browser would have no
-    /// idle clock at all and would run forever — exactly the agent-started env
-    /// case this feature is for. The idle clock is
-    /// `max(firstSeenRunning, lastAccess)`; the entry is dropped as soon as the
-    /// container stops, so a restart re-seeds a fresh clock.
+    /// idle clock at all and would run forever. The entry is dropped as soon as
+    /// the container stops, so a restart re-seeds a fresh clock.
+    ///
+    /// IN-MEMORY, deliberately: it is an observation this process made, not a
+    /// fact about the instance. Consequences, both of them fine — a proxy restart
+    /// or `reload()` (a cert re-issue) reseeds every clock, so nothing is stopped
+    /// for at least one full timeout afterwards; and an instance started while no
+    /// proxy was running is first seen whenever a proxy next comes up, which gives
+    /// it a fresh window rather than an immediate stop. Erring toward "leave it
+    /// running" is the right bias for a memory optimisation.
     private var firstSeenRunning: [String: Date] = [:]
     /// Slugs with a wake currently in flight, so a browser hammering refresh (or
     /// a page issuing twenty parallel asset requests) triggers exactly ONE start.
@@ -221,7 +240,8 @@ public final class HTTPSProxy: @unchecked Sendable {
                 map["\(site.slug)-mail.localhost"] = Route(port: mp, slug: site.slug,
                                                            displayName: "\(site.name) · Mailbox",
                                                            containerName: site.mailContainerName,
-                                                           containerPort: UInt16(SiteRecipe.mailpitWebPort))
+                                                           containerPort: UInt16(SiteRecipe.mailpitWebPort),
+                                                           isMailbox: true)
             }
         }
         for env in envelope.envs {
@@ -234,7 +254,8 @@ public final class HTTPSProxy: @unchecked Sendable {
                                                              displayName: "\(env.parentSlug) · \(env.branch) · Mailbox",
                                                              containerName: env.mailContainerName,
                                                              containerPort: UInt16(SiteRecipe.mailpitWebPort),
-                                                             isEnv: true, parentSlug: env.parentSlug)
+                                                             isEnv: true, parentSlug: env.parentSlug,
+                                                             isMailbox: true)
             }
         }
         return map
@@ -353,10 +374,13 @@ public final class HTTPSProxy: @unchecked Sendable {
                 firstSeenRunning[slug] = now
             }
             // Drop clocks for instances that are no longer up, so the next start
-            // gets a fresh idle window instead of inheriting the previous one.
+            // gets a fresh idle window instead of inheriting the previous one —
+            // and with them any recorded wake failure, which would otherwise be
+            // rendered on a later, unrelated wake of a healthy instance.
             for slug in firstSeenRunning.keys where !runningSlugs.contains(slug) {
                 firstSeenRunning.removeValue(forKey: slug)
                 lastAccess.removeValue(forKey: slug)
+                wakeFailures.removeValue(forKey: slug)
             }
         }
     }
@@ -489,14 +513,22 @@ public final class HTTPSProxy: @unchecked Sendable {
         for env in envelope.envs {
             guard running.contains(env.wpContainerName) else { continue }
             let timeout = env.effectiveIdleStopMinutes
-            guard timeout > 0, idleMinutes(of: env.envSlug, now: now) >= Double(timeout) else { continue }
+            guard timeout > 0 else { continue }
+            guard idleMinutes(of: env.envSlug, persisted: env.lastActivityAt, now: now) >= Double(timeout) else { continue }
             guard !isWaking(env.envSlug), !(await lifecycle.isBusy(env.id)) else { continue }
             Self.log.info("idle-stop: env \(env.envSlug, privacy: .public) idle for \(timeout, privacy: .public)+ min")
-            await notifyWillIdleStop(env.id)
-            await lifecycle.stop(env)
+            // The hook is armed INSIDE the claim (see `SiteLifecycle.stop`), so a
+            // stop that loses the claim race never suppresses a notification.
+            let stopped = await lifecycle.stop(env) { [weak self] in
+                await self?.notifyWillIdleStop(env.id)
+            }
+            guard stopped else { continue }
+            // Only drain what we actually acted on (the parent's warnings belong
+            // to whichever flow recorded them): the env always, the parent only
+            // when this call is what took its DB container down.
             var ids = [env.id]
-            if let parent = envelope.sites.first(where: { $0.id == env.parentSiteID }) {
-                await lifecycle.stopSharedDatabaseIfUnused(parent: parent)
+            if let parent = envelope.sites.first(where: { $0.id == env.parentSiteID }),
+               await lifecycle.stopSharedDatabaseIfUnused(parent: parent) {
                 ids.append(parent.id)
             }
             await logTeardownWarnings(ids, lifecycle: lifecycle)
@@ -510,13 +542,16 @@ public final class HTTPSProxy: @unchecked Sendable {
         for site in envelope.sites {
             guard running.contains(site.wpContainerName) else { continue }
             let timeout = site.effectiveIdleStopMinutes
-            guard timeout > 0, idleMinutes(of: site.slug, now: now) >= Double(timeout) else { continue }
+            guard timeout > 0 else { continue }
+            guard idleMinutes(of: site.slug, persisted: site.lastActivityAt, now: now) >= Double(timeout) else { continue }
             let envSlugs = envelope.envs.filter { $0.parentSiteID == site.id }.map(\.envSlug)
             guard !envSlugs.contains(where: { running.contains("wpc-\($0)-wp") }) else { continue }
             guard !isWaking(site.slug), !(await lifecycle.isBusy(site.id)) else { continue }
             Self.log.info("idle-stop: site \(site.slug, privacy: .public) idle for \(timeout, privacy: .public)+ min")
-            await notifyWillIdleStop(site.id)
-            await lifecycle.stop(site)
+            let stopped = await lifecycle.stop(site) { [weak self] in
+                await self?.notifyWillIdleStop(site.id)
+            }
+            guard stopped else { continue }
             await logTeardownWarnings([site.id], lifecycle: lifecycle)
             forgetClock(site.slug)
         }
@@ -543,20 +578,30 @@ public final class HTTPSProxy: @unchecked Sendable {
         Set(try await cli.list(all: true).filter(\.isRunning).map(\.name))
     }
 
-    /// Minutes since the instance was last used, where "used" is the later of a
-    /// proxied request and the moment we first saw it running. Returns 0 when
-    /// neither is known (the refresh loop hasn't observed it yet), which reads as
-    /// "just started" and defers the decision to the next sweep — never stopping
-    /// something on no evidence.
-    private func idleMinutes(of slug: String, now: Date) -> Double {
-        let reference = stateLock.withLock { () -> Date? in
+    /// Minutes since the instance was last used, taking the LATEST of three
+    /// signals — any one of them is enough to keep an instance alive:
+    ///
+    /// 1. `lastAccess` — a request this proxy routed. Covers browser traffic to
+    ///    the proxied hostnames, and nothing else (a request straight to
+    ///    `127.0.0.1:<port>` never reaches us).
+    /// 2. `persisted` — `lastActivityAt` from the store, written by wp-cli, MCP
+    ///    tool calls, magic-login and explicit starts in ANY process. This is the
+    ///    signal that makes an agent-driven env trackable at all.
+    /// 3. `firstSeenRunning` — when the refresh loop first saw it up, so an
+    ///    instance nobody has touched since it started still has a clock.
+    ///
+    /// Returns 0 when none is known, which reads as "just started" and defers to
+    /// the next sweep rather than stopping something on no evidence.
+    private func idleMinutes(of slug: String, persisted: Date?, now: Date) -> Double {
+        let inMemory = stateLock.withLock { () -> Date? in
             let seen = firstSeenRunning[slug]
             let used = lastAccess[slug]
             guard let seen else { return used }
             guard let used else { return seen }
             return max(seen, used)
         }
-        guard let reference else { return 0 }
+        let candidates = [inMemory, persisted].compactMap { $0 }
+        guard let reference = candidates.max() else { return 0 }
         return max(0, now.timeIntervalSince(reference)) / 60
     }
 
@@ -564,34 +609,69 @@ public final class HTTPSProxy: @unchecked Sendable {
         stateLock.withLock { wakesInFlight.contains(slug) }
     }
 
+    /// Drop every per-slug clock, including any recorded wake failure: once the
+    /// instance is down, a stale error from an earlier attempt has nothing to say
+    /// about the next wake and must not be rendered on its page.
     private func forgetClock(_ slug: String) {
         stateLock.withLock {
             firstSeenRunning.removeValue(forKey: slug)
             lastAccess.removeValue(forKey: slug)
+            wakeFailures.removeValue(forKey: slug)
         }
     }
 
     // MARK: - Wake on request (issue #16)
 
-    /// Start the instance behind a route whose upstream is down, at most once at
-    /// a time, and report whether a waking page should be served instead of the
-    /// plain "site is stopped" page.
+    /// What to serve when every upstream candidate for a route is down.
+    enum DownstreamOutcome: Sendable {
+        /// A wake was triggered (or one is already running) — serve the waking page.
+        case waking
+        /// The instance's wp container IS running; it just isn't answering. Waking
+        /// would issue a `container run` against a name that already exists and
+        /// fail, so say what is actually true instead.
+        case runningButUnresponsive
+        /// A mailbox route whose site is up but whose Mailpit container is not.
+        case mailboxUnavailable
+        /// Nothing can be woken from here (no lifecycle, or a mailbox route for a
+        /// stopped instance) — the pre-#16 "site is stopped" page.
+        case stopped
+    }
+
+    /// Decide what a down route should answer with, and trigger a wake when that
+    /// is the right answer.
     ///
     /// The pattern is Sablier's / Heroku's: answer the request immediately with a
     /// self-refreshing page rather than holding the connection open for the boot.
     /// The meta-refresh IS the progress poll — at ~1s of VM boot plus WordPress
     /// warmup, one or two refreshes land on the live site.
-    private func beginWake(route: Route) -> Bool {
-        guard lifecycle != nil, let slug = route.slug else { return false }
+    ///
+    /// Costs one `container list` on a path that has already spent ~2s failing to
+    /// dial, which buys the gate below. Without it, a wp container that is up but
+    /// briefly unresponsive (Apache restarting, a request storm, a crashed worker)
+    /// would get a `container run` for a name that already exists, and the user
+    /// would be shown that as a wake failure.
+    private func resolveDownstream(route: Route) async -> DownstreamOutcome {
+        guard lifecycle != nil, let slug = route.slug else { return .stopped }
+        let running = (try? await runningContainerNames()) ?? []
+        // `Route` doesn't carry the wp container name for a mailbox route, but the
+        // naming convention is the same everywhere else in the codebase.
+        let wpRunning = running.contains("wpc-\(slug)-wp")
+        if route.isMailbox {
+            // Never wake off a mailbox dial failure: an unreachable mailbox says
+            // nothing about whether WordPress should be started, and booting a
+            // whole site because a mailbox tab was left open would be a surprise.
+            return wpRunning ? .mailboxUnavailable : .stopped
+        }
+        if wpRunning { return .runningButUnresponsive }
         let claimed: Bool = stateLock.withLock {
             // Count the wake itself as an access, so the instance can't come up
             // and be swept away by an idle clock that predates it.
             lastAccess[slug] = Date()
             return wakesInFlight.insert(slug).inserted
         }
-        guard claimed else { return true } // already waking — page, no second start
+        guard claimed else { return .waking } // already waking — page, no second start
         Task { [weak self] in await self?.performWake(slug: slug, route: route) }
-        return true
+        return .waking
     }
 
     private func performWake(slug: String, route: Route) async {
@@ -714,8 +794,25 @@ public final class HTTPSProxy: @unchecked Sendable {
             candidates.append((ip, target.containerPort))
         }
         candidates.append(("127.0.0.1", UInt16(target.port)))
+        // Whether the client would understand an HTML interstitial. An asset
+        // fetch, an XHR or `curl` gets a terse machine-readable 503 instead — a
+        // page of markup where a stylesheet or a JSON body was expected is worse
+        // than useless (issue #16).
+        let wantsHTML = Self.acceptsHTML(Self.headerValue("Accept", in: lines))
         dial(candidates: candidates[...], inbound: inbound, upstreamBytes: upstreamBytes,
-             host: host, target: target, on: connQueue)
+             host: host, target: target, wantsHTML: wantsHTML, on: connQueue)
+    }
+
+    /// Whether an `Accept` header asks for HTML. A missing header is treated as
+    /// yes: that is what a bare `curl` sends, and a human at a terminal is better
+    /// served by the readable page than by a one-liner.
+    static func acceptsHTML(_ accept: String?) -> Bool {
+        guard let accept, !accept.isEmpty else { return true }
+        let lower = accept.lowercased()
+        if lower.contains("text/html") { return true }
+        // `*/*` alone (curl's default) means "anything"; treat it as HTML-capable.
+        // A specific non-HTML type (text/css, application/json, image/*) does not.
+        return lower.contains("*/*") && !lower.contains("application/json")
     }
 
     /// Try each upstream candidate in order; only when the LAST one (always the
@@ -730,19 +827,22 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// before falling through.
     private func dial(candidates: ArraySlice<(host: String, port: UInt16)>,
                       inbound: NWConnection, upstreamBytes: Data,
-                      host: String, target: Route, on connQueue: DispatchQueue) {
+                      host: String, target: Route, wantsHTML: Bool, on connQueue: DispatchQueue) {
         guard let candidate = candidates.first else {
-            // Every upstream is down. Wake the instance on the spot (issue #16)
-            // and answer with a self-refreshing "waking up" page; with no
-            // lifecycle wired up (never the case in either real host process)
-            // fall back to the pre-#16 "site is stopped" page.
-            if beginWake(route: target) {
-                let failure = target.slug.flatMap { slug in stateLock.withLock { wakeFailures[slug] } }
-                sendHTMLResponse(to: inbound, status: "503 Service Unavailable",
-                                 html: Self.wakingPage(host: host, route: target, failure: failure))
-            } else {
-                sendHTMLResponse(to: inbound, status: "502 Bad Gateway",
-                                 html: Self.stoppedSitePage(host: host, route: target))
+            // Every upstream is down. Deciding what to answer needs a fresh
+            // `container list` (see `resolveDownstream`), so it happens off the
+            // connection queue and the response is dispatched back onto it — the
+            // NWConnection's sends must stay on the queue it was started with.
+            Task { [weak self] in
+                guard let self else { inbound.cancel(); return }
+                let outcome = await self.resolveDownstream(route: target)
+                let failure = target.slug.flatMap { slug in
+                    self.stateLock.withLock { self.wakeFailures[slug] }
+                }
+                connQueue.async {
+                    self.respondDown(outcome, to: inbound, host: host, target: target,
+                                     failure: failure, wantsHTML: wantsHTML)
+                }
             }
             return
         }
@@ -758,7 +858,8 @@ public final class HTTPSProxy: @unchecked Sendable {
                 self.stateLock.withLock { _ = self.containerIPs.removeValue(forKey: name) }
             }
             self.dial(candidates: candidates.dropFirst(), inbound: inbound,
-                      upstreamBytes: upstreamBytes, host: host, target: target, on: connQueue)
+                      upstreamBytes: upstreamBytes, host: host, target: target,
+                      wantsHTML: wantsHTML, on: connQueue)
         }
         upstream.stateUpdateHandler = { [weak self] state in
             switch state {
@@ -835,9 +936,67 @@ public final class HTTPSProxy: @unchecked Sendable {
         }
     }
 
-    private func sendHTMLResponse(to inbound: NWConnection, status: String, html: String) {
-        let response = "HTTP/1.1 \(status)\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(html.utf8.count)\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n\(html)"
+    private func sendHTMLResponse(to inbound: NWConnection, status: String, html: String,
+                                  retryAfterSeconds: Int? = nil) {
+        sendResponse(to: inbound, status: status, contentType: "text/html; charset=utf-8",
+                     body: html, retryAfterSeconds: retryAfterSeconds)
+    }
+
+    private func sendResponse(to inbound: NWConnection, status: String, contentType: String,
+                              body: String, retryAfterSeconds: Int? = nil) {
+        // `Retry-After` on a 503 is what tells non-browser clients (and any proxy
+        // or fetch-retry layer in between) that this is a transient wait with a
+        // known duration rather than an outage — the meta-refresh only helps a
+        // browser rendering the HTML variant.
+        let retry = retryAfterSeconds.map { "Retry-After: \($0)\r\n" } ?? ""
+        let response = "HTTP/1.1 \(status)\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.utf8.count)\r\n\(retry)Cache-Control: no-store\r\nConnection: close\r\n\r\n\(body)"
         inbound.send(content: Data(response.utf8), completion: .contentProcessed { _ in inbound.cancel() })
+    }
+
+    /// Write the answer for a route whose upstreams are all down.
+    private func respondDown(_ outcome: DownstreamOutcome, to inbound: NWConnection,
+                             host: String, target: Route, failure: String?, wantsHTML: Bool) {
+        let name = target.displayName ?? target.slug ?? host
+        switch outcome {
+        case .waking:
+            guard wantsHTML else {
+                sendResponse(to: inbound, status: "503 Service Unavailable",
+                             contentType: "text/plain; charset=utf-8",
+                             body: "\(name) was stopped to free memory and is starting up. Retry in a moment.\n",
+                             retryAfterSeconds: 2)
+                return
+            }
+            sendHTMLResponse(to: inbound, status: "503 Service Unavailable",
+                             html: Self.wakingPage(host: host, route: target, failure: failure),
+                             retryAfterSeconds: 2)
+        case .runningButUnresponsive:
+            guard wantsHTML else {
+                sendResponse(to: inbound, status: "502 Bad Gateway",
+                             contentType: "text/plain; charset=utf-8",
+                             body: "\(name) is running but did not answer. Check its logs.\n")
+                return
+            }
+            sendHTMLResponse(to: inbound, status: "502 Bad Gateway",
+                             html: Self.unresponsivePage(host: host, route: target))
+        case .mailboxUnavailable:
+            guard wantsHTML else {
+                sendResponse(to: inbound, status: "502 Bad Gateway",
+                             contentType: "text/plain; charset=utf-8",
+                             body: "The mailbox container for \(name) is not running.\n")
+                return
+            }
+            sendHTMLResponse(to: inbound, status: "502 Bad Gateway",
+                             html: Self.mailboxUnavailablePage(host: host, route: target))
+        case .stopped:
+            guard wantsHTML else {
+                sendResponse(to: inbound, status: "502 Bad Gateway",
+                             contentType: "text/plain; charset=utf-8",
+                             body: "\(name) is not running.\n")
+                return
+            }
+            sendHTMLResponse(to: inbound, status: "502 Bad Gateway",
+                             html: Self.stoppedSitePage(host: host, route: target))
+        }
     }
 
     // MARK: - Friendly 502 pages (#6)
@@ -947,6 +1106,51 @@ public final class HTTPSProxy: @unchecked Sendable {
                          heading: "Waking up \(name)…",
                          bodyHTML: body, refreshSeconds: 2,
                          badge: "WP CONTAINER · WAKING", spinner: true)
+    }
+
+    /// The wp container IS running but nothing answered on either upstream
+    /// (issue #16). Distinct from the stopped page on purpose: telling somebody to
+    /// start a site that is already started sends them in the wrong direction, and
+    /// this is NOT a wake case — `container run` against an existing name just
+    /// fails. No refresh either; something needs looking at.
+    static func unresponsivePage(host: String, route: Route) -> String {
+        let name = htmlEscape(route.displayName ?? route.slug ?? host)
+        var body = "<p><code>\(htmlEscape(hostOnly(host)))</code> is running, but its web server didn’t answer.</p>"
+        body += "<p>WordPress may still be warming up after a start, or PHP/Apache may have stopped responding.</p>"
+        if let slug = route.slug {
+            body += """
+            <p>Reload in a moment, or look at the logs:</p>
+            <pre><code>container logs wpc-\(htmlEscape(slug))-wp</code></pre>
+            <p class="hint">If it stays unresponsive: <code>wp-container stop \(htmlEscape(slug)) &amp;&amp; wp-container start \(htmlEscape(slug))</code>.</p>
+            """
+        }
+        return proxyPage(title: "\(name) isn’t responding — WP Container",
+                         heading: "\(name) isn’t responding",
+                         bodyHTML: body, refreshSeconds: nil)
+    }
+
+    /// A `<slug>-mail.localhost` route whose site is up but whose Mailpit
+    /// container isn't (issue #10 + #16). Deliberately not a wake: the mailbox is a
+    /// sidecar, and nothing about an unreachable inbox implies WordPress should be
+    /// started or restarted behind the user's back.
+    static func mailboxUnavailablePage(host: String, route: Route) -> String {
+        let name = htmlEscape(route.displayName ?? route.slug ?? host)
+        var body = "<p>The site is running, but its Mailpit container isn’t — so there’s no mailbox to show.</p>"
+        if let slug = route.slug {
+            body += """
+            <p>Mailpit launches with the site, so it needs a restart to come up:</p>
+            <pre><code>wp-container stop \(htmlEscape(slug)) &amp;&amp; wp-container start \(htmlEscape(slug))</code></pre>
+            <p class="hint">If Mailpit is switched off for this site, turn it on first: <code>wp-container mailpit on \(htmlEscape(slug))</code>.</p>
+            """
+        }
+        return proxyPage(title: "\(name) is unavailable — WP Container",
+                         heading: "Mailbox unavailable",
+                         bodyHTML: body, refreshSeconds: nil)
+    }
+
+    /// Hostname without any `:port` suffix.
+    private static func hostOnly(_ host: String) -> String {
+        host.split(separator: ":").first.map(String.init) ?? host
     }
 
     /// Wholly-unmapped host → say so (styled, no slug hint available).
