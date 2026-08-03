@@ -20,7 +20,7 @@ enum MCPToolDispatch {
             case "login_link":        return try await loginLink(args, ctx: ctx, slug: scopedSlug)
             case "create_user":       return try await createUser(args, ctx: ctx, slug: scopedSlug)
             case "site_health_check": return try await siteHealthCheck(ctx: ctx, slug: scopedSlug)
-            case "site_start":        return try await siteStart(ctx: ctx, slug: scopedSlug)
+            case "site_start":        return try await siteStart(args, ctx: ctx, slug: scopedSlug)
             case "site_stop":         return try await siteStop(ctx: ctx, slug: scopedSlug)
             case "site_restart":      return try await siteRestart(ctx: ctx, slug: scopedSlug)
             case "site_status":       return try await siteStatus(ctx: ctx, slug: scopedSlug)
@@ -286,10 +286,18 @@ enum MCPToolDispatch {
 
     /// Coupled lifecycle (§2b): starting a site also starts its worktree envs
     /// (parent first, then envs; env failures reported but non-fatal).
-    private static func siteStart(ctx: CLIContext, slug: String) async throws -> CallTool.Result {
+    private static func siteStart(_ args: [String: Value], ctx: CLIContext, slug: String) async throws -> CallTool.Result {
         let site = try await resolveSite(slug, ctx: ctx)
-        let envs = try await ctx.load().envs.filter { $0.parentSiteID == site.id }
-        let outcome = await ctx.lifecycle.startSiteWithEnvs(site, envs: envs)
+        // Env fan-out is opt-in (issue #18) — defaults to starting only the site.
+        let withEnvs = args["with_envs"]?.boolValue ?? false
+        let envs = withEnvs ? try await ctx.load().envs.filter { $0.parentSiteID == site.id } : []
+        let noPull = args["no_pull"]?.boolValue ?? false
+        let refreshImages = args["refresh_images"]?.boolValue ?? false
+        guard !(noPull && refreshImages) else {
+            throw ToolError("bad_args", "no_pull and refresh_images are mutually exclusive")
+        }
+        let policy: PullPolicy = noPull ? .never : (refreshImages ? .refresh : .ifMissing)
+        let outcome = await ctx.lifecycle.startSiteWithEnvs(site, envs: envs, pullPolicy: policy)
         if outcome.provisioned != site.provisioned {
             _ = try await ctx.persistence.mutate { env in
                 if let i = env.sites.firstIndex(where: { $0.id == site.id }) { env.sites[i].provisioned = outcome.provisioned }
@@ -298,11 +306,11 @@ enum MCPToolDispatch {
         if let parentError = outcome.parentErrorMessage {
             throw ToolError("start_failed", parentError)
         }
-        if !outcome.envErrorMessages.isEmpty {
-            return MCPResult.json([
-                "slug": site.slug, "status": "running",
-                "envWarnings": outcome.envErrorMessages,
-            ])
+        if !outcome.envErrorMessages.isEmpty || !outcome.warnings.isEmpty {
+            var payload: [String: Any] = ["slug": site.slug, "status": "running"]
+            if !outcome.envErrorMessages.isEmpty { payload["envWarnings"] = outcome.envErrorMessages }
+            if !outcome.warnings.isEmpty { payload["warnings"] = outcome.warnings }
+            return MCPResult.json(payload)
         }
         return try await siteStatus(ctx: ctx, slug: slug)
     }

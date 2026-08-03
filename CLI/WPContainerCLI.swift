@@ -109,6 +109,7 @@ private func humanText(_ error: Error) -> String {
     if let e = error as? GitError { return e.description }
     if let e = error as? WorktreeError { return e.description }
     if let e = error as? MagicLoginError { return e.description }
+    if let e = error as? ImageUnavailableError { return e.description }
     return "\(error)"
 }
 
@@ -253,30 +254,56 @@ struct CreateCommand: AsyncParsableCommand {
 struct StartCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "start",
-        abstract: "Start a site (and all of its worktree envs) or a single env.",
+        abstract: "Start a site or a single env.",
         discussion: """
-        Lifecycle is coupled (PLAN.md §2b): starting a SITE also starts every \
-        worktree environment created from it — concurrently (they share nothing \
-        at runtime); a failure in one does not abort the others (env failures \
-        print as warnings). Starting an ENV slug starts just that environment.
+        Starting a SITE starts ONLY that site by default (issue #18) — pass \
+        --with-envs to also start every worktree environment created from it, \
+        concurrently (they share nothing at runtime); a failure in one does not \
+        abort the others (env failures print as warnings). Starting an ENV slug \
+        always starts just that environment.
+
+        Images are pulled only when missing locally by default. Use --no-pull \
+        for a strictly offline start (fails clearly if an image isn't already \
+        local), or --refresh-images to force a registry revalidation (falls \
+        back to the local image with a warning if the pull fails, e.g. rate \
+        limited).
         """
     )
     @Argument(help: "Site slug or env slug.") var target: String
+    @Flag(name: .long, help: "Also start all worktree environments of the site.") var withEnvs = false
+    @Flag(name: .long, help: "Never contact the registry; fail clearly if an image isn't already local.") var noPull = false
+    @Flag(name: .long, help: "Force a registry pull even for images that already exist locally.") var refreshImages = false
     @OptionGroup var output: JSONOptions
+
+    private func resolvedPullPolicy() throws -> PullPolicy {
+        guard !(noPull && refreshImages) else {
+            throw CLIErrorJSON("bad_args", detail: "--no-pull and --refresh-images are mutually exclusive")
+        }
+        if noPull { return .never }
+        if refreshImages { return .refresh }
+        return .ifMissing
+    }
 
     func run() async throws {
         let ctx = CLIContext()
         do {
+            let policy = try resolvedPullPolicy()
             let envelope = try await ctx.load()
             guard let resolved = resolveTarget(target, in: envelope) else { throw CLIErrorJSON("not_found", detail: target) }
             switch resolved {
             case .site(let site):
-                let envs = envelope.envs.filter { $0.parentSiteID == site.id }
-                let outcome = await ctx.lifecycle.startSiteWithEnvs(site, envs: envs)
+                // Env fan-out is opt-in (issue #18) — an empty envs list makes
+                // `startSiteWithEnvs` start only the parent, reusing the same
+                // claim/warning/image-prefetch plumbing.
+                let envs = withEnvs ? envelope.envs.filter { $0.parentSiteID == site.id } : []
+                let outcome = await ctx.lifecycle.startSiteWithEnvs(site, envs: envs, pullPolicy: policy)
                 if outcome.provisioned != site.provisioned {
                     _ = try await ctx.persistence.mutate { env in
                         if let i = env.sites.firstIndex(where: { $0.id == site.id }) { env.sites[i].provisioned = outcome.provisioned }
                     }
+                }
+                for warning in outcome.warnings {
+                    FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
                 }
                 // Env failures are non-fatal warnings; a parent failure fails
                 // the command (envs were still attempted first, per §2b).
@@ -289,7 +316,10 @@ struct StartCommand: AsyncParsableCommand {
             case .env(let env):
                 // Guarded start (issue #5): dedupes against a concurrent
                 // action for the same env in THIS process.
-                _ = try await ctx.lifecycle.startInstance(env)
+                _ = try await ctx.lifecycle.startInstance(env, pullPolicy: policy)
+                for warning in await ctx.lifecycle.drainWarnings(for: env.id) {
+                    FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
+                }
             }
             if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(target) started"))) }
             else { emitLine("Started \(target).") }
