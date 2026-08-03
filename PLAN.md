@@ -121,7 +121,12 @@ worktree of one repo inside it:
 env's own `wpc_*` schema, behind a prefix/charset guard so a bad name can't take
 out a sibling or the parent → `git worktree remove` (or leave with
 `--keep-worktree`) → delete `.envs/<b>` → update store. If the server is down the
-drop is skipped and the schema is reaped by the sweep the next `create` runs.
+drop is skipped and the name is TOMBSTONED on the parent site
+(`Site.pendingSchemaDrops`), to be dropped by the next shared-env `create` — which
+drops only tombstoned names, never whatever a `SHOW DATABASES` shows minus what the
+store claims (that races a concurrent create, whose schema exists before its record
+does). A schema orphaned by a hard crash mid-create therefore leaks; leaking beats
+destroying a live env's database.
 
 **Automation API — the `wp-container` CLI.** Agents need a scriptable surface, so the
 core moves into a shared framework and a CLI executable (binary `wp-container`, convenience symlink `wpc`) ships alongside the app:

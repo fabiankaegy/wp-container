@@ -158,36 +158,38 @@ public enum SiteRecipe {
         return args
     }
 
-    /// Server-side logical clone `from` → `to` on the SAME server: the dump is
-    /// piped straight into the restore inside the one-shot container, so nothing
-    /// is buffered through a Swift `String` or staged in a host mount (a strict
-    /// improvement on the old `liveDatabaseTransfer`).
+    /// Server-side logical clone `from` → `to` on the SAME server, staged through
+    /// the one-shot container's own ephemeral `/tmp` — nothing is buffered through
+    /// a Swift `String` or written into a host mount (a strict improvement on the
+    /// old `liveDatabaseTransfer`).
+    ///
+    /// Deliberately NOT a pipeline: POSIX `sh` reports only the LAST element's
+    /// exit status, so `mariadb-dump | mariadb` exits 0 even when the dump aborted
+    /// mid-stream (lost connection, `max_allowed_packet`) — silently producing a
+    /// truncated clone that looks like a success. `set -e` plus two sequential
+    /// redirects makes a dump failure fail the whole command.
     public static func cloneDatabaseArgs(dbHost: String, from: String, to: String) -> [String] {
         let flags = mariadbClientFlags(dbHost: dbHost).joined(separator: " ")
+        let dump = "/tmp/wpc-clone.sql"
         return [
             "run", "--rm", "--entrypoint", "/bin/sh", databaseImage, "-c",
-            "mariadb-dump \(flags) --single-transaction --quick \(from) | mariadb \(flags) \(to)",
+            "set -e; mariadb-dump \(flags) --single-transaction --quick \(from) > \(dump); "
+                + "mariadb \(flags) \(to) < \(dump)",
         ]
     }
 
     /// `DROP DATABASE IF EXISTS <schema>`. Callers MUST gate this on
     /// `WorktreeEnv.isManagedSchemaName` — dropping the wrong name would take
     /// out a sibling env or the parent site itself.
+    ///
+    /// There is deliberately NO "list the `wpc_%` schemas" counterpart: dropping
+    /// whatever a listing shows minus whatever the store claims races any
+    /// concurrent env creation, whose schema exists before its record does. Only
+    /// names we tombstoned ourselves are ever dropped (`Site.pendingSchemaDrops`).
     public static func dropEnvDatabaseArgs(dbHost: String, schema: String) -> [String] {
         var args = ["run", "--rm", databaseImage, "mariadb"]
         args += mariadbClientFlags(dbHost: dbHost)
         args += ["-e", "DROP DATABASE IF EXISTS `\(schema)`;"]
-        return args
-    }
-
-    /// `SHOW DATABASES LIKE 'wpc\_%'` (one bare name per line) — the input to
-    /// the create-time orphan sweep. The `\_` escape keeps `_` literal so the
-    /// pattern can't match unrelated `wpcX…` schemas.
-    public static func listEnvDatabasesArgs(dbHost: String) -> [String] {
-        var args = ["run", "--rm", databaseImage, "mariadb"]
-        args += mariadbClientFlags(dbHost: dbHost)
-        args += ["--skip-column-names", "-e",
-                 "SHOW DATABASES LIKE '\(WorktreeEnv.schemaPrefix.replacingOccurrences(of: "_", with: #"\_"#))%';"]
         return args
     }
 

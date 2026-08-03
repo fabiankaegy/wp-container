@@ -159,6 +159,11 @@ public enum WPCLIShim {
     /// worktree env needs to avoid operating on its PARENT's data (issue #17).
     public static let routerVersion = 2
     private static let routerVersionMarker = "# wpc-router-version:"
+    /// The flag the router announces its own body version with. `resolve-site`
+    /// REFUSES to resolve a shared-database env for a router too old to honor
+    /// `dbName` (issue #17) — a self-heal alone can't help the already-running
+    /// old body, which would silently run wp-cli against the PARENT's schema.
+    public static let routerVersionFlag = "--router-version"
 
     public static func routerScript() -> String {
         """
@@ -175,7 +180,7 @@ public enum WPCLIShim {
 
         RESOLVED=""
         if [ -x "$CLI" ]; then
-          RESOLVED="$("$CLI" resolve-site --path "$PWD" --json 2>/dev/null || true)"
+          RESOLVED="$("$CLI" resolve-site --path "$PWD" \(routerVersionFlag) \(routerVersion) --json 2>/dev/null || true)"
         fi
 
         if printf '%s' "$RESOLVED" | grep -q '"matched"[[:space:]]*:[[:space:]]*true'; then

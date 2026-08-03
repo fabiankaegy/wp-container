@@ -51,6 +51,26 @@ public enum WorktreeError: Error, Sendable, CustomStringConvertible {
 /// Creates and deletes worktree environments (PLAN.md §2b). Reuses
 /// `SiteLifecycle`'s shared start/stop path so envs and sites run identically.
 public actor WorktreeEnvService {
+    /// What a successful `create` produced, plus the store bookkeeping only the
+    /// caller can perform (issue #17).
+    public struct CreationOutcome: Sendable {
+        public let env: WorktreeEnv
+        /// Tombstoned schemas (`Site.pendingSchemaDrops`) whose DROP succeeded
+        /// during this create. The caller MUST remove exactly these from the
+        /// parent site's record — and only these, so a drop that failed keeps its
+        /// reminder for next time.
+        public let reapedSchemas: [String]
+    }
+
+    /// What a `delete` could not finish, for the caller to persist (issue #17).
+    public struct DeletionOutcome: Sendable {
+        /// The env's schema, still present on a DB server that was down. The
+        /// caller MUST append it to the parent site's `pendingSchemaDrops` so a
+        /// later create reaps it. nil when there was nothing to drop or the drop
+        /// succeeded.
+        public let tombstonedSchema: String?
+    }
+
     private let cli: ContainerCLI
     private let git: GitService
     private let lifecycle: SiteLifecycle
@@ -137,12 +157,10 @@ public actor WorktreeEnvService {
     ///     folder beats a logical dump+restore. Also chosen automatically when
     ///     the safety preflight can't confirm the project honors
     ///     `WORDPRESS_DB_NAME` (see `WPConfigService.dbNameFollowsEnvironment`).
-    ///   - siblingEnvs: the parent's CURRENT env records. Pass them to enable the
-    ///     shared path's orphan sweep, which needs to tell a live env's schema
-    ///     from one left behind by a deletion that happened while the DB server
-    ///     was down. nil (the default) SKIPS the sweep — a caller that can't
-    ///     supply the real list must never make us mistake live schemas for
-    ///     orphans.
+    ///
+    /// On the shared-database path this also reaps `parent.pendingSchemaDrops`
+    /// (the server is guaranteed up here) and reports what it dropped in the
+    /// returned outcome, so the caller can clear those tombstones.
     public func create(
         parent: Site,
         parentIsRunning: Bool,
@@ -152,9 +170,8 @@ public actor WorktreeEnvService {
         port: Int,
         reserved: WorktreeEnv? = nil,
         provision: Bool = true,
-        isolatedDB: Bool = false,
-        siblingEnvs: [WorktreeEnv]? = nil
-    ) async throws -> WorktreeEnv {
+        isolatedDB: Bool = false
+    ) async throws -> CreationOutcome {
         let fm = FileManager.default
         // Reject `..`-laden rel paths outright (#8): the shadow mount would
         // resolve outside /var/www/html inside the container.
@@ -193,6 +210,18 @@ public actor WorktreeEnvService {
 
         let envPath = env.envPath
         let worktreePath = env.worktreePath
+        var reapedSchemas: [String] = []
+
+        // Hold a lease on the shared DB container for the WHOLE critical section
+        // (issue #17, fix for the mid-start stop race): until the env's wp
+        // container exists there is nothing observable to stop `container list`
+        // from concluding the server is unused, and retiring it here would fail
+        // the create outright. Released explicitly on both exits below — `defer`
+        // can't `await`, and the rollback must run AFTER the release so its own
+        // `stopSharedDatabaseIfUnused` can actually retire the server.
+        if sharedSchema != nil {
+            await lifecycle.acquireDatabaseLease(env.dbContainerName)
+        }
 
         do {
             // 1. git worktree add (create branch if new).
@@ -222,12 +251,13 @@ public actor WorktreeEnvService {
                 // entirely server-side, before the env's wp container starts.
                 let parentDBHost = try await lifecycle.prepareDatabaseHost(owner: parent)
                 try await cli.run(SiteRecipe.createEnvDatabaseArgs(dbHost: parentDBHost, schema: sharedSchema))
-                // The server is guaranteed up right here, so when the caller
-                // hands us the live env list this is the natural place to reap
-                // schemas whose env was deleted while the server was down.
-                if let siblingEnvs {
-                    await sweepOrphanSchemas(dbHost: parentDBHost, keeping: siblingEnvs, plus: sharedSchema)
-                }
+                // The server is guaranteed up right here — the one natural place
+                // to reap schemas an earlier deletion tombstoned because it
+                // wasn't. ONLY tombstoned names; never anything merely observed
+                // on the server (see `Site.pendingSchemaDrops`).
+                reapedSchemas = await reapTombstonedSchemas(dbHost: parentDBHost,
+                                                            names: parent.pendingSchemaDrops,
+                                                            excluding: sharedSchema)
                 try await cli.run(SiteRecipe.cloneDatabaseArgs(dbHost: parentDBHost,
                                                                from: SiteRecipe.dbName, to: sharedSchema))
             } else if parentIsRunning {
@@ -268,19 +298,43 @@ public actor WorktreeEnvService {
 
             await lifecycle.markRunning(env.id)
             env.provisioned = true
-            return env
+            if sharedSchema != nil {
+                await lifecycle.releaseDatabaseLease(env.dbContainerName)
+            }
+            return CreationOutcome(env: env, reapedSchemas: reapedSchemas)
         } catch {
             // Transactional rollback: leave NO half-created env behind. Stop and
             // delete the env's containers, remove the git worktree checkout (but
             // KEEP the branch), and delete `.envs/<b>`. The caller only writes the
             // store entry on success, so there is nothing to unwind there.
+            //
+            // Release the lease FIRST: the DB retirement at the end of this block
+            // is gated on it, and nothing below needs the server protected.
+            if sharedSchema != nil {
+                await lifecycle.releaseDatabaseLease(env.dbContainerName)
+            }
             await lifecycle.deleteContainers(env) // stops+deletes, emits .stopped
             // A schema we may have already created on the parent's server is
             // part of the half-created env — unwind it too, or the next create
             // would clone into a stale one.
-            await dropSharedSchema(of: env, parent: parent)
+            let dropped = await dropSharedSchema(of: env, parent: parent)
+            if !dropped, let sharedSchema {
+                // We can't persist a tombstone from here (no store access), and
+                // the caller is about to be handed an error rather than a record
+                // to write. Name the leak instead: the server was up seconds ago,
+                // so this is a genuinely rare path.
+                await lifecycle.recordWarnings([
+                    "Could not remove the database schema \(sharedSchema) from \(parent.slug)'s database server while rolling back. Drop it manually if it lingers.",
+                ], for: env.id)
+            }
             try? await git.worktreeRemove(repo: repoURL, path: worktreePath, force: true)
             try? fm.removeItem(at: envPath)
+            // The shared path may have booted the parent's DB container purely
+            // for this create (parent site stopped). Nothing needs it now, so
+            // don't leave a ~470 MB VM behind for a create that failed.
+            if sharedSchema != nil {
+                await lifecycle.stopSharedDatabaseIfUnused(parent: parent)
+            }
             throw WorktreeError.creationFailed(short: WorktreeError.firstLine(of: error),
                                                full: WorktreeError.fullText(of: error))
         }
@@ -288,11 +342,16 @@ public actor WorktreeEnvService {
 
     /// Deletion: stop containers → drop the shared schema → git worktree remove
     /// → delete `.envs/<b>`.
-    public func delete(_ env: WorktreeEnv, parent: Site?, keepBranch: Bool, keepWorktree: Bool) async {
+    ///
+    /// Returns what the caller still has to persist: when the schema couldn't be
+    /// dropped (server down), `tombstonedSchema` must be appended to the parent
+    /// site's `pendingSchemaDrops`, or the schema is never reaped.
+    @discardableResult
+    public func delete(_ env: WorktreeEnv, parent: Site?, keepBranch: Bool, keepWorktree: Bool) async -> DeletionOutcome {
         // Never the parent's DB container: `deleteContainers` skips it for a
         // shared-database env (issue #17).
         await lifecycle.deleteContainers(env)
-        await dropSharedSchema(of: env, parent: parent)
+        let dropped = await dropSharedSchema(of: env, parent: parent)
         if !keepWorktree, let parent {
             let repoURL = parent.repoURL(forRelativePath: env.repoRelPath)
             try? await git.worktreeRemove(repo: repoURL, path: env.worktreePath, force: true)
@@ -301,55 +360,48 @@ public actor WorktreeEnvService {
         // Note: `keepBranch` is honored by NOT deleting the git branch here; we
         // never delete branches (worktree remove leaves the branch intact).
         _ = keepBranch
+        let tombstone = (!dropped && env.sharedDatabase) ? env.databaseSchema : nil
+        return DeletionOutcome(tombstonedSchema: tombstone)
     }
 
     // MARK: - Shared schema teardown (issue #17)
 
-    /// Drop a shared-database env's own schema off the parent's server.
+    /// Drop a shared-database env's own schema off the parent's server. Returns
+    /// false ONLY when a schema that exists could not be dropped — the caller
+    /// must then tombstone it.
     ///
-    /// Three guards, because dropping the wrong name here would destroy a
-    /// sibling env or the parent site itself (trade-off #3): the env must
-    /// actually be in shared mode, the stored schema must be present, and it must
-    /// pass `WorktreeEnv.isManagedSchemaName` (a `wpc_`-prefixed identifier — so
-    /// never `wordpress`). Best-effort by design: if the parent's DB container is
-    /// down there is nothing to connect to, and the schema is left to the
-    /// create-time orphan sweep.
-    private func dropSharedSchema(of env: WorktreeEnv, parent: Site?) async {
+    /// Four guards, because dropping the wrong name here would destroy a sibling
+    /// env or the parent site itself (trade-off #3): the env must actually be in
+    /// shared mode, the stored schema must be present, it must pass
+    /// `WorktreeEnv.isManagedSchemaName` (a `wpc_`-prefixed identifier — so never
+    /// `wordpress`), and the parent handed in must be the one that owns the
+    /// container the env borrows.
+    private func dropSharedSchema(of env: WorktreeEnv, parent: Site?) async -> Bool {
         guard env.sharedDatabase, let schema = env.databaseSchema,
               WorktreeEnv.isManagedSchemaName(schema), schema != SiteRecipe.dbName,
-              let parent, parent.dbContainerName == env.dbContainerName else { return }
+              let parent, parent.dbContainerName == env.dbContainerName else { return true }
         guard let dbHost = (try? await cli.ipAddress(of: env.dbContainerName)) ?? nil,
-              !dbHost.isEmpty else { return }
-        _ = try? await cli.run(SiteRecipe.dropEnvDatabaseArgs(dbHost: dbHost, schema: schema))
+              !dbHost.isEmpty else { return false }
+        let result = try? await cli.runCapturing(SiteRecipe.dropEnvDatabaseArgs(dbHost: dbHost, schema: schema))
+        return result?.succeeded ?? false
     }
 
-    /// Drop every `wpc_*` schema on this server that no live env record claims.
+    /// Drop tombstoned schemas (`Site.pendingSchemaDrops`) off a live server,
+    /// returning the ones whose DROP actually succeeded so the caller clears
+    /// exactly those — a drop that failed keeps its reminder for next time.
     ///
-    /// Deleting an env while the parent's DB container is down can't drop its
-    /// schema, so orphans accumulate. `create` runs this sweep because it is the
-    /// one moment where the server is guaranteed up AND the caller has the store
-    /// in hand. `keeping` is the parent's current env records; `plus` is the
-    /// schema being created right now (its record may not be persisted yet).
-    ///
-    /// A live env's schema is protected by its PERSISTED name and, additionally,
-    /// by the name its slug would generate. The second set matters because an env
-    /// being created concurrently in another process has a store record (the port
-    /// reservation) whose schema field isn't written yet — without it we'd sweep
-    /// away a sibling's schema mid-creation. It is a do-not-drop guard only;
-    /// nothing ever *operates* on a recomputed name.
-    private func sweepOrphanSchemas(dbHost: String, keeping envs: [WorktreeEnv], plus current: String) async {
-        let claimed = Set(envs.compactMap(\.databaseSchema))
-            .union(envs.map { WorktreeEnv.schemaName(forEnvSlug: $0.envSlug) })
-            .union([current])
-        guard let output = try? await cli.runCapturing(SiteRecipe.listEnvDatabasesArgs(dbHost: dbHost)),
-              output.succeeded else { return }
-        let found = output.stdout
-            .split(whereSeparator: \.isNewline)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { WorktreeEnv.isManagedSchemaName($0) }
-        for schema in found where !claimed.contains(schema) {
-            _ = try? await cli.run(SiteRecipe.dropEnvDatabaseArgs(dbHost: dbHost, schema: schema))
+    /// Every name is re-checked against `WorktreeEnv.isManagedSchemaName` even
+    /// though only we ever wrote them, so a hand-edited store can't turn this
+    /// into `DROP DATABASE wordpress`.
+    private func reapTombstonedSchemas(dbHost: String, names: [String],
+                                       excluding current: String) async -> [String] {
+        var reaped: [String] = []
+        for schema in Set(names) where schema != current
+            && WorktreeEnv.isManagedSchemaName(schema) && schema != SiteRecipe.dbName {
+            let result = try? await cli.runCapturing(SiteRecipe.dropEnvDatabaseArgs(dbHost: dbHost, schema: schema))
+            if result?.succeeded == true { reaped.append(schema) }
         }
+        return reaped
     }
 
     // MARK: - Live DB clone (parent running)

@@ -358,8 +358,7 @@ struct StopCommand: AsyncParsableCommand {
                 // A shared DB container would otherwise linger after its last
                 // user stopped (issue #17) — that memory is the whole point.
                 if let parent = envelope.sites.first(where: { $0.id == env.parentSiteID }) {
-                    let siblings = envelope.envs.filter { $0.parentSiteID == parent.id && $0.id != env.id }
-                    await ctx.lifecycle.stopSharedDatabaseIfUnused(parent: parent, siblingEnvs: siblings)
+                    await ctx.lifecycle.stopSharedDatabaseIfUnused(parent: parent)
                 }
             }
             if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(target) stopped"))) }
@@ -400,8 +399,18 @@ struct DeleteCommand: AsyncParsableCommand {
                 try? await CertificateAuthority().removeLeafCoverage(staleHosts)
             case .env(let env):
                 let parent = envelope.sites.first { $0.id == env.parentSiteID }
-                await ctx.worktrees.delete(env, parent: parent, keepBranch: true, keepWorktree: false)
-                _ = try await ctx.persistence.mutate { store in store.envs.removeAll { $0.id == env.id } }
+                let outcome = await ctx.worktrees.delete(env, parent: parent, keepBranch: true, keepWorktree: false)
+                _ = try await ctx.persistence.mutate { store in
+                    store.envs.removeAll { $0.id == env.id }
+                    // The DB server was down, so the env's schema is still there
+                    // (issue #17). Tombstone it for the next shared-env create.
+                    if let orphan = outcome.tombstonedSchema, let parent,
+                       let i = store.sites.firstIndex(where: { $0.id == parent.id }),
+                       !store.sites[i].pendingSchemaDrops.contains(orphan) {
+                        store.sites[i].pendingSchemaDrops.append(orphan)
+                    }
+                }
+                if let parent { await ctx.lifecycle.stopSharedDatabaseIfUnused(parent: parent) }
                 try? await CertificateAuthority().removeLeafCoverage(["\(env.envSlug).localhost"])
             }
             if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(target) deleted"))) }
@@ -448,25 +457,26 @@ struct WorktreeCreate: AsyncParsableCommand {
             // during the (long) creation flow below.
             let repoArg = repo
             let branchArg = branch
-            guard let (_, reserved, storeAfterReserve) = try await ctx.persistence.allocatePort(reserve: { port, store in
+            guard let (_, reserved, _) = try await ctx.persistence.allocatePort(reserve: { port, store in
                 WorktreeEnvService.reservedDescriptor(parent: parent, repoRelPath: repoArg,
                                                       branch: branchArg, port: port, into: &store)
             }) else { throw CLIErrorJSON("no_free_port") }
 
             do {
-                // Live sibling records (the reserved one excluded) so the shared
-                // path's orphan sweep can tell a live schema from a leaked one.
-                // Read from the POST-reservation envelope, so a sibling another
-                // process reserved while we were loading is still protected.
-                let siblings = storeAfterReserve.envs.filter { $0.parentSiteID == parent.id && $0.id != reserved.id }
-                let env = try await ctx.worktrees.create(parent: parent, parentIsRunning: parentRunning,
-                                                         repoRelPath: repo, branch: branch, from: from,
-                                                         port: reserved.port, reserved: reserved,
-                                                         provision: !noProvision, isolatedDB: isolatedDb,
-                                                         siblingEnvs: siblings)
+                let outcome = try await ctx.worktrees.create(parent: parent, parentIsRunning: parentRunning,
+                                                            repoRelPath: repo, branch: branch, from: from,
+                                                            port: reserved.port, reserved: reserved,
+                                                            provision: !noProvision, isolatedDB: isolatedDb)
+                let env = outcome.env
+                let reaped = outcome.reapedSchemas
                 _ = try await ctx.persistence.mutate { store in
                     store.envs.removeAll { $0.id == env.id }
                     store.envs.append(env)
+                    // Clear exactly the tombstones whose DROP succeeded (#17); one
+                    // that failed keeps its reminder for the next create.
+                    if !reaped.isEmpty, let i = store.sites.firstIndex(where: { $0.id == parent.id }) {
+                        store.sites[i].pendingSchemaDrops.removeAll { reaped.contains($0) }
+                    }
                 }
                 for warning in await ctx.lifecycle.drainWarnings(for: env.id) {
                     FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))

@@ -868,12 +868,14 @@ public final class AppViewModel {
         // inside `create`); the "environment ready" notification stands in.
         suppressStatusNotify.insert(reserved.id)
         do {
-            let siblings = store.envs(forSite: parent.id).filter { $0.id != reserved.id }
-            let env = try await worktrees.create(parent: parent, parentIsRunning: parent.status.isRunning,
-                                                 repoRelPath: repoRelPath, branch: branch, from: from,
-                                                 port: reserved.port, reserved: reserved, provision: provision,
-                                                 isolatedDB: isolatedDB, siblingEnvs: siblings)
+            let outcome = try await worktrees.create(parent: parent, parentIsRunning: parent.status.isRunning,
+                                                    repoRelPath: repoRelPath, branch: branch, from: from,
+                                                    port: reserved.port, reserved: reserved, provision: provision,
+                                                    isolatedDB: isolatedDB)
+            let env = outcome.env
             await store.upsertEnv(env)
+            // Clear exactly the tombstones whose DROP succeeded (#17).
+            await store.updatePendingSchemaDrops(siteID: parent.id, removing: outcome.reapedSchemas)
             notifications.notifyEnvReady(branch: env.branch, parent: parent.name,
                                          url: env.localURL, faviconFolder: env.wordpressFolder)
             clearSuppressionSoon(env.id)
@@ -987,7 +989,7 @@ public final class AppViewModel {
         let orphanParents = Set(orphanEnvs.filter { !$0.ownsDatabaseContainer }.map(\.parentSiteID))
         for parentID in orphanParents {
             guard let parent = store.site(id: parentID) else { continue }
-            await lifecycle.stopSharedDatabaseIfUnused(parent: parent, siblingEnvs: store.envs(forSite: parentID))
+            await lifecycle.stopSharedDatabaseIfUnused(parent: parent)
         }
     }
 
@@ -1039,12 +1041,14 @@ public final class AppViewModel {
             let parentRunning = parent.status.isRunning
             suppressStatusNotify.insert(reserved.id)
             do {
-                let siblings = store.envs(forSite: parent.id).filter { $0.id != reserved.id }
-                let env = try await worktrees.create(parent: parent, parentIsRunning: parentRunning,
-                                                     repoRelPath: repoRelPath, branch: branch, from: from,
-                                                     port: reserved.port, reserved: reserved, provision: provision,
-                                                     isolatedDB: isolatedDB, siblingEnvs: siblings)
+                let outcome = try await worktrees.create(parent: parent, parentIsRunning: parentRunning,
+                                                        repoRelPath: repoRelPath, branch: branch, from: from,
+                                                        port: reserved.port, reserved: reserved, provision: provision,
+                                                        isolatedDB: isolatedDB)
+                let env = outcome.env
                 await store.upsertEnv(env)
+                // Clear exactly the tombstones whose DROP succeeded (#17).
+                await store.updatePendingSchemaDrops(siteID: parent.id, removing: outcome.reapedSchemas)
                 notifications.notifyEnvReady(branch: env.branch, parent: parent.name,
                                              url: env.localURL, faviconFolder: env.wordpressFolder)
                 clearSuppressionSoon(env.id)
@@ -1077,8 +1081,7 @@ public final class AppViewModel {
             // Retire a shared DB container nothing needs any more, or a stopped
             // env would leave its parent's ~470 MB server behind (#17).
             if let parent = store.site(id: env.parentSiteID) {
-                let siblings = store.envs(forSite: parent.id).filter { $0.id != env.id }
-                await lifecycle.stopSharedDatabaseIfUnused(parent: parent, siblingEnvs: siblings)
+                await lifecycle.stopSharedDatabaseIfUnused(parent: parent)
             }
         }
     }
@@ -1088,8 +1091,14 @@ public final class AppViewModel {
     public func deleteEnv(_ env: WorktreeEnv, keepWorktree: Bool = false) {
         Task {
             let parent = store.site(id: env.parentSiteID)
-            await worktrees.delete(env, parent: parent, keepBranch: true, keepWorktree: keepWorktree)
+            let outcome = await worktrees.delete(env, parent: parent, keepBranch: true, keepWorktree: keepWorktree)
             await store.removeEnv(id: env.id)
+            if let parent {
+                // The DB server was down, so the schema is still there (#17) —
+                // tombstone it for the next shared-env create to reap.
+                await store.updatePendingSchemaDrops(siteID: parent.id, adding: outcome.tombstonedSchema)
+                await lifecycle.stopSharedDatabaseIfUnused(parent: parent)
+            }
             if selection == env.id { selection = env.parentSiteID }
             try? await ca.removeLeafCoverage(["\(env.envSlug).localhost"])
         }

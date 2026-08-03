@@ -73,6 +73,20 @@ public actor SiteLifecycle {
     /// `ensureDatabaseContainer`.
     private var dbBoots: [String: Task<Void, Error>] = [:]
 
+    /// Outstanding claims on a DB container by CONTAINER NAME (issue #17).
+    ///
+    /// Everything that decides whether a shared DB container is still needed reads
+    /// `container list`, which can only see instances that already HAVE a wp
+    /// container. An instance still inside its start pipeline (image ensure, core
+    /// seed, `container run`) or a worktree env being created is invisible there,
+    /// and stopping the server under it fails the operation outright. A lease
+    /// makes that in-flight work visible.
+    ///
+    /// In-PROCESS only. A second `wp-container` process starting an env while this
+    /// one retires the server remains theoretically racy; that would need a
+    /// cross-process lock and is deliberately not attempted.
+    private var dbLeases: [String: Int] = [:]
+
     /// Image-pull fallback warnings recorded per instance (issue #18) — e.g. a
     /// pull that failed but degraded to a local image. Drained by callers that
     /// want to surface them (never thrown; these are not failures).
@@ -124,6 +138,25 @@ public actor SiteLifecycle {
     /// Whether a lifecycle action for the instance is currently in flight.
     public func isBusy(_ id: UUID) -> Bool { inFlight.contains(id) }
 
+    // MARK: - Database container leases (issue #17)
+
+    /// Claim the named DB container for work in progress. MUST be paired with
+    /// `releaseDatabaseLease` on every exit path. `WorktreeEnvService.create`
+    /// holds one across its whole shared-database critical section; every
+    /// `startContainers` holds one for its duration.
+    public func acquireDatabaseLease(_ name: String) {
+        dbLeases[name, default: 0] += 1
+    }
+
+    public func releaseDatabaseLease(_ name: String) {
+        guard let count = dbLeases[name] else { return }
+        if count <= 1 { dbLeases.removeValue(forKey: name) } else { dbLeases[name] = count - 1 }
+    }
+
+    /// Whether anything in this process is currently relying on the named DB
+    /// container. Nothing may stop it while true.
+    public func isDatabaseLeased(_ name: String) -> Bool { (dbLeases[name] ?? 0) > 0 }
+
     // MARK: - Shared start path
 
     /// Ensure folders, pull images, launch db (+ es / xdebug prep) in parallel,
@@ -146,6 +179,12 @@ public actor SiteLifecycle {
                                 dbProvider: (any RunnableInstance)? = nil) async throws -> String {
         let timer = PhaseTimer(inst.containerSlug)
         emit(inst.instanceID, .starting)
+        // Nothing may retire this DB container while we're mid-start (issue #17):
+        // until the `container run` below lands there is no wp container for
+        // `container list` to see, so a concurrent env stop would otherwise
+        // conclude the server is unused and pull it out from under us.
+        acquireDatabaseLease(inst.dbContainerName)
+        defer { releaseDatabaseLease(inst.dbContainerName) }
         do {
             try SiteFolders.ensure(for: inst)
             // PHP overrides folder (50 MB upload limits) — must exist before
@@ -585,8 +624,12 @@ public actor SiteLifecycle {
         // old DB IP baked in at `container run` time and cannot pick up a new
         // one. `stopSiteWithEnvs` stops envs BEFORE the parent, so a genuine
         // whole-family stop still takes the server down.
-        if inst.ownsDatabaseContainer, await hasRunningSharedDatabaseDependents(inst) {
-            names.removeAll { $0 == inst.dbContainerName }
+        if inst.ownsDatabaseContainer {
+            // `||` can't short-circuit across an `await`, so spell it out: the
+            // lease check is free, the container listing is not.
+            var keepDatabase = isDatabaseLeased(inst.dbContainerName)
+            if !keepDatabase { keepDatabase = await hasRunningSharedDatabaseDependents(inst) }
+            if keepDatabase { names.removeAll { $0 == inst.dbContainerName } }
         }
         await withTaskGroup(of: Void.self) { group in
             for name in names {
@@ -613,15 +656,24 @@ public actor SiteLifecycle {
     ///
     /// Read from live container LABELS rather than the store, because the
     /// lifecycle has no store access — and labels are the reconciliation ground
-    /// truth anyway. An env is identified as *borrowing* by the absence of a
-    /// running `wpc-<envSlug>-db` of its own, which is exactly what shared mode
-    /// means at the container level.
+    /// truth anyway.
+    ///
+    /// FAILS CLOSED: if `container list` errors we report a dependent, because
+    /// mistaking "I can't tell" for "nothing needs it" takes a live env's database
+    /// away, while the opposite merely leaves a VM running a bit longer.
     private func hasRunningSharedDatabaseDependents(_ site: any RunnableInstance) async -> Bool {
         guard site.envLabel == nil else { return false } // an env has no dependents
-        let running = ((try? await cli.list(all: true)) ?? []).filter(\.isRunning)
+        guard let records = try? await cli.list(all: true) else { return true }
+        return Self.hasBorrowingEnv(in: records.filter(\.isRunning), siteSlug: site.siteSlug)
+    }
+
+    /// Does any running env of `siteSlug` borrow the site's DB container? An env
+    /// counts as *borrowing* when it has no running `wpc-<envSlug>-db` of its own,
+    /// which is exactly what shared mode means at the container level.
+    private static func hasBorrowingEnv(in running: [ContainerRecord], siteSlug: String) -> Bool {
         let names = Set(running.map(\.name))
         return running.contains { record in
-            guard let envSlug = record.envLabel, record.siteLabel == site.siteSlug,
+            guard let envSlug = record.envLabel, record.siteLabel == siteSlug,
                   record.name == "wpc-\(envSlug)-wp" else { return false }
             return !names.contains("wpc-\(envSlug)-db")
         }
@@ -629,24 +681,24 @@ public actor SiteLifecycle {
 
     /// Retire a shared DB container that nothing needs any more (issue #17,
     /// trade-off #2): after stopping an env whose database lives on the parent's
-    /// server, stop that server too — but ONLY when the parent's own wp container
-    /// is down AND no sibling shared-database env is still running. Otherwise a
-    /// stopped env would leave a ~470 MB DB VM behind forever, which is the whole
-    /// memory win this change exists for.
+    /// server, stop that server too — but ONLY when nothing holds a lease on it,
+    /// the parent's own wp container is down, and no sibling env is still
+    /// borrowing it. Otherwise a stopped env would leave a ~470 MB DB VM behind
+    /// forever, which is the whole memory win this change exists for.
     ///
-    /// Callers pass the parent and its CURRENT env list (they hold the store);
-    /// idempotent and best-effort, so it is safe to call on every env stop.
-    public func stopSharedDatabaseIfUnused(parent: Site, siblingEnvs: [WorktreeEnv]) async {
-        let records = (try? await cli.list(all: true)) ?? []
-        let running = Set(records.filter(\.isRunning).map(\.name))
-        guard running.contains(parent.dbContainerName) else { return }
-        guard !running.contains(parent.wpContainerName) else { return }
-        let stillNeeded = siblingEnvs.contains { env in
-            !env.ownsDatabaseContainer
-                && env.dbContainerName == parent.dbContainerName
-                && running.contains(env.wpContainerName)
-        }
-        guard !stillNeeded else { return }
+    /// Needs no store access — dependents are read from container labels, which
+    /// beats a possibly-stale store snapshot anyway. Idempotent, best-effort and
+    /// FAIL-CLOSED at every step, so it is safe to call on any env stop.
+    public func stopSharedDatabaseIfUnused(parent: Site) async {
+        // In-flight starts/creates are invisible to `container list`.
+        guard !isDatabaseLeased(parent.dbContainerName) else { return }
+        // Fail closed: a listing error must never read as "nothing needs it".
+        guard let records = try? await cli.list(all: true) else { return }
+        let running = records.filter(\.isRunning)
+        let names = Set(running.map(\.name))
+        guard names.contains(parent.dbContainerName) else { return }
+        guard !names.contains(parent.wpContainerName) else { return }
+        guard !Self.hasBorrowingEnv(in: running, siteSlug: parent.slug) else { return }
         _ = try? await cli.run(SiteRecipe.stopArgs(parent.dbContainerName))
     }
 
