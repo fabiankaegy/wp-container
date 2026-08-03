@@ -349,16 +349,28 @@ struct StopCommand: AsyncParsableCommand {
         do {
             let envelope = try await ctx.load()
             guard let resolved = resolveTarget(target, in: envelope) else { throw CLIErrorJSON("not_found", detail: target) }
+            // Teardown problems the stop path recorded (issue #16): a container
+            // that survived both `container stop` and `container delete` is
+            // still holding its VM's memory, so it must not stay invisible.
+            var ids: [UUID] = []
             switch resolved {
             case .site(let site):
                 let envs = envelope.envs.filter { $0.parentSiteID == site.id }
                 await ctx.lifecycle.stopSiteWithEnvs(site, envs: envs)
+                ids = [site.id] + envs.map(\.id)
             case .env(let env):
                 await ctx.lifecycle.stop(env)
+                ids = [env.id]
                 // A shared DB container would otherwise linger after its last
                 // user stopped (issue #17) — that memory is the whole point.
                 if let parent = envelope.sites.first(where: { $0.id == env.parentSiteID }) {
                     await ctx.lifecycle.stopSharedDatabaseIfUnused(parent: parent)
+                    ids.append(parent.id)
+                }
+            }
+            for id in ids {
+                for warning in await ctx.lifecycle.drainWarnings(for: id) {
+                    FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
                 }
             }
             if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(target) stopped"))) }

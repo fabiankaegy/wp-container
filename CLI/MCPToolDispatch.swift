@@ -326,7 +326,15 @@ enum MCPToolDispatch {
         let site = try await resolveSite(slug, ctx: ctx)
         let envs = try await ctx.load().envs.filter { $0.parentSiteID == site.id }
         await ctx.lifecycle.stopSiteWithEnvs(site, envs: envs)
-        return MCPResult.json(["slug": slug, "status": "stopped"])
+        // Teardown problems recorded by the stop path (issue #16) — a container
+        // that outlived both `stop` and `delete` is still holding VM memory.
+        var warnings: [String] = []
+        for id in [site.id] + envs.map(\.id) {
+            warnings.append(contentsOf: await ctx.lifecycle.drainWarnings(for: id))
+        }
+        var payload: [String: Any] = ["slug": slug, "status": "stopped"]
+        if !warnings.isEmpty { payload["warnings"] = warnings }
+        return MCPResult.json(payload)
     }
 
     private static func siteRestart(ctx: CLIContext, slug: String) async throws -> CallTool.Result {

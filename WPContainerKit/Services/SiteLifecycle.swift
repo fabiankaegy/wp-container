@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import OSLog
 
 public enum LifecycleError: Error, Sendable, CustomStringConvertible {
     case databaseNotReady
@@ -613,9 +614,15 @@ public actor SiteLifecycle {
 
     private func stopCore(_ inst: any RunnableInstance) async {
         emit(inst.instanceID, .stopping)
-        // Containers run with --rm, so `stop` makes them vanish. The three
-        // containers are independent — stop them concurrently (issue #9). The
-        // es sidecar is stopped best-effort whether or not the flag is
+        // Containers run with --rm, so `stop` SHOULD make them vanish — but
+        // issue #16 caught one reported `stopped` by `container ls` whose shim
+        // and `com.apple.Virtualization.VirtualMachine` xpc process were still
+        // alive holding ~219 MB. So the stop is no longer assumed: it is
+        // verified, escalated to `container delete`, and anything that survives
+        // both is surfaced rather than swallowed (see `verifyTeardown`).
+        //
+        // The containers are independent — stop them concurrently (issue #9).
+        // The es sidecar is stopped best-effort whether or not the flag is
         // currently set (it may have been toggled off since start).
         var names = Self.ownedContainerNames(of: inst)
         // Restarting a parent site (an Xdebug/Mailpit/domain/HTTPS toggle,
@@ -631,13 +638,93 @@ public actor SiteLifecycle {
             if !keepDatabase { keepDatabase = await hasRunningSharedDatabaseDependents(inst) }
             if keepDatabase { names.removeAll { $0 == inst.dbContainerName } }
         }
-        await withTaskGroup(of: Void.self) { group in
+        var problems: [String] = []
+        await withTaskGroup(of: String?.self) { group in
             for name in names {
-                group.addTask { [cli] in _ = try? await cli.run(SiteRecipe.stopArgs(name)) }
+                group.addTask { [cli] in
+                    do {
+                        _ = try await cli.run(SiteRecipe.stopArgs(name))
+                        return nil
+                    } catch {
+                        // "No such container" is the normal case for a sidecar
+                        // that was never started (es/mail toggled off), NOT a
+                        // failure — everything else is worth reporting.
+                        guard !Self.isMissingContainerError(error) else { return nil }
+                        return "`container stop \(name)` failed: \(Self.message(for: error))"
+                    }
+                }
+            }
+            for await problem in group {
+                if let problem { problems.append(problem) }
             }
         }
+        problems.append(contentsOf: await verifyTeardown(of: names))
+        if !problems.isEmpty {
+            for problem in problems { Self.log.error("stop: \(problem, privacy: .public)") }
+            recordWarnings(problems, for: inst.instanceID)
+        }
+        // Emitted only after the verify/escalate pass, so a caller that restarts
+        // (addon toggles, `site_restart`) genuinely waits for teardown instead of
+        // racing a half-dead VM for the container name.
         emit(inst.instanceID, .stopped)
     }
+
+    /// Confirm the named containers are really gone, escalating anything that
+    /// lingers to `container delete`, and describe whatever survives both.
+    ///
+    /// Why this exists (issue #16): `container stop` returning 0 is not proof of
+    /// teardown. A container was observed sitting in `container list --all` as
+    /// `stopped` while its shim and `com.apple.Virtualization.VirtualMachine`
+    /// process stayed alive holding ~219 MB — precisely the memory the idle-stop
+    /// work is trying to reclaim. `container delete` is the only path that
+    /// reliably reaps that record (it is what `deleteContainers` always did).
+    ///
+    /// Bounded on purpose: `--rm` teardown is normally sub-second, so the poll
+    /// gives it ~5s before escalating and ~2s after, and never blocks a stop for
+    /// longer than that. Listing failures are treated as "cannot tell" — we do
+    /// NOT invent a survivor, because a spurious `container delete` of a
+    /// perfectly healthy neighbour would be far worse than a missed warning.
+    private func verifyTeardown(of names: [String]) async -> [String] {
+        guard !names.isEmpty else { return [] }
+        var lingering = await Self.pollUntilGone(names, cli: cli, deadline: .seconds(5))
+        guard !lingering.isEmpty else { return [] }
+        for name in lingering {
+            Self.log.warning("stop: \(name, privacy: .public) still present after `container stop` — escalating to `container delete`")
+            _ = try? await cli.run(SiteRecipe.deleteArgs(name))
+        }
+        lingering = await Self.pollUntilGone(lingering, cli: cli, deadline: .seconds(2))
+        return lingering.map {
+            "\($0) survived both `container stop` and `container delete` — its VM process may still be holding memory. Check `container list --all` and, if it is still there, `container delete --force \($0)`."
+        }
+    }
+
+    /// Poll `container list --all` until none of `names` is listed any more, and
+    /// return whichever are still there when the deadline passes (empty ⇒ all
+    /// gone). Sorted so warning text is deterministic.
+    private static func pollUntilGone(_ names: [String], cli: ContainerCLI,
+                                      deadline: Duration) async -> [String] {
+        let wanted = Set(names)
+        let end = ContinuousClock.now.advanced(by: deadline)
+        var present = wanted
+        while true {
+            guard let records = try? await cli.list(all: true) else { return [] } // cannot tell
+            present = wanted.intersection(records.map(\.name))
+            if present.isEmpty || ContinuousClock.now >= end { break }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+        return present.sorted()
+    }
+
+    /// Whether a failed `container stop`/`delete` merely means the container was
+    /// not there — the expected outcome for a sidecar that never ran.
+    private static func isMissingContainerError(_ error: Error) -> Bool {
+        guard let e = error as? ContainerCLIError else { return false }
+        let text = (e.stderr + " " + e.stdout).lowercased()
+        return text.contains("not found") || text.contains("no such")
+            || text.contains("does not exist")
+    }
+
+    private static let log = Logger(subsystem: "com.fabiankaegy.wpcontainer", category: "lifecycle")
 
     /// Every container this instance may stop or delete. A shared-database env
     /// (issue #17) is deliberately EXCLUDED from its DB container: that server
@@ -700,6 +787,14 @@ public actor SiteLifecycle {
         guard !names.contains(parent.wpContainerName) else { return }
         guard !Self.hasBorrowingEnv(in: running, siteSlug: parent.slug) else { return }
         _ = try? await cli.run(SiteRecipe.stopArgs(parent.dbContainerName))
+        // Same verify/escalate pass as `stopCore` (issue #16): a DB VM that
+        // survives its `stop` is ~470 MB of exactly the memory this retirement
+        // exists to reclaim.
+        let problems = await verifyTeardown(of: [parent.dbContainerName])
+        if !problems.isEmpty {
+            for problem in problems { Self.log.error("stop: \(problem, privacy: .public)") }
+            recordWarnings(problems, for: parent.instanceID)
+        }
     }
 
     /// Stop + best-effort delete (non --rm leftovers, prior crash, …).
