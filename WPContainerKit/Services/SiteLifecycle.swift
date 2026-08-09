@@ -709,6 +709,7 @@ public actor SiteLifecycle {
         // the narrow race it prevents. The in-process lease check and the fresh
         // container listing still apply either way.
         var dbLock: FileLock?
+        defer { dbLock?.release() } // backstop; `release()` is idempotent
         if inst.ownsDatabaseContainer {
             // `||` can't short-circuit across an `await`, so spell it out: the
             // lease check is free, the container listing is not.
@@ -725,7 +726,6 @@ public actor SiteLifecycle {
                 dbLock = nil
             }
         }
-        defer { dbLock?.release() } // backstop; `release()` is idempotent
         var problems: [String] = []
         await withTaskGroup(of: String?.self) { group in
             for name in names {
