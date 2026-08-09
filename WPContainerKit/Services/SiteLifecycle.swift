@@ -83,10 +83,22 @@ public actor SiteLifecycle {
     /// and stopping the server under it fails the operation outright. A lease
     /// makes that in-flight work visible.
     ///
-    /// In-PROCESS only. A second `wp-container` process starting an env while this
-    /// one retires the server remains theoretically racy; that would need a
-    /// cross-process lock and is deliberately not attempted.
+    /// Every lease ALSO takes a `.shared` `flock` on the container's
+    /// `db-<container>.lock` file (see `DatabaseLifecycleLock`), which extends
+    /// the exact same guarantee to the other processes running their own
+    /// `SiteLifecycle` — the app, the headless proxy, CLI one-shots, MCP.
     private var dbLeases: [String: Int] = [:]
+
+    /// The cross-process half of `dbLeases`: one `.shared` `FileLock` per
+    /// successfully locked lease, stacked per container name and popped on
+    /// release. One descriptor per lease rather than one refcounted descriptor
+    /// keeps acquisition self-contained — several `flock(LOCK_SH)`s on separate
+    /// descriptions coexist happily, including within one process — so no
+    /// bookkeeping has to survive an `await`.
+    ///
+    /// May be SHORTER than the `dbLeases` count: a lease whose lock could not be
+    /// taken in time still counts in-process (see `acquireDatabaseLease`).
+    private var dbLeaseLocks: [String: [FileLock]] = [:]
 
     /// Image-pull fallback warnings recorded per instance (issue #18) — e.g. a
     /// pull that failed but degraded to a local image. Drained by callers that
@@ -144,12 +156,35 @@ public actor SiteLifecycle {
     /// Claim the named DB container for work in progress. MUST be paired with
     /// `releaseDatabaseLease` on every exit path. `WorktreeEnvService.create`
     /// holds one across its whole shared-database critical section; every
-    /// `startContainers` holds one for its duration.
-    public func acquireDatabaseLease(_ name: String) {
+    /// `startContainers` holds one for its duration; `ensureDatabaseContainer`
+    /// holds one across the "is it up? / boot it" step itself.
+    ///
+    /// Also takes the cross-process `.shared` lock, which is what makes a
+    /// retirement in ANOTHER process wait (or, if it can't wait, decline to
+    /// retire). Waiting here is bounded by
+    /// `DatabaseLifecycleLock.dependentTimeout`; when it expires we take the
+    /// lease anyway and proceed WITHOUT cross-process protection — degrading to
+    /// exactly the pre-lock behaviour. Failing a start outright because a lock
+    /// file was busy would be a worse outcome than the narrow race it prevents,
+    /// and the race still fails loudly and retryably
+    /// (`sharedDatabaseUnavailable`) rather than silently.
+    public func acquireDatabaseLease(_ name: String) async {
         dbLeases[name, default: 0] += 1
+        if let lock = await FileLock.acquire(at: DatabaseLifecycleLock.url(forContainer: name),
+                                             mode: .shared,
+                                             timeout: DatabaseLifecycleLock.dependentTimeout) {
+            dbLeaseLocks[name, default: []].append(lock)
+        } else {
+            Self.log.warning("db-lease: proceeding without the cross-process lock for \(name, privacy: .public)")
+        }
     }
 
+    /// Synchronous on purpose so it can sit in a `defer` (which cannot `await`).
     public func releaseDatabaseLease(_ name: String) {
+        if let lock = dbLeaseLocks[name]?.popLast() {
+            lock.release()
+            if dbLeaseLocks[name]?.isEmpty == true { dbLeaseLocks.removeValue(forKey: name) }
+        }
         guard let count = dbLeases[name] else { return }
         if count <= 1 { dbLeases.removeValue(forKey: name) } else { dbLeases[name] = count - 1 }
     }
@@ -183,8 +218,11 @@ public actor SiteLifecycle {
         // Nothing may retire this DB container while we're mid-start (issue #17):
         // until the `container run` below lands there is no wp container for
         // `container list` to see, so a concurrent env stop would otherwise
-        // conclude the server is unused and pull it out from under us.
-        acquireDatabaseLease(inst.dbContainerName)
+        // conclude the server is unused and pull it out from under us. The lease
+        // covers the OTHER processes too (cross-process `.shared` flock), so a
+        // CLI one-shot or the app's idle sweep cannot retire it mid-start
+        // either.
+        await acquireDatabaseLease(inst.dbContainerName)
         defer { releaseDatabaseLease(inst.dbContainerName) }
         do {
             try SiteFolders.ensure(for: inst)
@@ -350,6 +388,16 @@ public actor SiteLifecycle {
     /// container isn't already up.
     private func ensureDatabaseContainer(named name: String, owner: (any RunnableInstance)?) async throws {
         if let inFlight = dbBoots[name] { return try await inFlight.value }
+        // The "is it running? / boot it" decision below is the one step that MUST
+        // be serialised against a retirement in another process: observing
+        // `isRunning` and then not booting is only sound while nobody may stop
+        // the container in between. The lease's `.shared` flock provides exactly
+        // that, and it is taken here (rather than relying on the caller's lease)
+        // so `prepareDatabaseHost` — the worktree-create entry point — is covered
+        // by the same guarantee as `startContainers`. Leases are refcounted, so
+        // nesting inside a caller's lease is free.
+        await acquireDatabaseLease(name)
+        defer { releaseDatabaseLease(name) }
         let task = Task<Void, Error> { [cli] in
             let existing = try await cli.inspect(name).first
             if let existing, existing.isRunning { return }
@@ -647,13 +695,37 @@ public actor SiteLifecycle {
         // old DB IP baked in at `container run` time and cannot pick up a new
         // one. `stopSiteWithEnvs` stops envs BEFORE the parent, so a genuine
         // whole-family stop still takes the server down.
+        //
+        // The dependent check and the stop are made atomic ACROSS PROCESSES by
+        // the same exclusive lock `stopSharedDatabaseIfUnused` uses — otherwise
+        // a CLI one-shot starting an env in another process between the two
+        // loses its server exactly as it did before that lock existed. Held only
+        // when this stop might really take the DB container down, and released
+        // the moment the stops have been issued (the verify pass below polls for
+        // seconds and must not starve concurrent starts).
+        //
+        // FAILS OPEN, unlike the retirement path: somebody asked for this site
+        // to stop, and refusing because a lock file was busy would be worse than
+        // the narrow race it prevents. The in-process lease check and the fresh
+        // container listing still apply either way.
+        var dbLock: FileLock?
         if inst.ownsDatabaseContainer {
             // `||` can't short-circuit across an `await`, so spell it out: the
             // lease check is free, the container listing is not.
             var keepDatabase = isDatabaseLeased(inst.dbContainerName)
-            if !keepDatabase { keepDatabase = await hasRunningSharedDatabaseDependents(inst) }
-            if keepDatabase { names.removeAll { $0 == inst.dbContainerName } }
+            if !keepDatabase {
+                dbLock = await FileLock.acquire(at: DatabaseLifecycleLock.url(forContainer: inst.dbContainerName),
+                                                mode: .exclusive,
+                                                timeout: DatabaseLifecycleLock.retirementTimeout)
+                keepDatabase = await hasRunningSharedDatabaseDependents(inst)
+            }
+            if keepDatabase {
+                names.removeAll { $0 == inst.dbContainerName }
+                dbLock?.release() // nothing left to protect
+                dbLock = nil
+            }
         }
+        defer { dbLock?.release() } // backstop; `release()` is idempotent
         var problems: [String] = []
         await withTaskGroup(of: String?.self) { group in
             for name in names {
@@ -674,6 +746,7 @@ public actor SiteLifecycle {
                 if let problem { problems.append(problem) }
             }
         }
+        dbLock?.release() // the stops are issued; the verify pass needs no lock
         if verify { problems.append(contentsOf: await verifyTeardown(of: names)) }
         if !problems.isEmpty {
             for problem in problems { Self.log.error("stop: \(problem, privacy: .public)") }
@@ -816,35 +889,69 @@ public actor SiteLifecycle {
     /// Returns whether it actually stopped the container, so a caller can drain
     /// the parent's warnings only when this is the flow that produced them.
     ///
-    /// CROSS-PROCESS EXPOSURE (unresolved, by decision): the dependent check and
-    /// the stop cannot be one atomic operation. The listing is re-read immediately
-    /// before the stop to shrink the window as far as a `container` CLI without a
-    /// transactional API allows, but a second `wp-container` process (or the app)
-    /// that starts a shared-database env in the few milliseconds between the last
-    /// check and the stop can still lose its server. `dbLeases` closes this within
-    /// ONE process; closing it across processes would need a cross-process lock
-    /// around whole lifecycle operations, which is deliberately not attempted. The
-    /// blast radius is one failed start with a clear
-    /// `sharedDatabaseUnavailable` error and a retry that works.
+    /// CROSS-PROCESS ATOMICITY: the dependent re-check and the `container stop`
+    /// run while this process holds the EXCLUSIVE `db-<container>.lock` (see
+    /// `DatabaseLifecycleLock`), and every dependant — `startContainers`,
+    /// `ensureDatabaseContainer`, `WorktreeEnvService.create`'s shared-database
+    /// section — holds the same lock `.shared` for as long as it depends on the
+    /// server. A start in another process therefore either finishes before this
+    /// re-check (and is then visible to it, so nothing is stopped) or waits for
+    /// the stop and boots a fresh server. The window that used to fail a
+    /// concurrent start with "Error establishing a database connection" is
+    /// closed. Fail-closed throughout: an unavailable or busy lock means the
+    /// container is simply left running.
+    ///
+    /// RESIDUAL RISK, deliberately accepted:
+    /// * a dependant whose lock wait timed out (`dependentTimeout`) proceeds
+    ///   unlocked and is back to the old race — only reachable when something is
+    ///   wedged for seconds, and it still fails loudly and retryably;
+    /// * the verify/escalate pass runs AFTER the lock is released, on purpose:
+    ///   it polls for seconds and would otherwise starve every concurrent start.
+    ///   It already refuses to touch a container that came back `running`, which
+    ///   is precisely the "somebody else restarted it" case.
     @discardableResult
     public func stopSharedDatabaseIfUnused(parent: Site) async -> Bool {
+        // Cheap pre-checks before reaching for the lock — most calls (an env
+        // stop while the parent site is up) end here without any file I/O.
         // In-flight starts/creates are invisible to `container list`.
         guard !isDatabaseLeased(parent.dbContainerName) else { return false }
         guard await isSharedDatabaseRetirable(parent) else { return false }
-        // Re-check on the freshest possible listing: everything above may have
-        // been true several hundred milliseconds ago, and an env that started in
-        // the meantime must not lose its database.
-        guard !isDatabaseLeased(parent.dbContainerName) else { return false }
-        guard await isSharedDatabaseRetirable(parent) else { return false }
-        _ = try? await cli.run(SiteRecipe.stopArgs(parent.dbContainerName))
+        // A busy lock means some process is starting something on this server:
+        // fail closed and leave it running (the next idle sweep retries).
+        guard let lock = await FileLock.acquire(at: DatabaseLifecycleLock.url(forContainer: parent.dbContainerName),
+                                                mode: .exclusive,
+                                                timeout: DatabaseLifecycleLock.retirementTimeout) else {
+            Self.log.info("db-retire: \(parent.dbContainerName, privacy: .public) is in use by another process — leaving it running")
+            return false
+        }
+        // Backstop for every exit path below; `release()` is idempotent so the
+        // explicit early release stays the normal path.
+        defer { lock.release() }
+        let stopped = await stopSharedDatabaseLocked(parent: parent)
+        lock.release()
+        guard stopped else { return false }
         // Same verify/escalate pass as `stopCore` (issue #16): a DB VM that
         // survives its `stop` is ~470 MB of exactly the memory this retirement
-        // exists to reclaim.
+        // exists to reclaim. Deliberately OUTSIDE the lock (see above).
         let problems = await verifyTeardown(of: [parent.dbContainerName])
         if !problems.isEmpty {
             for problem in problems { Self.log.error("stop: \(problem, privacy: .public)") }
             recordWarnings(problems, for: parent.instanceID)
         }
+        return true
+    }
+
+    /// The atomic part of `stopSharedDatabaseIfUnused`: re-check, then stop.
+    /// MUST be called with the exclusive DB lifecycle lock held — that is what
+    /// makes the re-check meaningful. Returns whether the stop was issued.
+    ///
+    /// The re-check is not redundant with the caller's pre-checks: those ran
+    /// before the lock existed, possibly hundreds of milliseconds and one
+    /// `container list` ago, and a start that slipped in since must be seen.
+    private func stopSharedDatabaseLocked(parent: Site) async -> Bool {
+        guard !isDatabaseLeased(parent.dbContainerName) else { return false }
+        guard await isSharedDatabaseRetirable(parent) else { return false }
+        _ = try? await cli.run(SiteRecipe.stopArgs(parent.dbContainerName))
         return true
     }
 

@@ -166,6 +166,25 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: "WP Container Hosts Helper"
         SKIP_INSTALL: "YES"
 
+  # Pure-logic unit tests for the cross-process DB lifecycle lock. Compiles the
+  # one source file under test directly (it depends on nothing but Foundation),
+  # so the suite needs neither the kit nor a test host — and, because `flock` is
+  # per open file DESCRIPTION, two locks taken in this one process contend
+  # exactly the way two `wp-container` processes do.
+  WPContainerKitTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: WPContainerKitTests
+      - path: WPContainerKit/Services/DatabaseLifecycleLock.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.fabiankaegy.wpcontainer.kittests
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        GENERATE_INFOPLIST_FILE: "YES"
+
   # Pure-logic unit tests for the helper's security boundary. Compiles the
   # helper's own validation/rewrite source (and the shared contract) directly so
   # tests exercise the exact code the daemon runs. No test host needed.
@@ -216,3 +235,10 @@ schemes:
     test:
       targets:
         - HostsHelperTests
+  WPContainerKitTests:
+    build:
+      targets:
+        WPContainerKitTests: all
+    test:
+      targets:
+        - WPContainerKitTests
