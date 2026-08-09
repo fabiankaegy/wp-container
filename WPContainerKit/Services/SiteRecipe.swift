@@ -533,8 +533,18 @@ public enum SiteRecipe {
 
     /// `wp search-replace <source> <target> --all-tables --precise` — the URL
     /// migration step.
-    public static func wpSearchReplaceArgs(_ inst: any RunnableInstance, dbHost: String, source: String, target: String) -> [String] {
-        wpProxyArgs(inst, dbHost: dbHost, wpArgs: ["search-replace", source, target, "--all-tables", "--precise"])
+    ///
+    /// - `network`: adds `--network`. Only ever pass true for a multisite
+    ///   install; wp-cli errors out on a single site.
+    /// - `dryRun`: report the counts without writing anything. The summary line
+    ///   changes wording too (`… to be made`), which
+    ///   `EnvURLMigration.parseReplacementCount` accounts for.
+    public static func wpSearchReplaceArgs(_ inst: any RunnableInstance, dbHost: String, source: String, target: String,
+                                           network: Bool = false, dryRun: Bool = false) -> [String] {
+        var wpArgs = ["search-replace", source, target, "--all-tables", "--precise"]
+        if network { wpArgs.append("--network") }
+        if dryRun { wpArgs.append("--dry-run") }
+        return wpProxyArgs(inst, dbHost: dbHost, wpArgs: wpArgs)
     }
 
     /// `wp db query "<sql>"` — arbitrary parameterized-by-string SQL (the scrub
