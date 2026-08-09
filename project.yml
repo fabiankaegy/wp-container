@@ -112,6 +112,13 @@ targets:
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.developer-tools"
         INFOPLIST_KEY_LSMinimumSystemVersion: "26.0"
         INFOPLIST_KEY_CFBundleDisplayName: "WP Container"
+        # Without this key macOS Local Network Privacy denies the app EVERY
+        # outbound connection to the container vmnet bridge (192.168.64.0/24) —
+        # NWConnection reports `unsatisfied (Local network prohibited)` and
+        # URLSession fails with NSURLErrorNotConnectedToInternet. That is the
+        # proxy's only upstream for a worktree env, so the app served a 502 for
+        # every env and every wake timed out (v0.2.0 regression).
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "WP Container connects to your local WordPress containers on the container network to serve their sites in your browser."
         INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Fabian Kaegy. All rights reserved."
         COMBINE_HIDPI_IMAGES: "YES"
 
