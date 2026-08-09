@@ -433,7 +433,7 @@ public actor DatabaseImportService {
         let primaryOutput = try await cli.run(SiteRecipe.wpSearchReplaceArgs(site, dbHost: dbHost, source: sourceURL, target: localURL))
         var total = 0
         var anyParsed = false
-        if let count = Self.parseReplacementCount(primaryOutput) {
+        if let count = EnvURLMigration.parseReplacementCount(primaryOutput) {
             total += count
             anyParsed = true
         }
@@ -447,7 +447,7 @@ public actor DatabaseImportService {
             let tgtRelative = "//\(tgtHost)" + (tgtPort.map { ":\($0)" } ?? "")
             if srcRelative != tgtRelative {
                 if let out = try? await cli.run(SiteRecipe.wpSearchReplaceArgs(site, dbHost: dbHost, source: srcRelative, target: tgtRelative)),
-                   let count = Self.parseReplacementCount(out) {
+                   let count = EnvURLMigration.parseReplacementCount(out) {
                     total += count
                     anyParsed = true
                 }
@@ -456,7 +456,7 @@ public actor DatabaseImportService {
             let tgtBareHost = String(tgtRelative.dropFirst(2))
             if srcBareHost != tgtBareHost, srcBareHost != sourceURL {
                 if let out = try? await cli.run(SiteRecipe.wpSearchReplaceArgs(site, dbHost: dbHost, source: srcBareHost, target: tgtBareHost)),
-                   let count = Self.parseReplacementCount(out) {
+                   let count = EnvURLMigration.parseReplacementCount(out) {
                     total += count
                     anyParsed = true
                 }
@@ -469,14 +469,6 @@ public actor DatabaseImportService {
         try await cli.run(SiteRecipe.wpSetURLsArgs(site, dbHost: dbHost, url: localURL))
 
         return (sourceURL, localURL, anyParsed ? total : nil)
-    }
-
-    private static func parseReplacementCount(_ output: String) -> Int? {
-        let pattern = #"Made\s+(\d+)\s+replacements?"#
-        guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
-        let ns = output as NSString
-        guard let m = re.firstMatch(in: output, range: NSRange(location: 0, length: ns.length)) else { return nil }
-        return Int(ns.substring(with: m.range(at: 1)))
     }
 
     // MARK: - Scrub
