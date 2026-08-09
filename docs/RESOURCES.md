@@ -60,9 +60,14 @@ since it now serves a whole family of environments.
 Because a running idle VM can't give memory back, and because VM boot is ~1s,
 WP Container stops what nobody is using and starts it again when someone asks.
 
-**Branch environments: on by default, 15 minutes. Sites: off by default.** The
-asymmetry is about what can be *observed*, not about which matters more — see
-the next section.
+**Branch environments: on by default, 180 minutes (3 hours). Sites: off by
+default.** The asymmetry is about what can be *observed*, not about which
+matters more — see the next section.
+
+- **Fresh environments get a 6-hour grace period.** For the first 6 hours after
+  creation, an environment is never idle-stopped regardless of traffic — it's
+  presumed part of the work session that created it. The 3-hour timeout only
+  starts to matter once that window has passed.
 
 - **Who enforces it:** the reverse proxy — it sees every request it routes, so it
   knows when each site/environment was last reached through it. It runs either
@@ -128,11 +133,11 @@ wp-container idle <slug>                 # report (site or env slug)
 wp-container idle <slug> --minutes 15    # stop after 15 idle minutes
 wp-container idle <slug> --off           # never auto-stop
 wp-container idle <slug> --default       # back to the built-in default
-                                         # (environments 15 min, sites off)
+                                         # (environments 180 min, sites off)
 ```
 
 …or in the app: **Idle stop** on a site's Settings tab, and on an environment's
-detail pane (Default / Never / 15 (recommended) / 5 / 30 / 60 min). The setting
+detail pane (Default / Never / 3 hours (recommended) / 15 / 30 / 60 min). The setting
 is stored per instance in `sites.json`, not in app preferences, precisely so a
 headless proxy enforces the same policy.
 
@@ -192,7 +197,7 @@ Rule of thumb: a plain running site settles around **0.5–1.5 GB** of real
 host memory; add ~0.7–1 GB for Elasticsearch. With auto-stop-when-idle (on by
 default for branch environments), what counts toward these numbers is what you've
 *touched recently* rather than what exists, so a fleet of 30 branch environments
-costs whatever the handful you actually used in the last 15 minutes cost.
+costs whatever the handful you actually used in the last 3 hours cost.
 
 ## CPU
 
