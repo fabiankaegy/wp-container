@@ -267,7 +267,7 @@ enum MCPToolDispatch {
             // Auto-stop-when-idle (issue #16). `idleStopMinutes` is the persisted
             // setting (null = follow the default), `effectiveIdleStopMinutes` the
             // timeout actually in force with the default resolved — 0 means the
-            // site is never auto-stopped. Sites default to off; envs to 15 min.
+            // site is never auto-stopped. Sites default to off; envs to 180 min.
             "idleStopMinutes": site.idleStopMinutes as Any? ?? NSNull(),
             "effectiveIdleStopMinutes": site.effectiveIdleStopMinutes,
             // Read off the instance rather than the `SiteRecipe` constants (#17).

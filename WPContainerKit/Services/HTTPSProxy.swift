@@ -919,8 +919,8 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// proxy headlessly.
     ///
     /// Its own 30s cadence rather than the 3s IP-refresh loop: the sweep costs a
-    /// store load plus a `container list`, and a 30s granularity on a 15-minute
-    /// timeout is irrelevant.
+    /// store load plus a `container list`, and a 30s granularity on a
+    /// 180-minute timeout is irrelevant.
     private func startIdleLoop() {
         guard lifecycle != nil, idleTask == nil else { return }
         idleTask = Task { [weak self] in
@@ -969,13 +969,21 @@ public final class HTTPSProxy: @unchecked Sendable {
             // The case this protects is the transition: an env container still
             // running from a build that published its own port keeps serving
             // through the forwarder, invisible to us — and it defaults to a
-            // 15-minute timeout it never asked for. Stopping it while somebody
+            // 180-minute timeout it never asked for. Stopping it while somebody
             // browsed it would be exactly the bug that made this feature opt-in in
             // the first place. Skipping costs nothing: restart that env once and
             // the proxy takes the socket, from which point the clock is honest.
             guard ownsLoopbackPort(env.port) else { continue }
             let timeout = env.effectiveIdleStopMinutes
             guard timeout > 0 else { continue }
+            // A freshly created env still on the built-in DEFAULT is exempt for
+            // its first `envCreationGraceMinutes` regardless of traffic — it is
+            // presumed part of an active work session. An env with an EXPLICIT
+            // timeout (`idleStopMinutes != nil`) opted out of that judgment call
+            // already, so the grace window never applies to it — see
+            // `IdlePolicy.isExemptFromIdleStop`.
+            guard !IdlePolicy.isExemptFromIdleStop(configured: env.idleStopMinutes, createdAt: env.createdAt, now: now)
+            else { continue }
             guard idleMinutes(of: env.envSlug, persisted: env.lastActivityAt, now: now) >= Double(timeout) else { continue }
             guard !isWaking(env.envSlug), !(await lifecycle.isBusy(env.id)) else { continue }
             Self.log.info("idle-stop: env \(env.envSlug, privacy: .public) idle for \(timeout, privacy: .public)+ min")
