@@ -79,6 +79,10 @@ struct DBImportCommand: AsyncParsableCommand {
                 throw CLIErrorJSON("unsupported_target",
                                     detail: "db import supports sites only (not worktree environments) in this version.")
             }
+            // A long-running import against an idle-stop-enabled site must not
+            // get swept mid-import — count it as activity up front (issue #16),
+            // mirroring `wp`/`login`/the MCP dispatcher's stamp-before-work.
+            await ctx.persistence.recordActivity(instanceID: siteRecord.id)
 
             let mediaOption: DBImportMediaOption
             switch media {
