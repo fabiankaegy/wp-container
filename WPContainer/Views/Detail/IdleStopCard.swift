@@ -7,7 +7,7 @@ import WPContainerKit
 /// trade is memory for a moment of latency.
 ///
 /// Follows `ResourcesCard`'s Default/override shape — the picker's "Default"
-/// state persists `nil`, which resolves to 15 minutes for an environment (whose
+/// state persists `nil`, which resolves to 3 hours for an environment (whose
 /// every request the proxy sees) and to OFF for a site. The card states plainly
 /// what the idle clock can and cannot see, because a site you only ever reach at
 /// `127.0.0.1:<port>` would look like a bug rather than a limitation (see
@@ -76,7 +76,8 @@ struct IdleStopCard: View {
                         // `selectableMinutes` leads with the recommended value.
                         ForEach(IdlePolicy.selectableMinutes, id: \.self) { minutes in
                             Text(minutes == IdlePolicy.recommendedMinutes
-                                 ? "\(minutes) min (recommended)" : "\(minutes) min")
+                                 ? "\(IdlePolicy.formatMinutes(minutes)) (recommended)"
+                                 : IdlePolicy.formatMinutes(minutes))
                                 .tag(Int?.some(minutes))
                         }
                     }
@@ -98,12 +99,12 @@ struct IdleStopCard: View {
 
     private var defaultLabel: String {
         let fallback = IdlePolicy.effectiveMinutes(configured: nil, isEnv: isEnv)
-        return fallback == 0 ? "Default (never)" : "Default (\(fallback) min)"
+        return fallback == 0 ? "Default (never)" : "Default (\(IdlePolicy.formatMinutes(fallback)))"
     }
 
     private var detailText: String {
         if isEnv {
-            return "On by default (\(IdlePolicy.defaultEnvMinutes) minutes). An environment nobody is using gives its ~500 MB back, and the next request to its URL starts it again in about a second behind a page that refreshes into the site."
+            return "On by default (\(IdlePolicy.formatMinutes(IdlePolicy.defaultEnvMinutes))). While on that default, a freshly created environment is never stopped for its first \(IdlePolicy.formatMinutes(IdlePolicy.envCreationGraceMinutes)) regardless of use — pick an explicit value below to opt out of that grace period too. After it applies, one nobody is using gives its ~500 MB back, and the next request to its URL starts it again in about a second behind a page that refreshes into the site."
         }
         return "Off by default — you’re usually working in a site. When on, it is never stopped while any of its environments are running, and opening its proxied URL starts it again."
     }

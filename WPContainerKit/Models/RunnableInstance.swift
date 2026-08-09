@@ -63,7 +63,7 @@ public protocol RunnableInstance: Sendable {
     /// Per-instance auto-stop-when-idle timeout in MINUTES (issue #16).
     ///
     /// `nil` = follow the built-in default for this kind of instance, resolved by
-    /// `IdlePolicy.effectiveMinutes(configured:isEnv:)` (15 minutes for an env,
+    /// `IdlePolicy.effectiveMinutes(configured:isEnv:)` (180 minutes for an env,
     /// OFF for a site — see `IdlePolicy` for why they differ); `0` =
     /// explicitly disabled; `> 0` = stop the instance after that many idle
     /// minutes. Enforced by whichever process hosts the HTTPS proxy, which is

@@ -212,6 +212,23 @@ targets:
         SWIFT_STRICT_CONCURRENCY: minimal
         GENERATE_INFOPLIST_FILE: "YES"
 
+  # Unit tests for the models/policy layer of WPContainerKit — pure logic, no
+  # `container` CLI or filesystem access needed (issue #16 idle-policy tuning).
+  WPContainerKitTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: WPContainerKitTests
+    dependencies:
+      - target: WPContainerKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.fabiankaegy.wpcontainer.wpcontainerkittests
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        GENERATE_INFOPLIST_FILE: "YES"
+
 schemes:
   WPContainer:
     build:

@@ -34,11 +34,15 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
     public var cpuLimit: Int?
     public var memoryLimitMB: Int?
     /// Optional per-env auto-stop-when-idle timeout in minutes (issue #16).
-    /// nil = the built-in default (`IdlePolicy.defaultEnvMinutes`, 15 minutes —
+    /// nil = the built-in default (`IdlePolicy.defaultEnvMinutes`, 180 minutes —
     /// envs are the many-of-them case this exists for, and the proxy owns their
     /// port so every request to them is observed); 0 = explicitly off;
     /// > 0 = stop after that many idle minutes. Deliberately NOT inherited from
-    /// the parent site, whose own default is off.
+    /// the parent site, whose own default is off. A freshly created env that is
+    /// still `nil` (on the default) is additionally exempt from idle-stop for
+    /// its first `IdlePolicy.envCreationGraceMinutes`, measured from
+    /// `createdAt` — an EXPLICIT value here (this field non-nil) always wins
+    /// over that grace period too, see `IdlePolicy.isExemptFromIdleStop`.
     public var idleStopMinutes: Int?
     /// Last time any process observed deliberate use of this env (issue #16) —
     /// wp-cli, an MCP tool call, a magic-login link, or an explicit start. This is
@@ -146,7 +150,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         self.cpuLimit = try? c.decodeIfPresent(Int.self, forKey: .cpuLimit)
         self.memoryLimitMB = try? c.decodeIfPresent(Int.self, forKey: .memoryLimitMB)
         // Absent in envs written before issue #16 — nil means "use the default",
-        // which for an env is 15 minutes (see `IdlePolicy`). Safe for an existing
+        // which for an env is 180 minutes (see `IdlePolicy`). Safe for an existing
         // record: an env's advertised URL now runs through the proxy, so the idle
         // clock sees browser traffic to it, and the next request wakes it.
         self.idleStopMinutes = try? c.decodeIfPresent(Int.self, forKey: .idleStopMinutes)
