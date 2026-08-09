@@ -68,7 +68,12 @@ struct MainWindow: View {
                     .strokeBorder(Theme.panelBorder, lineWidth: 1)
             )
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(alignment: .top) { errorBanner }
+            .overlay(alignment: .top) {
+                VStack(spacing: 0) {
+                    localNetworkBanner
+                    errorBanner
+                }
+            }
             .shadow(color: .black.opacity(0.28), radius: 12, y: 3)
     }
 
@@ -98,6 +103,41 @@ struct MainWindow: View {
             // which otherwise strands this placeholder at the very top. Expanding
             // to fill makes the placeholder own the whole panel and center within.
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    /// macOS is refusing this app's connections to the container network, so every
+    /// site and environment is unreachable. Deliberately NOT dismissible: it is a
+    /// TCC decision, nothing in this app can clear it, and it disappears by itself
+    /// within one reconcile tick of the user granting access.
+    @ViewBuilder
+    private var localNetworkBanner: some View {
+        if vm.localNetworkDenied {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "network.slash")
+                    .foregroundStyle(.red)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("WP Container needs Local Network access")
+                        .font(.callout.weight(.medium))
+                    Text("macOS is blocking WP Container from reaching your containers, so sites and environments can’t load. Enable WP Container under Privacy & Security → Local Network.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                Button("Open System Settings") { vm.openLocalNetworkSettings() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+            }
+            .padding(12)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(.red.opacity(0.4), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
+            .padding(16)
+            .transition(.move(edge: .top).combined(with: .opacity))
         }
     }
 

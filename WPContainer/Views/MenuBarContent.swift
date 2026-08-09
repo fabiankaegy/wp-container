@@ -17,6 +17,12 @@ struct MenuBarContent: View {
         VStack(spacing: 0) {
             header
             Divider()
+            // The menu bar is the only surface when the main window is closed, and
+            // while this is true nothing in the list below can be opened at all.
+            if vm.localNetworkDenied {
+                localNetworkWarning
+                Divider()
+            }
             if vm.sites.isEmpty {
                 emptyState
             } else if rowCount <= 9 {
@@ -94,6 +100,22 @@ struct MenuBarContent: View {
             Text("\(running)/\(vm.sites.count) running")
                 .font(.caption).foregroundStyle(.secondary)
         }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+    }
+
+    private var localNetworkWarning: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label("Local Network access is off", systemImage: "network.slash")
+                .font(.callout.weight(.medium))
+                .foregroundStyle(.red)
+            Text("macOS is blocking WP Container from reaching your containers, so no site will load.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Open System Settings…") { vm.openLocalNetworkSettings() }
+                .buttonStyle(.link)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12).padding(.vertical, 8)
     }
 
