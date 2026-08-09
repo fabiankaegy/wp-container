@@ -854,10 +854,14 @@ public final class HTTPSProxy: @unchecked Sendable {
             guard ownsLoopbackPort(env.port) else { continue }
             let timeout = env.effectiveIdleStopMinutes
             guard timeout > 0 else { continue }
-            // A freshly created env is exempt for its first
-            // `envCreationGraceMinutes` regardless of traffic — it is presumed
-            // part of an active work session (see `IdlePolicy.envCreationGraceMinutes`).
-            guard !IdlePolicy.isWithinCreationGrace(createdAt: env.createdAt, now: now) else { continue }
+            // A freshly created env still on the built-in DEFAULT is exempt for
+            // its first `envCreationGraceMinutes` regardless of traffic — it is
+            // presumed part of an active work session. An env with an EXPLICIT
+            // timeout (`idleStopMinutes != nil`) opted out of that judgment call
+            // already, so the grace window never applies to it — see
+            // `IdlePolicy.isExemptFromIdleStop`.
+            guard !IdlePolicy.isExemptFromIdleStop(configured: env.idleStopMinutes, createdAt: env.createdAt, now: now)
+            else { continue }
             guard idleMinutes(of: env.envSlug, persisted: env.lastActivityAt, now: now) >= Double(timeout) else { continue }
             guard !isWaking(env.envSlug), !(await lifecycle.isBusy(env.id)) else { continue }
             Self.log.info("idle-stop: env \(env.envSlug, privacy: .public) idle for \(timeout, privacy: .public)+ min")

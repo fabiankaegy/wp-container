@@ -64,10 +64,14 @@ WP Container stops what nobody is using and starts it again when someone asks.
 default.** The asymmetry is about what can be *observed*, not about which
 matters more — see the next section.
 
-- **Fresh environments get a 6-hour grace period.** For the first 6 hours after
-  creation, an environment is never idle-stopped regardless of traffic — it's
+- **Fresh environments on the default get a 6-hour grace period.** For the
+  first 6 hours after creation, an environment still following the built-in
+  180-minute default is never idle-stopped regardless of traffic — it's
   presumed part of the work session that created it. The 3-hour timeout only
-  starts to matter once that window has passed.
+  starts to matter once that window has passed. An environment with an
+  EXPLICIT timeout (`wp-container idle <env> --minutes 15`, or any other
+  configured value) skips the grace period entirely: an explicit override
+  always wins, the same as it wins over the default.
 
 - **Who enforces it:** the reverse proxy — it sees every request it routes, so it
   knows when each site/environment was last reached through it. It runs either

@@ -219,8 +219,10 @@ struct IdleCommand: AsyncParsableCommand {
         "waking up" page that refreshes into the live site.
 
         ENVIRONMENTS: on by default, 3 hours (180 minutes). A freshly created \
-        environment is never auto-stopped for its first 6 hours regardless of \
-        use. An environment's container publishes no port of its own — the \
+        environment still on that default is never auto-stopped for its first \
+        6 hours regardless of use — pass --minutes or --off to opt out of the \
+        grace period too, since an explicit value always wins immediately. An \
+        environment's container publishes no port of its own — the \
         proxy owns its http://127.0.0.1:<port> URL — so every request to it \
         counts as activity, and a parked environment wakes at that same URL. \
         So do wp-cli, MCP tool calls and magic-login links.

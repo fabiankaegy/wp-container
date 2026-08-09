@@ -129,10 +129,13 @@ Sites are provisioned automatically (no install wizard) and log in with
 - **Auto-stop idle, wake on request** — a branch environment nobody has used for
   3 hours is stopped and its ~500 MB returned to macOS; the next request to its
   URL starts it again behind a "waking up" page that refreshes into the live site.
-  A freshly created environment gets a further 6-hour grace period during which
-  it is never auto-stopped regardless of use. On by default for environments,
-  opt-in for sites. `wp-container idle <slug>`, the Idle stop card, or the
-  `set_idle_stop` MCP tool — see [docs/RESOURCES.md](docs/RESOURCES.md).
+  A freshly created environment still on that default gets a further 6-hour
+  grace period during which it is never auto-stopped regardless of use — an
+  explicit timeout (`wp-container idle <env> --minutes N`) always wins over
+  the grace period, exactly like it wins over the default itself. On by
+  default for environments, opt-in for sites. `wp-container idle <slug>`, the
+  Idle stop card, or the `set_idle_stop` MCP tool — see
+  [docs/RESOURCES.md](docs/RESOURCES.md).
 - **Touch ID for privileged actions** — the optional signed hosts-helper
   makes custom-domain changes a Touch ID dialog instead of a password prompt
   (one-time enable in Settings → General).

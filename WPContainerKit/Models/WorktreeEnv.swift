@@ -38,9 +38,11 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
     /// envs are the many-of-them case this exists for, and the proxy owns their
     /// port so every request to them is observed); 0 = explicitly off;
     /// > 0 = stop after that many idle minutes. Deliberately NOT inherited from
-    /// the parent site, whose own default is off. A freshly created env is
-    /// additionally exempt from this timeout for its first
-    /// `IdlePolicy.envCreationGraceMinutes`, measured from `createdAt`.
+    /// the parent site, whose own default is off. A freshly created env that is
+    /// still `nil` (on the default) is additionally exempt from idle-stop for
+    /// its first `IdlePolicy.envCreationGraceMinutes`, measured from
+    /// `createdAt` — an EXPLICIT value here (this field non-nil) always wins
+    /// over that grace period too, see `IdlePolicy.isExemptFromIdleStop`.
     public var idleStopMinutes: Int?
     /// Last time any process observed deliberate use of this env (issue #16) —
     /// wp-cli, an MCP tool call, a magic-login link, or an explicit start. This is

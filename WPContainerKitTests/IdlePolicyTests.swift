@@ -66,6 +66,33 @@ final class IdlePolicyTests: XCTestCase {
         XCTAssertTrue(IdlePolicy.isWithinCreationGrace(createdAt: createdAt, now: now))
     }
 
+    // MARK: - isExemptFromIdleStop: explicit overrides always beat the grace window
+
+    /// The regression this guards: the sweep's grace-window guard must key off
+    /// `configured`, not just age — an env with an EXPLICIT timeout opted out of
+    /// the default's judgment call already, so it must never get the day-one
+    /// exemption a default env gets.
+    func testDefaultEnvIsExemptDuringGraceWindow() {
+        let now = Date()
+        let createdAt = now.addingTimeInterval(-60) // created 1 minute ago
+        XCTAssertTrue(IdlePolicy.isExemptFromIdleStop(configured: nil, createdAt: createdAt, now: now))
+    }
+
+    func testExplicitOverrideIsNeverExemptFromTheGraceCheck() {
+        let now = Date()
+        let createdAt = now.addingTimeInterval(-60) // created 1 minute ago — well within grace
+        XCTAssertFalse(IdlePolicy.isExemptFromIdleStop(configured: 15, createdAt: createdAt, now: now))
+        // Even an explicit "off" (0) isn't grace-exempt — it just never reaches
+        // this check in the sweep because `timeout > 0` short-circuits first.
+        XCTAssertFalse(IdlePolicy.isExemptFromIdleStop(configured: 0, createdAt: createdAt, now: now))
+    }
+
+    func testDefaultEnvExemptionEndsAfterTheGraceWindow() {
+        let now = Date()
+        let createdAt = now.addingTimeInterval(-Double(IdlePolicy.envCreationGraceMinutes + 1) * 60)
+        XCTAssertFalse(IdlePolicy.isExemptFromIdleStop(configured: nil, createdAt: createdAt, now: now))
+    }
+
     // MARK: - formatMinutes
 
     func testFormatMinutesRendersWholeHours() {
