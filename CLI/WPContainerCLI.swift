@@ -297,6 +297,16 @@ struct StartCommand: AsyncParsableCommand {
                 // #16). Wake-triggered starts deliberately do NOT stamp — that
                 // would let the sweep extend its own deadline.
                 await ctx.persistence.recordActivity(instanceID: site.id)
+                // A plain `start` (no fan-out) on an already-running site used to
+                // fall through to `container run` and surface its raw "already
+                // exists" error; make it the no-op it should be instead. With
+                // --with-envs there may still be envs to start, so let the
+                // (now idempotent) coupled start run regardless.
+                if !withEnvs, await ctx.lifecycle.isWPContainerRunning(site) {
+                    if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(target) already running"))) }
+                    else { emitLine("\(target) is already running.") }
+                    return
+                }
                 // Env fan-out is opt-in (issue #18) — an empty envs list makes
                 // `startSiteWithEnvs` start only the parent, reusing the same
                 // claim/warning/image-prefetch plumbing.
@@ -332,6 +342,14 @@ struct StartCommand: AsyncParsableCommand {
                 // borrows when the parent site is down (issue #17).
                 let parent = envelope.sites.first { $0.id == env.parentSiteID }
                 await ctx.persistence.recordActivity(instanceID: env.id)
+                // Same no-op as the site branch above: `start` on an env that's
+                // already up must succeed quietly, not surface `container run`'s
+                // "already exists" error.
+                if await ctx.lifecycle.isWPContainerRunning(env) {
+                    if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(target) already running"))) }
+                    else { emitLine("\(target) is already running.") }
+                    return
+                }
                 _ = try await ctx.lifecycle.startInstance(env, pullPolicy: policy, dbProvider: parent)
                 for warning in await ctx.lifecycle.drainWarnings(for: env.id) {
                     FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
