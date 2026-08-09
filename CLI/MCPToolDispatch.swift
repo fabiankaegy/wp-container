@@ -118,9 +118,29 @@ enum MCPToolDispatch {
         return site
     }
 
+    /// Resolve `inst`'s db-container IP, waking it first if its wp container
+    /// isn't running. Before this, only HTTP through the proxy woke an idle-
+    /// stopped instance — `wp_cli`/`login_link`/`create_user` talk to the
+    /// container directly and used to hard-fail with "not running" instead.
+    /// Reuses `SiteLifecycle.startSite`/`startInstance` — never reimplements
+    /// start. Prints a one-line notice to stderr (stdout is reserved for the
+    /// MCP JSON-RPC stream) when it actually starts something.
     private static func dbHost(for inst: any RunnableInstance, ctx: CLIContext) async throws -> String {
+        if await !ctx.lifecycle.isWPContainerRunning(inst) {
+            FileHandle.standardError.write(Data("\(inst.siteSlug) was stopped — starting it first…\n".utf8))
+            if let site = inst as? Site {
+                let provisioned = try await ctx.lifecycle.startSite(site)
+                if provisioned != site.provisioned {
+                    _ = try await ctx.persistence.mutate { env in
+                        if let i = env.sites.firstIndex(where: { $0.id == site.id }) { env.sites[i].provisioned = provisioned }
+                    }
+                }
+            } else {
+                _ = try await ctx.lifecycle.startInstance(inst)
+            }
+        }
         guard let ip = try await ctx.cli.ipAddress(of: inst.dbContainerName), !ip.isEmpty else {
-            throw ToolError("not_running", "Site is not running — start it first.")
+            throw ToolError("not_running", "Site could not be started.")
         }
         return ip
     }

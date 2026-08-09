@@ -295,11 +295,24 @@ public actor SiteLifecycle {
             let xdebugClientHost = inst.xdebugEnabled ? gateway : nil
             timer.mark("deps")
 
-            try await cli.run(SiteRecipe.runWordPressArgs(
-                inst, dbHost: dbHost, imageOverride: imageOverride,
-                xdebugClientHost: xdebugClientHost, elasticsearchURL: elasticsearchURL,
-                mailpitHost: mailpitHost))
-            timer.mark("wp-run")
+            // Mirror `ensureDatabaseContainer`'s existing-container handling for
+            // the wp container itself: an explicit start of an already-running
+            // instance must be a no-op (skip `container run` entirely — the name
+            // is taken and `container run` would fail with "already exists"),
+            // and a half-dead container left by a crash (created/exited, still
+            // holding the name) must be deleted before re-running rather than
+            // surfacing that same error.
+            let existingWP = try? await cli.inspect(inst.wpContainerName).first
+            if existingWP?.isRunning != true {
+                if existingWP != nil {
+                    _ = try? await cli.run(SiteRecipe.deleteArgs(inst.wpContainerName))
+                }
+                try await cli.run(SiteRecipe.runWordPressArgs(
+                    inst, dbHost: dbHost, imageOverride: imageOverride,
+                    xdebugClientHost: xdebugClientHost, elasticsearchURL: elasticsearchURL,
+                    mailpitHost: mailpitHost))
+                timer.mark("wp-run")
+            }
             // Make the site's own hostnames resolvable in-guest (→ host proxy)
             // so WordPress loopbacks work. Best-effort: a failure degrades to
             // the old fail-fast loopback, never blocks the start.
@@ -460,6 +473,17 @@ public actor SiteLifecycle {
     private func ensureXdebugImage(_ inst: any RunnableInstance) async throws -> String? {
         guard inst.xdebugEnabled else { return nil }
         return try await xdebug.ensureImage(forBaseTag: inst.imageTag)
+    }
+
+    /// Whether an instance's wp container is currently up. A single targeted
+    /// `container inspect` — the same primitive `ensureDatabaseContainer` uses
+    /// to check the db container, not a full `container list`. Callers use this
+    /// to make an explicit start a no-op when already running (rather than
+    /// letting `container run` fail with "already exists"), and one-shot
+    /// commands (`wp`, `db import`/`export`, `login`) use it to decide whether
+    /// they need to wake the instance before running.
+    public func isWPContainerRunning(_ inst: any RunnableInstance) async -> Bool {
+        (try? await cli.inspect(inst.wpContainerName).first?.isRunning) ?? false
     }
 
     /// Guarded start for a single instance (worktree envs, §2b): containers up,
