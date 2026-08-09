@@ -8,7 +8,9 @@ import Foundation
 /// which makes stop-when-idle / start-on-request the cheapest lever available:
 /// the proxy parks instances nobody is using and wakes them on the next request.
 ///
-/// **Envs default to 15 minutes; sites default to OFF.**
+/// **Envs default to 180 minutes (3h); sites default to OFF.** A freshly
+/// created env additionally gets a `envCreationGraceMinutes` grace window
+/// during which it is never idle-stopped (see that constant).
 ///
 /// That asymmetry is about observability, not about which kind matters more.
 /// Activity is measured from
@@ -40,23 +42,34 @@ import Foundation
 public enum IdlePolicy {
     /// Default idle timeout for a worktree environment, in minutes. On by
     /// default: every request to an env goes through the proxy, so the clock sees
-    /// real use (see the type doc), and an unused env is ~500 MB of VM.
-    public static let defaultEnvMinutes = 15
+    /// real use (see the type doc), and an unused env is ~500 MB of VM. 180
+    /// minutes (3h) rather than something tighter because a fresh env is usually
+    /// part of a whole day's work session — see `envCreationGraceMinutes`, which
+    /// suspends this timeout entirely right after creation.
+    public static let defaultEnvMinutes = 180
     /// Default idle timeout for a parent site, in minutes. `0` ⇒ disabled — a
     /// site is only ever auto-stopped when the user explicitly opts in.
     public static let defaultSiteMinutes = 0
 
+    /// Minutes after an env's CREATION during which it is never idle-stopped,
+    /// regardless of traffic (or the lack of it). A freshly created env is part
+    /// of an active work session that can easily span most of a day; the
+    /// memory-reclaiming benefit of idle-stop only matters once work has moved on
+    /// to a LATER day, so day-one is exempt. Applies only to envs — sites default
+    /// to off and opt in deliberately. See `HTTPSProxy.sweepIdleInstances`.
+    public static let envCreationGraceMinutes = 360
+
     /// The value we recommend — the env default, and what a site should pick if it
     /// opts in. Long enough that a short pause in an agent's work never costs a
-    /// restart, short enough that a forgotten environment doesn't hold ~500 MB all
-    /// afternoon.
-    public static let recommendedMinutes = 15
+    /// restart, short enough that a forgotten environment doesn't hold ~500 MB for
+    /// days.
+    public static let recommendedMinutes = defaultEnvMinutes
 
     /// The minute values the app pickers and the docs advertise (besides
     /// "Default" and "Never"). `recommendedMinutes` leads deliberately: it is the
     /// value the docs point at, so it should be the first thing offered rather
     /// than something to scroll past. Kept here so surfaces can't drift apart.
-    public static let selectableMinutes = [recommendedMinutes, 5, 30, 60]
+    public static let selectableMinutes = [recommendedMinutes, 15, 30, 60]
 
     /// Resolve a persisted (possibly nil) setting into the timeout actually in
     /// force. `0` ⇒ auto-stop is off. Negative values (only reachable via a
@@ -66,13 +79,30 @@ public enum IdlePolicy {
         return configured > 0 ? configured : 0
     }
 
+    /// Whether an env created at `createdAt` is still inside its post-creation
+    /// grace window at `now` — exempt from idle-stop regardless of traffic. Pure
+    /// function of the two dates so it is testable without a running proxy;
+    /// `HTTPSProxy.sweepIdleInstances` is the one caller.
+    public static func isWithinCreationGrace(createdAt: Date, now: Date) -> Bool {
+        now.timeIntervalSince(createdAt) / 60 < Double(envCreationGraceMinutes)
+    }
+
+    /// Human-friendly rendering of a minute count: whole hours render as "N
+    /// hour(s)", anything else as "N min". Kept here so CLI output (`label`) and
+    /// the app's picker (`IdleStopCard`) can't drift apart on wording.
+    public static func formatMinutes(_ minutes: Int) -> String {
+        guard minutes >= 60, minutes.isMultiple(of: 60) else { return "\(minutes) min" }
+        let hours = minutes / 60
+        return hours == 1 ? "1 hour" : "\(hours) hours"
+    }
+
     /// Human label for a configured value, for CLI output and UI hints.
     public static func label(configured: Int?, isEnv: Bool) -> String {
         let effective = effectiveMinutes(configured: configured, isEnv: isEnv)
         guard configured != nil else {
-            return effective == 0 ? "default (off)" : "default (\(effective) min)"
+            return effective == 0 ? "default (off)" : "default (\(formatMinutes(effective)))"
         }
-        return effective == 0 ? "off" : "\(effective) min"
+        return effective == 0 ? "off" : formatMinutes(effective)
     }
 
     /// Which traffic the idle clock can and cannot see, as one paragraph surfaces

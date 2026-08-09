@@ -127,11 +127,12 @@ Sites are provisioned automatically (no install wizard) and log in with
   Settings → Resources or `wp-container limits <slug> --cpus 2 --memory 512`
   (see [docs/RESOURCES.md](docs/RESOURCES.md)).
 - **Auto-stop idle, wake on request** — a branch environment nobody has used for
-  15 minutes is stopped and its ~500 MB returned to macOS; the next request to its
+  3 hours is stopped and its ~500 MB returned to macOS; the next request to its
   URL starts it again behind a "waking up" page that refreshes into the live site.
-  On by default for environments, opt-in for sites. `wp-container idle <slug>`,
-  the Idle stop card, or the `set_idle_stop` MCP tool — see
-  [docs/RESOURCES.md](docs/RESOURCES.md).
+  A freshly created environment gets a further 6-hour grace period during which
+  it is never auto-stopped regardless of use. On by default for environments,
+  opt-in for sites. `wp-container idle <slug>`, the Idle stop card, or the
+  `set_idle_stop` MCP tool — see [docs/RESOURCES.md](docs/RESOURCES.md).
 - **Touch ID for privileged actions** — the optional signed hosts-helper
   makes custom-domain changes a Touch ID dialog instead of a password prompt
   (one-time enable in Settings → General).
@@ -179,8 +180,9 @@ environment was last used, stops the ones past their timeout, and starts them
 again on the next request while serving a page that auto-refreshes into the live
 site.
 
-- **Environments: on by default (15 minutes). Sites: off by default.** The
-  difference is observability, not importance. An environment's container
+- **Environments: on by default (3 hours), with a 6-hour grace period after
+  creation. Sites: off by default.** The difference between envs and sites is
+  observability, not importance. An environment's container
   publishes no host port — the proxy binds `127.0.0.1:<env port>` itself and
   relays to the container — so the one URL every surface advertises (and that
   WordPress has pinned as `home`/`siteurl`) runs through the proxy. Every request
