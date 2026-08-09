@@ -9,8 +9,12 @@ import Foundation
 /// the proxy parks instances nobody is using and wakes them on the next request.
 ///
 /// **Envs default to 180 minutes (3h); sites default to OFF.** A freshly
-/// created env additionally gets a `envCreationGraceMinutes` grace window
-/// during which it is never idle-stopped (see that constant).
+/// created env that is still on the BUILT-IN DEFAULT additionally gets a
+/// `envCreationGraceMinutes` grace window during which it is never
+/// idle-stopped (see that constant). An env with an EXPLICIT timeout
+/// (`wp-container idle <env> --minutes 15`, `--off`, or any other configured
+/// value) is never subject to the grace window — an explicit override always
+/// wins, exactly like it always wins over the default itself.
 ///
 /// That asymmetry is about observability, not about which kind matters more.
 /// Activity is measured from
@@ -52,11 +56,14 @@ public enum IdlePolicy {
     public static let defaultSiteMinutes = 0
 
     /// Minutes after an env's CREATION during which it is never idle-stopped,
-    /// regardless of traffic (or the lack of it). A freshly created env is part
-    /// of an active work session that can easily span most of a day; the
-    /// memory-reclaiming benefit of idle-stop only matters once work has moved on
-    /// to a LATER day, so day-one is exempt. Applies only to envs — sites default
-    /// to off and opt in deliberately. See `HTTPSProxy.sweepIdleInstances`.
+    /// regardless of traffic (or the lack of it) — PROVIDED it is still on the
+    /// built-in default (see `isExemptFromIdleStop(configured:createdAt:now:)`).
+    /// A freshly created env is part of an active work session that can easily
+    /// span most of a day; the memory-reclaiming benefit of idle-stop only
+    /// matters once work has moved on to a LATER day, so day-one is exempt.
+    /// Applies only to envs on the default — sites default to off and opt in
+    /// deliberately, and an env with an explicit timeout has already opted out
+    /// of the default's judgment call. See `HTTPSProxy.sweepIdleInstances`.
     public static let envCreationGraceMinutes = 360
 
     /// The value we recommend — the env default, and what a site should pick if it
@@ -80,11 +87,25 @@ public enum IdlePolicy {
     }
 
     /// Whether an env created at `createdAt` is still inside its post-creation
-    /// grace window at `now` — exempt from idle-stop regardless of traffic. Pure
-    /// function of the two dates so it is testable without a running proxy;
-    /// `HTTPSProxy.sweepIdleInstances` is the one caller.
+    /// grace window at `now`, purely as a function of age. Exposed mainly so
+    /// that window can be tested in isolation; `HTTPSProxy.sweepIdleInstances`
+    /// should call `isExemptFromIdleStop(configured:createdAt:now:)` instead,
+    /// which also accounts for an explicit per-instance override.
     public static func isWithinCreationGrace(createdAt: Date, now: Date) -> Bool {
         now.timeIntervalSince(createdAt) / 60 < Double(envCreationGraceMinutes)
+    }
+
+    /// Whether the creation-grace window currently exempts this env from
+    /// idle-stop. Only applies when `configured` is `nil` — i.e. the env is
+    /// still on the built-in default — because an EXPLICIT timeout (`--minutes
+    /// N`, `--off`, or any other configured value) is a deliberate opt-out of
+    /// the default's judgment call and must always win, exactly like it already
+    /// wins in `effectiveMinutes`. An env with `idleStopMinutes = 15` set one
+    /// minute after creation is sweepable the moment it's been idle 15 minutes;
+    /// only an env still following the default gets the day-one exemption.
+    public static func isExemptFromIdleStop(configured: Int?, createdAt: Date, now: Date) -> Bool {
+        guard configured == nil else { return false }
+        return isWithinCreationGrace(createdAt: createdAt, now: now)
     }
 
     /// Human-friendly rendering of a minute count: whole hours render as "N

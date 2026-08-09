@@ -104,7 +104,7 @@ struct IdleStopCard: View {
 
     private var detailText: String {
         if isEnv {
-            return "On by default (\(IdlePolicy.formatMinutes(IdlePolicy.defaultEnvMinutes))). A freshly created environment is never stopped for its first \(IdlePolicy.formatMinutes(IdlePolicy.envCreationGraceMinutes)) regardless of use. After that, one nobody is using gives its ~500 MB back, and the next request to its URL starts it again in about a second behind a page that refreshes into the site."
+            return "On by default (\(IdlePolicy.formatMinutes(IdlePolicy.defaultEnvMinutes))). While on that default, a freshly created environment is never stopped for its first \(IdlePolicy.formatMinutes(IdlePolicy.envCreationGraceMinutes)) regardless of use — pick an explicit value below to opt out of that grace period too. After it applies, one nobody is using gives its ~500 MB back, and the next request to its URL starts it again in about a second behind a page that refreshes into the site."
         }
         return "Off by default — you’re usually working in a site. When on, it is never stopped while any of its environments are running, and opening its proxied URL starts it again."
     }

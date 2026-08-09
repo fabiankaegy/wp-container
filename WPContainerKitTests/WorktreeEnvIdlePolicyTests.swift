@@ -48,6 +48,37 @@ final class WorktreeEnvIdlePolicyTests: XCTestCase {
         XCTAssertEqual(env.effectiveIdleStopMinutes, 0)
     }
 
+    // MARK: - Sweep semantics: explicit override always beats the grace window
+
+    /// Mirrors the exact guard sequence `HTTPSProxy.sweepIdleInstances` runs
+    /// (`timeout > 0` → not creation-exempt → idle long enough), against the
+    /// model directly rather than the proxy (which needs a live `container
+    /// list`), but in the same order with the same inputs.
+    private func wouldSweep(_ env: WorktreeEnv, idleMinutes: Double, now: Date) -> Bool {
+        let timeout = env.effectiveIdleStopMinutes
+        guard timeout > 0 else { return false }
+        guard !IdlePolicy.isExemptFromIdleStop(configured: env.idleStopMinutes, createdAt: env.createdAt, now: now)
+        else { return false }
+        return idleMinutes >= Double(timeout)
+    }
+
+    func testExplicitFifteenMinuteEnvSweepsOnceIdleLongEnoughEvenWhenFresh() {
+        let now = Date()
+        // Created 1 minute ago with an explicit 15-minute override.
+        let env = makeEnv(createdAt: now.addingTimeInterval(-60), idleStopMinutes: 15)
+        XCTAssertFalse(wouldSweep(env, idleMinutes: 10, now: now), "not idle long enough yet")
+        XCTAssertTrue(wouldSweep(env, idleMinutes: 15, now: now),
+                       "an explicit override must ignore the creation-grace window")
+    }
+
+    func testDefaultEnvIsNotSweptWhileFreshRegardlessOfIdleMinutes() {
+        let now = Date()
+        // Created 1 minute ago, no override — still on the built-in default.
+        let env = makeEnv(createdAt: now.addingTimeInterval(-60))
+        XCTAssertFalse(wouldSweep(env, idleMinutes: 999, now: now),
+                        "a default env must stay exempt inside its creation-grace window")
+    }
+
     // MARK: - Decode compatibility (sites.json must keep loading)
 
     /// Shaped like a record written before issue #16 (idle-stop) and #17
