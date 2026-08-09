@@ -6,6 +6,10 @@ public enum WorktreeError: Error, Sendable, CustomStringConvertible {
     /// The repo path relative to `wordpress/` contains `..` (or is empty after
     /// trimming) — it would resolve outside `/var/www/html` inside the container.
     case invalidRepoPath(String)
+    /// An env with this slug (same parent + branch) is already in the store. Two
+    /// of them collide on hostname, container names and DB schema, and the proxy
+    /// can only ever route to one.
+    case duplicateEnvSlug(String)
     /// Creation failed and the half-created env was rolled back. `short` is the
     /// first fatal line (surface this); `full` is the complete underlying text
     /// (keep behind a disclosure).
@@ -16,6 +20,7 @@ public enum WorktreeError: Error, Sendable, CustomStringConvertible {
         case .parentDatabaseIPUnavailable: return "Could not resolve the parent site's database IP for a live DB clone."
         case .repoNotFound(let p):         return "No git repo found at \(p)."
         case .invalidRepoPath(let p):      return "Invalid repo path \"\(p)\": must be relative to wordpress/ with no \"..\" components (e.g. wp-content/plugins/my-plugin)."
+        case .duplicateEnvSlug(let s):     return "An environment named \(s) already exists. Delete it first, or use a different branch."
         case .creationFailed(let short, _): return short
         }
     }
@@ -177,6 +182,16 @@ public actor WorktreeEnvService {
         // resolve outside /var/www/html inside the container.
         guard Self.isValidRepoRelPath(repoRelPath) else {
             throw WorktreeError.invalidRepoPath(repoRelPath)
+        }
+        // Two envs with the same slug share a hostname, a container name and a
+        // schema; the proxy's route table is keyed by `<envSlug>.localhost`, so the
+        // second one is silently unreachable at its own port. Refuse up front
+        // rather than creating something that can never be served. (`reserved` is
+        // already IN the store — that record is this create, not a duplicate.)
+        let envSlug = reserved?.envSlug ?? WorktreeEnv.makeSlug(parentSlug: parent.slug, branch: branch)
+        if let stored = try? await StorePersistence().load(),
+           stored.envs.contains(where: { $0.envSlug == envSlug && $0.id != reserved?.id }) {
+            throw WorktreeError.duplicateEnvSlug(envSlug)
         }
         let repoURL = parent.repoURL(forRelativePath: repoRelPath)
 

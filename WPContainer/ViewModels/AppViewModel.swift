@@ -55,6 +55,17 @@ public final class AppViewModel {
     public var caTrusted = false
     /// The port the in-app HTTPS proxy bound, once started.
     public var proxyPort: UInt16?
+    /// Whether macOS Local Network Privacy is currently blocking this app from
+    /// reaching the containers (v0.2.0 regression: the app shipped without
+    /// `NSLocalNetworkUsageDescription`, so every env 502'd and every wake timed
+    /// out with no visible cause). Mirrored from the proxy by `reconcile()` and
+    /// rendered as a persistent, actionable banner — persistent because it is a
+    /// TCC decision that nothing the user does inside this app can clear.
+    ///
+    /// Only ever true for the IN-APP proxy: a headless `wp-container proxy serve`
+    /// is a different process with its own permission state, and it reports the
+    /// denial on its own stderr/log.
+    public var localNetworkDenied = false
 
     /// UI-intent flags so menu commands (and buttons) can drive sheet
     /// presentation from anywhere.
@@ -616,6 +627,13 @@ public final class AppViewModel {
         proxyPort = ProxyControl.current()?.port
     }
 
+    /// Open System Settings → Privacy & Security → Local Network, where the user
+    /// enables WP Container. The only fix for `localNetworkDenied`.
+    public func openLocalNetworkSettings() {
+        guard let url = URL(string: HTTPSProxy.localNetworkSettingsURL) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     /// Install the local CA as a trusted root (prompts for admin), then refresh.
     public func trustCA() {
         Task {
@@ -798,6 +816,9 @@ public final class AppViewModel {
     /// PLAN.md already specifies for container status.
     public func reconcile() async {
         await store.reload()
+        // Cheap lock read; the proxy latches the denial and clears it on the first
+        // successful container dial, so this both raises and retires the banner.
+        localNetworkDenied = proxy.isLocalNetworkDenied
         guard let records = try? await cli.list(all: true) else { return }
         let running = Set(records.filter { $0.isRunning }.map { $0.name })
 
