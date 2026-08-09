@@ -173,9 +173,12 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: "WP Container Hosts Helper"
         SKIP_INSTALL: "YES"
 
-  # Pure-logic unit tests for the shared kit: the proxy's routing table and its
-  # static page builders. Links the kit (a static library) directly, so no test
-  # host and no app launch — these are all pure functions over a store envelope.
+  # Pure-logic unit tests for the shared kit: the proxy's routing table, its
+  # static page builders, idle policy, and the cross-process DB lifecycle lock.
+  # Links the kit (a static library) directly, so no test host and no app
+  # launch. The lock tests work in-process because `flock` is per open file
+  # DESCRIPTION: two locks taken here contend exactly the way two
+  # `wp-container` processes do.
   WPContainerKitTests:
     type: bundle.unit-test
     platform: macOS
