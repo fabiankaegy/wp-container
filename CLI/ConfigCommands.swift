@@ -218,11 +218,14 @@ struct IdleCommand: AsyncParsableCommand {
         `wp-container proxy serve`). Hitting a parked URL in the browser serves a \
         "waking up" page that refreshes into the live site.
 
-        ENVIRONMENTS: on by default, 15 minutes. An environment's container \
-        publishes no port of its own — the proxy owns its \
-        http://127.0.0.1:<port> URL — so every request to it counts as activity, \
-        and a parked environment wakes at that same URL. So do wp-cli, MCP tool \
-        calls and magic-login links.
+        ENVIRONMENTS: on by default, 3 hours (180 minutes). A freshly created \
+        environment still on that default is never auto-stopped for its first \
+        6 hours regardless of use — pass --minutes or --off to opt out of the \
+        grace period too, since an explicit value always wins immediately. An \
+        environment's container publishes no port of its own — the \
+        proxy owns its http://127.0.0.1:<port> URL — so every request to it \
+        counts as activity, and a parked environment wakes at that same URL. \
+        So do wp-cli, MCP tool calls and magic-login links.
 
         SITES: off by default, opt-in. A site publishes its own \
         http://127.0.0.1:<port>, and requests to that address bypass the proxy: \
@@ -236,7 +239,7 @@ struct IdleCommand: AsyncParsableCommand {
     @Argument(help: "Site slug or env slug.") var slug: String
     @Option(name: .long, help: "Auto-stop after this many idle minutes.") var minutes: Int?
     @Flag(name: .long, help: "Never auto-stop this instance.") var off = false
-    @Flag(name: .long, help: "Follow the built-in default (environments 15 min, sites off).") var `default` = false
+    @Flag(name: .long, help: "Follow the built-in default (environments 3 hours, sites off).") var `default` = false
     @OptionGroup var output: JSONOptions
 
     func run() async throws {

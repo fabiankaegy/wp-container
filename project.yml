@@ -112,6 +112,13 @@ targets:
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.developer-tools"
         INFOPLIST_KEY_LSMinimumSystemVersion: "26.0"
         INFOPLIST_KEY_CFBundleDisplayName: "WP Container"
+        # Without this key macOS Local Network Privacy denies the app EVERY
+        # outbound connection to the container vmnet bridge (192.168.64.0/24) —
+        # NWConnection reports `unsatisfied (Local network prohibited)` and
+        # URLSession fails with NSURLErrorNotConnectedToInternet. That is the
+        # proxy's only upstream for a worktree env, so the app served a 502 for
+        # every env and every wake timed out (v0.2.0 regression).
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "WP Container connects to your local WordPress containers on the container network to serve their sites in your browser."
         INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Fabian Kaegy. All rights reserved."
         COMBINE_HIDPI_IMAGES: "YES"
 
@@ -166,6 +173,27 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: "WP Container Hosts Helper"
         SKIP_INSTALL: "YES"
 
+  # Pure-logic unit tests for the shared kit: the proxy's routing table, its
+  # static page builders, idle policy, and the cross-process DB lifecycle lock.
+  # Links the kit (a static library) directly, so no test host and no app
+  # launch. The lock tests work in-process because `flock` is per open file
+  # DESCRIPTION: two locks taken here contend exactly the way two
+  # `wp-container` processes do.
+  WPContainerKitTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: WPContainerKitTests
+    dependencies:
+      - target: WPContainerKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.fabiankaegy.wpcontainer.kittests
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        GENERATE_INFOPLIST_FILE: "YES"
+
   # Pure-logic unit tests for the helper's security boundary. Compiles the
   # helper's own validation/rewrite source (and the shared contract) directly so
   # tests exercise the exact code the daemon runs. No test host needed.
@@ -216,3 +244,10 @@ schemes:
     test:
       targets:
         - HostsHelperTests
+  WPContainerKitTests:
+    build:
+      targets:
+        WPContainerKitTests: all
+    test:
+      targets:
+        - WPContainerKitTests

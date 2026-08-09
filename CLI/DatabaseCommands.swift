@@ -29,9 +29,9 @@ struct DBImportCommand: AsyncParsableCommand {
         <timestamp>.sql) → import → URL migration (source detected from the dump's `home` \
         option, or --source-url) → scrub of personal data (default ON) → media handling \
         → local admin/password login (default ON) → finish. If the site isn't running it \
-        is started first. On any failure from the import step onward, the pre-import backup \
-        is automatically re-imported (rollback) before the error is reported. Sites only \
-        (not worktree environments) in this version.
+        is started first (pass --no-start to fail instead). On any failure from the import \
+        step onward, the pre-import backup is automatically re-imported (rollback) before \
+        the error is reported. Sites only (not worktree environments) in this version.
         """
     )
 
@@ -61,6 +61,9 @@ struct DBImportCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Trust this URL as the dump's source instead of the detected `home` option.")
     var sourceURL: String?
 
+    @Flag(name: .long, help: "Don't auto-start the site if it's stopped; fail instead.")
+    var noStart = false
+
     @OptionGroup var output: JSONOptions
 
     func run() async throws {
@@ -79,6 +82,10 @@ struct DBImportCommand: AsyncParsableCommand {
                 throw CLIErrorJSON("unsupported_target",
                                     detail: "db import supports sites only (not worktree environments) in this version.")
             }
+            // A long-running import against an idle-stop-enabled site must not
+            // get swept mid-import — count it as activity up front (issue #16),
+            // mirroring `wp`/`login`/the MCP dispatcher's stamp-before-work.
+            await ctx.persistence.recordActivity(instanceID: siteRecord.id)
 
             let mediaOption: DBImportMediaOption
             switch media {
@@ -98,18 +105,10 @@ struct DBImportCommand: AsyncParsableCommand {
 
             // Auto-start (the kit never starts a site itself — DatabaseImportError
             // .siteNotRunning would be thrown instead; §2m brief: surfaces decide).
-            let running = await ctx.runningContainerNames()
-            if !running.contains(siteRecord.wpContainerName) {
-                if !jsonMode { emitLine("→ Starting site…") }
-                let provisioned = try await ctx.lifecycle.startSite(siteRecord)
-                if provisioned != siteRecord.provisioned {
-                    _ = try await ctx.persistence.mutate { env in
-                        if let i = env.sites.firstIndex(where: { $0.id == siteRecord.id }) {
-                            env.sites[i].provisioned = provisioned
-                        }
-                    }
-                }
-            }
+            // `ensureRunning` prints its own stderr notice when it has to start
+            // something; `--no-start` opts out and leaves the not-running case to
+            // `DatabaseImportService` (which throws `.siteNotRunning`).
+            try await ctx.ensureRunning(resolved, envelope: envelope, noStart: noStart)
 
             let importer = DatabaseImportService(cli: ctx.cli, lifecycle: ctx.lifecycle)
             let dumpURL = Self.expandPath(dumpPath)

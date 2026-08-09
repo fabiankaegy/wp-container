@@ -15,11 +15,15 @@ struct LoginCommand: AsyncParsableCommand {
         Opening the printed URL in a browser starts a logged-in wp-admin session \
         — no wp-login.php form. The link expires in 15 minutes and works exactly \
         once. A site started before magic-login support needs one restart.
+
+        A stopped target is started first (a notice is printed to stderr); pass \
+        --no-start to fail instead of waking it.
         """
     )
     @Argument(help: "Site slug or env slug.") var target: String
     @Option(name: .long, help: "WordPress user login to log in as (default: admin).") var user: String = SiteRecipe.adminUser
     @Flag(name: .long, help: "Also open the link in the default browser.") var open = false
+    @Flag(name: .long, help: "Don't auto-start the target if it's stopped; fail instead.") var noStart = false
     @OptionGroup var output: JSONOptions
 
     func run() async throws {
@@ -31,6 +35,9 @@ struct LoginCommand: AsyncParsableCommand {
             // Minting a login link means somebody is about to work in this
             // instance — count it as activity (issue #16).
             await ctx.persistence.recordActivity(instanceID: inst.instanceID)
+            // Wake it first (issue: only HTTP through the proxy did this before —
+            // `login` against an idle-stopped target used to hard-fail).
+            try await ctx.ensureRunning(resolved, envelope: envelope, noStart: noStart)
             guard let dbHost = try await ctx.cli.ipAddress(of: inst.dbContainerName) else {
                 throw CLIErrorJSON("not_running", detail: "start \(target) first")
             }

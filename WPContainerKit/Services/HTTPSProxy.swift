@@ -197,6 +197,22 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// arrives while it runs — see `freshRunningNames()`.
     private var runningNamesProbe: Task<Set<String>?, Never>?
 
+    // MARK: Local Network Privacy
+
+    /// When we last saw macOS Local Network Privacy refuse this process's
+    /// connections to the container bridge (`bridge100`, 192.168.64.0/24) — nil
+    /// while access works.
+    ///
+    /// Sticky ON PURPOSE. The denial is a per-app TCC decision, not a per-request
+    /// condition: nothing about the next dial will differ until the user grants
+    /// access in System Settings. Holding it lets the pages, the CLI and the app
+    /// say what is actually wrong instead of blaming the container — which is what
+    /// made this cost days to find. Cleared the moment ANY container dial
+    /// succeeds, so a grant self-heals within one request.
+    ///
+    /// It is a `Date` rather than a `Bool` purely so the log line can say when.
+    private var localNetworkDeniedAt: Date?
+
     /// Drives idle-stop and wake-on-request (issue #16). Optional only so the
     /// proxy stays constructible without one; both real hosts (the app and
     /// `wp-container proxy serve`) pass theirs, and with nil the proxy behaves
@@ -237,6 +253,94 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// The plain-HTTP listener port, once started.
     public var boundHTTPPort: UInt16? {
         stateLock.withLock { _boundHTTPPort }
+    }
+
+    // MARK: - Local Network Privacy (macOS 15+ TCC)
+
+    /// Whether macOS is currently refusing this process's connections to the
+    /// container network. Read by the app to raise a persistent, actionable
+    /// warning — every env is unreachable while this is true, and no amount of
+    /// restarting containers changes that.
+    public var isLocalNetworkDenied: Bool {
+        stateLock.withLock { localNetworkDeniedAt != nil }
+    }
+
+    /// `true` when a connection's path is unsatisfied specifically because Local
+    /// Network Privacy denied it — as opposed to the address being unroutable or
+    /// the peer refusing, both of which say something about the container.
+    private static func isLocalNetworkDenied(_ connection: NWConnection) -> Bool {
+        connection.currentPath?.unsatisfiedReason == .localNetworkDenied
+    }
+
+    /// Human-readable unsatisfied reason for a connection's current path, for the
+    /// give-up log line. nil when the path is satisfied (i.e. the failure was the
+    /// peer's answer, not the network's).
+    private static func unsatisfiedReason(_ connection: NWConnection) -> String? {
+        guard let path = connection.currentPath, path.status != .satisfied else { return nil }
+        return String(describing: path.unsatisfiedReason)
+    }
+
+    /// Latch the denial (first time only logs) — the container is fine, we are the
+    /// ones who aren't allowed to talk to it.
+    private func noteLocalNetworkDenied(address: String) {
+        let fresh = stateLock.withLock { () -> Bool in
+            let first = localNetworkDeniedAt == nil
+            localNetworkDeniedAt = Date()
+            return first
+        }
+        guard fresh else { return }
+        Self.log.error("""
+        proxy: macOS blocked this app's connection to \(address, privacy: .public) \
+        (Local Network privacy). Every container is unreachable until WP Container is enabled under \
+        System Settings → Privacy & Security → Local Network.
+        """)
+    }
+
+    /// Any successful container dial proves access was granted; drop the latch so
+    /// the pages and the app stop warning without waiting for a restart.
+    private func clearLocalNetworkDenied() {
+        let wasDenied = stateLock.withLock { () -> Bool in
+            guard localNetworkDeniedAt != nil else { return false }
+            localNetworkDeniedAt = nil
+            return true
+        }
+        guard wasDenied else { return }
+        Self.log.info("proxy: local network access is working again — container dials are succeeding")
+    }
+
+    /// Fire one throwaway connection at a known container IP so a denial is known
+    /// BEFORE the first request rather than after it has burnt a 10s dial budget
+    /// on a 502. It doubles as the trigger for the system's one-time permission
+    /// prompt, which is exactly the moment we want it: app launch, not the first
+    /// page load.
+    ///
+    /// Best effort in every direction — no IPs yet (nothing running) means nothing
+    /// to probe, and anything other than an explicit denial is ignored: a refused
+    /// or unroutable address says nothing about our permission.
+    private func probeLocalNetworkAccess() async {
+        guard let address = stateLock.withLock({ containerIPs.values.sorted().first }) else { return }
+        let connection = NWConnection(host: NWEndpoint.Host(address), port: 80, using: .tcp)
+        let denied = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            let decided = ResumeOnce()
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready, .waiting, .failed, .cancelled:
+                    // `.waiting` is where the denial shows up (Network.framework
+                    // treats a prohibited path as retryable forever), so it counts
+                    // as an answer here rather than as "still connecting".
+                    if decided.tryResume() { cont.resume(returning: Self.isLocalNetworkDenied(connection)) }
+                default:
+                    break
+                }
+            }
+            queue.asyncAfter(deadline: .now() + 2) {
+                if decided.tryResume() { cont.resume(returning: Self.isLocalNetworkDenied(connection)) }
+            }
+            connection.start(queue: queue)
+        }
+        connection.stateUpdateHandler = nil
+        connection.cancel()
+        if denied { noteLocalNetworkDenied(address: address) }
     }
 
     // MARK: - Host map
@@ -336,10 +440,26 @@ public final class HTTPSProxy: @unchecked Sendable {
             }
         }
         for env in envelope.envs {
-            map["\(env.envSlug).localhost"] = Route(port: env.port, slug: env.envSlug,
-                                                    displayName: "\(env.parentSlug) · \(env.branch)",
-                                                    containerName: env.wpContainerName,
-                                                    isEnv: true, parentSlug: env.parentSlug)
+            let host = "\(env.envSlug).localhost"
+            // `sites.json` can end up with two envs sharing an `envSlug` (same
+            // parent + branch, created twice). They collide on this key, and since
+            // `portMap` is derived from these values the loser's port is left
+            // orphaned — nothing binds it and it answers `unknownHostPage`, which
+            // reads as a broken env rather than as a duplicate record. First wins,
+            // deterministically, and we say so.
+            if let existing = map[host] {
+                log.warning("""
+                proxy: two environments claim \(host, privacy: .public) — \
+                serving the one on port \(existing.port, privacy: .public) and ignoring \
+                the one on port \(env.port, privacy: .public). Delete the duplicate \
+                (wp-container env rm) so its port is freed.
+                """)
+                continue
+            }
+            map[host] = Route(port: env.port, slug: env.envSlug,
+                              displayName: "\(env.parentSlug) · \(env.branch)",
+                              containerName: env.wpContainerName,
+                              isEnv: true, parentSlug: env.parentSlug)
             if env.mailpitEnabled, let mp = env.mailpitPort {
                 map["\(env.envSlug)-mail.localhost"] = Route(port: mp, slug: env.envSlug,
                                                              displayName: "\(env.parentSlug) · \(env.branch) · Mailbox",
@@ -438,6 +558,8 @@ public final class HTTPSProxy: @unchecked Sendable {
         // fallback, so a request arriving before the first IP refresh would have
         // no upstream candidate at all.
         await refreshContainerIPs()
+        // …and find out immediately whether we are even allowed to reach them.
+        await probeLocalNetworkAccess()
         // Take ownership of every current env's `127.0.0.1:<port>` socket. From
         // here the refresh loop keeps the set in sync.
         stateLock.withLock { acceptingEnvPorts = true }
@@ -797,8 +919,8 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// proxy headlessly.
     ///
     /// Its own 30s cadence rather than the 3s IP-refresh loop: the sweep costs a
-    /// store load plus a `container list`, and a 30s granularity on a 15-minute
-    /// timeout is irrelevant.
+    /// store load plus a `container list`, and a 30s granularity on a
+    /// 180-minute timeout is irrelevant.
     private func startIdleLoop() {
         guard lifecycle != nil, idleTask == nil else { return }
         idleTask = Task { [weak self] in
@@ -847,13 +969,21 @@ public final class HTTPSProxy: @unchecked Sendable {
             // The case this protects is the transition: an env container still
             // running from a build that published its own port keeps serving
             // through the forwarder, invisible to us — and it defaults to a
-            // 15-minute timeout it never asked for. Stopping it while somebody
+            // 180-minute timeout it never asked for. Stopping it while somebody
             // browsed it would be exactly the bug that made this feature opt-in in
             // the first place. Skipping costs nothing: restart that env once and
             // the proxy takes the socket, from which point the clock is honest.
             guard ownsLoopbackPort(env.port) else { continue }
             let timeout = env.effectiveIdleStopMinutes
             guard timeout > 0 else { continue }
+            // A freshly created env still on the built-in DEFAULT is exempt for
+            // its first `envCreationGraceMinutes` regardless of traffic — it is
+            // presumed part of an active work session. An env with an EXPLICIT
+            // timeout (`idleStopMinutes != nil`) opted out of that judgment call
+            // already, so the grace window never applies to it — see
+            // `IdlePolicy.isExemptFromIdleStop`.
+            guard !IdlePolicy.isExemptFromIdleStop(configured: env.idleStopMinutes, createdAt: env.createdAt, now: now)
+            else { continue }
             guard idleMinutes(of: env.envSlug, persisted: env.lastActivityAt, now: now) >= Double(timeout) else { continue }
             guard !isWaking(env.envSlug), !(await lifecycle.isBusy(env.id)) else { continue }
             Self.log.info("idle-stop: env \(env.envSlug, privacy: .public) idle for \(timeout, privacy: .public)+ min")
@@ -1003,6 +1133,10 @@ public final class HTTPSProxy: @unchecked Sendable {
         /// would issue a `container run` against a name that already exists and
         /// fail, so say what is actually true instead.
         case runningButUnresponsive
+        /// The container is running and macOS is refusing to let US talk to it
+        /// (Local Network Privacy). Nothing about the site is wrong, so every other
+        /// page here would send the user after the wrong thing.
+        case localNetworkDenied
         /// A mailbox route whose site is up but whose Mailpit container is not.
         case mailboxUnavailable
         /// Nothing can be woken from here (no lifecycle, or a mailbox route for a
@@ -1045,6 +1179,10 @@ public final class HTTPSProxy: @unchecked Sendable {
         // `Route` doesn't carry the wp container name for a mailbox route, but the
         // naming convention is the same everywhere else in the codebase.
         let wpRunning = running.contains("wpc-\(slug)-wp")
+        // Checked before everything below: while the network is blocked NO dial can
+        // succeed, so "not answering", "mailbox down" and "stopped" would all be
+        // confident lies about a container that is running perfectly well.
+        if wpRunning, isLocalNetworkDenied { return .localNetworkDenied }
         if route.isMailbox {
             // Never wake off a mailbox dial failure: an unreachable mailbox says
             // nothing about whether WordPress should be started, and booting a
@@ -1353,10 +1491,26 @@ public final class HTTPSProxy: @unchecked Sendable {
                                     port: NWEndpoint.Port(rawValue: candidate.port)!, using: .tcp)
         let decided = ResumeOnce()
         /// `evictHint`: whether to forget the cached IP (see `invalidatesIPHint`).
-        let giveUp: @Sendable (_ evictHint: Bool) -> Void = { [weak self] evictHint in
+        /// `reason`: what ended this attempt, for the log line below.
+        /// `allowRetry`: false for a verdict a second identical attempt cannot change.
+        let giveUp: @Sendable (_ evictHint: Bool, _ reason: String, _ allowRetry: Bool) -> Void = { [weak self] evictHint, reason, allowRetry in
+            // Read the path BEFORE cancelling: a cancelled connection reports none,
+            // and the unsatisfied reason is the single most useful field here.
+            let pathReason = Self.unsatisfiedReason(upstream)
             upstream.stateUpdateHandler = nil
             upstream.cancel()
             guard let self else { inbound.cancel(); return }
+            // Every give-up, always. This path was completely silent, which is why
+            // a blanket network denial looked exactly like a stopped container for
+            // days: the branded 502 was the only evidence either way.
+            let where_ = "\(target.slug ?? host)\(target.isMailbox ? " (mailbox)" : "")"
+            let path = pathReason.map { " path unsatisfied: \($0)." } ?? ""
+            Self.log.notice("""
+            proxy: dial gave up for \(where_, privacy: .public) → \
+            \(candidate.host, privacy: .public):\(candidate.port, privacy: .public) \
+            (attempt \(attempt, privacy: .public)/\(maxAttempts, privacy: .public)): \
+            \(reason, privacy: .public).\(path, privacy: .public)
+            """)
             if evictHint, candidate.isContainerIP, let name = target.containerName {
                 self.stateLock.withLock { _ = self.containerIPs.removeValue(forKey: name) }
             }
@@ -1364,7 +1518,7 @@ public final class HTTPSProxy: @unchecked Sendable {
             // container's — the empty-candidate path uses it to avoid re-dialing an
             // IP that has already had its chance.
             let tried = candidate.isContainerIP ? candidate.host : triedContainerIP
-            if attempt < maxAttempts {
+            if allowRetry, attempt < maxAttempts {
                 // Same candidate, one more time: a first connect lost to a slow
                 // vmnet path usually succeeds immediately afterwards.
                 self.dial(candidates: candidates, inbound: inbound,
@@ -1383,6 +1537,8 @@ public final class HTTPSProxy: @unchecked Sendable {
             case .ready:
                 guard decided.tryResume() else { return }
                 upstream.stateUpdateHandler = nil
+                // A container we just reached is proof the network isn't blocked.
+                if candidate.isContainerIP { self?.clearLocalNetworkDenied() }
                 upstream.send(content: upstreamBytes, completion: .contentProcessed { [weak self] err in
                     if err != nil { inbound.cancel(); upstream.cancel(); return }
                     // Bidirectional raw relay until either side closes.
@@ -1390,16 +1546,27 @@ public final class HTTPSProxy: @unchecked Sendable {
                     self?.relay(from: inbound, to: upstream)
                 })
             case .waiting(let error):
+                // macOS Local Network Privacy: the path is `unsatisfied (Local
+                // network prohibited)` and Network.framework will sit in `.waiting`
+                // forever. Waiting out the 5s deadline twice, then rendering a page
+                // that blames the container, is precisely how this regression hid.
+                // Fail now, latch it, and let `resolveDownstream` say the truth.
+                if Self.isLocalNetworkDenied(upstream) {
+                    guard decided.tryResume() else { return }
+                    self?.noteLocalNetworkDenied(address: candidate.host)
+                    giveUp(false, "macOS denied local network access", false)
+                    return
+                }
                 // On the sole-container-IP path, `.waiting` is the stack saying
                 // "not yet, still retrying" — which is the truth while a guest's
                 // network comes up. Let the deadline decide instead of bailing on
                 // the first hiccup; a definitive refusal still short-circuits.
                 if isSoleContainerIP, !Self.invalidatesIPHint(error) { return }
                 guard decided.tryResume() else { return }
-                giveUp(Self.invalidatesIPHint(error))
+                giveUp(Self.invalidatesIPHint(error), "waiting: \(error)", true)
             case .failed(let error):
                 guard decided.tryResume() else { return }
-                giveUp(Self.invalidatesIPHint(error))
+                giveUp(Self.invalidatesIPHint(error), "failed: \(error)", true)
             case .cancelled:
                 if decided.tryResume() { inbound.cancel() }
             default:
@@ -1409,7 +1576,7 @@ public final class HTTPSProxy: @unchecked Sendable {
         connQueue.asyncAfter(deadline: .now() + deadlineSeconds) {
             guard decided.tryResume() else { return }
             // Our patience, not the network's answer: keep the IP hint.
-            giveUp(false)
+            giveUp(false, "no answer within \(Int(deadlineSeconds))s", true)
         }
         upstream.start(queue: connQueue)
     }
@@ -1504,6 +1671,19 @@ public final class HTTPSProxy: @unchecked Sendable {
             }
             sendHTMLResponse(to: inbound, status: "502 Bad Gateway",
                              html: Self.unresponsivePage(host: host, route: target))
+        case .localNetworkDenied:
+            guard wantsHTML else {
+                sendResponse(to: inbound, status: "502 Bad Gateway",
+                             contentType: "text/plain; charset=utf-8",
+                             body: """
+                             macOS is blocking WP Container from reaching local containers, so \(name) \
+                             cannot be served. Enable WP Container under System Settings > Privacy & \
+                             Security > Local Network, then reload.
+                             """ + "\n")
+                return
+            }
+            sendHTMLResponse(to: inbound, status: "502 Bad Gateway",
+                             html: Self.localNetworkDeniedPage(host: host, route: target))
         case .mailboxUnavailable:
             guard wantsHTML else {
                 sendResponse(to: inbound, status: "502 Bad Gateway",
@@ -1564,6 +1744,7 @@ public final class HTTPSProxy: @unchecked Sendable {
           code, pre { font: .85rem/1.5 ui-monospace, "SF Mono", Menlo, monospace; }
           pre { background: rgba(0,0,0,.05); padding: .7rem .9rem; border-radius: 10px; overflow-x: auto; user-select: all; }
           .hint { font-size: .8rem; opacity: .75; }
+          a { color: #0071e3; }
           .spinner { display: inline-block; width: 1rem; height: 1rem; margin-right: .5rem;
                      vertical-align: -.15rem; border-radius: 50%;
                      border: 2px solid rgba(255,149,0,.25); border-top-color: #b25000;
@@ -1575,6 +1756,7 @@ public final class HTTPSProxy: @unchecked Sendable {
             main { background: #2c2c2e; box-shadow: 0 10px 40px rgba(0,0,0,.4); }
             .badge { background: rgba(255,159,10,.2); color: #ffb340; }
             p { color: #98989d; }
+            a { color: #6cb4ff; }
             pre { background: rgba(255,255,255,.08); }
             .spinner { border-color: rgba(255,159,10,.25); border-top-color: #ffb340; }
           }
@@ -1659,6 +1841,35 @@ public final class HTTPSProxy: @unchecked Sendable {
         return proxyPage(title: "\(name) isn’t responding — WP Container",
                          heading: "\(name) isn’t responding",
                          bodyHTML: body, refreshSeconds: 5)
+    }
+
+    /// Deep link to System Settings → Privacy & Security → Local Network. Shared
+    /// with the app's warning banner so both routes to the fix land in one place.
+    public static let localNetworkSettingsURL =
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork"
+
+    /// macOS is refusing this app's connections to the container network, so every
+    /// container is unreachable no matter what state it is in (v0.2.0 regression:
+    /// the app shipped without `NSLocalNetworkUsageDescription`, and a denied app
+    /// never even gets the permission prompt).
+    ///
+    /// Refreshes every 5s so granting access in System Settings clears the page on
+    /// its own — the grant takes effect immediately and the very next dial
+    /// succeeds, which also clears the proxy's latch.
+    static func localNetworkDeniedPage(host: String, route: Route) -> String {
+        let name = htmlEscape(route.displayName ?? route.slug ?? host)
+        var body = """
+        <p>macOS is blocking WP Container from reaching your local containers, so it can’t serve
+        <code>\(htmlEscape(hostOnly(host)))</code>. \(name) itself is fine.</p>
+        <p>To fix it, allow WP Container on the local network:</p>
+        <p><a href="\(localNetworkSettingsURL)">Open System Settings → Privacy &amp; Security → Local Network</a>,
+        turn <strong>WP Container</strong> on, then reload this page.</p>
+        """
+        body += "<p class=\"hint\">This page reloads every 5 seconds and will show the site as soon as access is granted.</p>"
+        return proxyPage(title: "WP Container needs Local Network access",
+                         heading: "WP Container needs Local Network access",
+                         bodyHTML: body, refreshSeconds: 5,
+                         badge: "WP CONTAINER · BLOCKED")
     }
 
     /// A `<slug>-mail.localhost` route whose site is up but whose Mailpit
