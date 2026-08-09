@@ -440,10 +440,26 @@ public final class HTTPSProxy: @unchecked Sendable {
             }
         }
         for env in envelope.envs {
-            map["\(env.envSlug).localhost"] = Route(port: env.port, slug: env.envSlug,
-                                                    displayName: "\(env.parentSlug) · \(env.branch)",
-                                                    containerName: env.wpContainerName,
-                                                    isEnv: true, parentSlug: env.parentSlug)
+            let host = "\(env.envSlug).localhost"
+            // `sites.json` can end up with two envs sharing an `envSlug` (same
+            // parent + branch, created twice). They collide on this key, and since
+            // `portMap` is derived from these values the loser's port is left
+            // orphaned — nothing binds it and it answers `unknownHostPage`, which
+            // reads as a broken env rather than as a duplicate record. First wins,
+            // deterministically, and we say so.
+            if let existing = map[host] {
+                log.warning("""
+                proxy: two environments claim \(host, privacy: .public) — \
+                serving the one on port \(existing.port, privacy: .public) and ignoring \
+                the one on port \(env.port, privacy: .public). Delete the duplicate \
+                (wp-container env rm) so its port is freed.
+                """)
+                continue
+            }
+            map[host] = Route(port: env.port, slug: env.envSlug,
+                              displayName: "\(env.parentSlug) · \(env.branch)",
+                              containerName: env.wpContainerName,
+                              isEnv: true, parentSlug: env.parentSlug)
             if env.mailpitEnabled, let mp = env.mailpitPort {
                 map["\(env.envSlug)-mail.localhost"] = Route(port: mp, slug: env.envSlug,
                                                              displayName: "\(env.parentSlug) · \(env.branch) · Mailbox",
