@@ -67,6 +67,40 @@ struct CLIContext {
         guard let records = try? await cli.list(all: true) else { return [] }
         return Set(records.filter { $0.isRunning }.map { $0.name })
     }
+
+    /// Wake a stopped target before a one-shot command (`wp`, `db import`,
+    /// `login`) touches it. Before this, only HTTP through the proxy woke an
+    /// idle-stopped instance — these commands talk to the container directly
+    /// and used to hard-fail instead ("container not found"-style errors).
+    /// No-op when already running, or when `noStart` opts out (the caller's
+    /// own not-running check then fires exactly as it did before this fix).
+    /// Reuses `SiteLifecycle.startSite`/`startInstance` — never reimplements
+    /// start. Prints a one-line notice to stderr (stdout is reserved for wp-
+    /// cli/MCP output) when it actually starts something.
+    func ensureRunning(_ resolved: ResolvedTarget, envelope: StoreEnvelope, noStart: Bool = false) async throws {
+        guard !noStart, await !lifecycle.isWPContainerRunning(resolved.instance) else { return }
+        let label: String
+        switch resolved {
+        case .site(let s): label = s.slug
+        case .env(let e): label = e.envSlug
+        }
+        FileHandle.standardError.write(Data("\(label) was stopped — starting it first…\n".utf8))
+        switch resolved {
+        case .site(let site):
+            let provisioned = try await lifecycle.startSite(site)
+            if provisioned != site.provisioned {
+                _ = try await persistence.mutate { store in
+                    if let i = store.sites.firstIndex(where: { $0.id == site.id }) { store.sites[i].provisioned = provisioned }
+                }
+            }
+        case .env(let env):
+            // The parent goes along as `dbProvider` so a shared-database env
+            // can boot the server it borrows when the parent site is down
+            // (issue #17) — same as the `start` command's env branch.
+            let parent = envelope.sites.first { $0.id == env.parentSiteID }
+            _ = try await lifecycle.startInstance(env, dbProvider: parent)
+        }
+    }
 }
 
 enum ResolvedTarget {
@@ -612,10 +646,14 @@ struct WPCommand: AsyncParsableCommand {
         `--json` between <target> and the `--` separator (e.g. `wp-container wp \
         mysite --json -- option get home`) is also treated as wp-container's own \
         flag. A --json AFTER `--` is passed through to wp-cli untouched.
+
+        A stopped target is started first (a notice is printed to stderr); pass \
+        --no-start to fail instead of waking it.
         """
     )
     @Argument(help: "Site slug or env slug.") var target: String
     @Argument(parsing: .captureForPassthrough, help: "wp-cli arguments (after --).") var wpArgs: [String] = []
+    @Flag(name: .long, help: "Don't auto-start the target if it's stopped; fail instead.") var noStart = false
     @OptionGroup var output: JSONOptions
 
     func run() async throws {
@@ -648,6 +686,9 @@ struct WPCommand: AsyncParsableCommand {
             // invisible to the proxy — record it so the idle sweep doesn't park
             // an environment somebody is actively scripting against (issue #16).
             await ctx.persistence.recordActivity(instanceID: inst.instanceID)
+            // Wake it first (issue: only HTTP through the proxy did this before —
+            // a one-shot `wp` against an idle-stopped target used to hard-fail).
+            try await ctx.ensureRunning(resolved, envelope: envelope, noStart: noStart)
             guard let dbHost = try await ctx.cli.ipAddress(of: inst.dbContainerName) else {
                 throw CLIErrorJSON("not_running", detail: "start \(target) first")
             }
