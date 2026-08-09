@@ -510,7 +510,7 @@ struct WorktreeCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "worktree",
         abstract: "Manage git worktree environments.",
-        subcommands: [WorktreeCreate.self, WorktreeList.self, WorktreeDelete.self]
+        subcommands: [WorktreeCreate.self, WorktreeList.self, WorktreeDelete.self, WorktreeFixURLs.self]
     )
 }
 
@@ -629,6 +629,93 @@ struct WorktreeDelete: AsyncParsableCommand {
             try? await CertificateAuthority().removeLeafCoverage(["\(env.envSlug).localhost"])
             if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(envSlug) deleted"))) }
             else { emitLine("Deleted env \(envSlug).") }
+        } catch {
+            throw failCommand(error, json: output.json)
+        }
+    }
+}
+
+struct WorktreeFixURLs: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "fix-urls",
+        abstract: "Repair a worktree env's URLs so every one of them points at its own port.",
+        discussion: """
+        Detects the origins the environment's database ACTUALLY contains — \
+        home/siteurl on every (sub)site, wp_blogs.domain, wp_site.domain, \
+        DOMAIN_CURRENT_SITE — plus its parent site's URL, and migrates each of \
+        them onto http://127.0.0.1:<port> with a full `wp search-replace \
+        --all-tables` in every form a URL is written in (https://, http://, \
+        protocol-relative //host, and the bare host that multisite domain \
+        columns hold). Finishes by rewriting DOMAIN_CURRENT_SITE and any \
+        hardcoded WP_HOME/WP_SITEURL in the environment's wp-config.php, which \
+        override the database options entirely.
+
+        Use --dry-run to see the counts without writing anything.
+
+        A stopped environment is started first (a notice is printed to stderr); \
+        pass --no-start to fail instead of waking it.
+        """
+    )
+    @Argument(help: "Env slug.") var envSlug: String
+    @Flag(name: .long, help: "Report what would change without writing anything.") var dryRun = false
+    @Flag(name: .long, help: "Don't auto-start the environment if it's stopped; fail instead.") var noStart = false
+    @OptionGroup var output: JSONOptions
+
+    func run() async throws {
+        let ctx = CLIContext()
+        do {
+            let envelope = try await ctx.load()
+            guard let env = envelope.envs.first(where: { $0.envSlug == envSlug }) else {
+                throw CLIErrorJSON("env_not_found", detail: envSlug)
+            }
+            let parent = envelope.sites.first { $0.id == env.parentSiteID }
+            await ctx.persistence.recordActivity(instanceID: env.id)
+            try await ctx.ensureRunning(.env(env), envelope: envelope, noStart: noStart)
+            guard let dbHost = try await ctx.cli.ipAddress(of: env.dbContainerName) else {
+                throw CLIErrorJSON("not_running", detail: "start \(envSlug) first")
+            }
+
+            let migrator = EnvURLMigrator(cli: ctx.cli)
+            let target = EnvURLMigration.targetAuthority(port: env.port)
+            var discovery = await migrator.discoverOrigins(instance: env, dbHost: dbHost,
+                                                           wordpressFolder: env.wordpressFolder)
+            // The parent's URL is a candidate even when nothing in the database
+            // still spells it: a half-repaired env can carry the parent's domain
+            // in serialized content long after its option rows were fixed.
+            if let parent { discovery.candidates.append(parent.url.absoluteString) }
+            let origins = EnvURLMigration.staleOrigins(candidates: discovery.candidates, target: target,
+                                                       networkDomain: discovery.networkDomain)
+            let multisite = EnvURLMigration.isMultisite(networkType: parent?.networkType ?? .none,
+                                                        constants: discovery.constants)
+            let report = try await migrator.migrate(
+                instance: env, dbHost: dbHost, wordpressFolder: env.wordpressFolder,
+                origins: origins, targetAuthority: target, multisite: multisite, dryRun: dryRun)
+
+            let warnings = discovery.warnings + report.warnings
+            if output.json {
+                emitLine(CLIJSON.string(FixURLsJSON(envSlug: env.envSlug, url: env.localURL.absoluteString,
+                                                    report: report, warnings: warnings)))
+            } else {
+                emitLine("\(dryRun ? "Would migrate" : "Migrated") \(env.envSlug) to \(env.localURL.absoluteString).")
+                if report.origins.isEmpty {
+                    emitLine("  No stale origins found.")
+                }
+                for origin in report.origins {
+                    emitLine("  \(origin.origin) — \(origin.replacements) replacement\(origin.replacements == 1 ? "" : "s")")
+                    for pass in origin.passes {
+                        let count = pass.failed ? "failed" : pass.replacements.map(String.init) ?? "?"
+                        emitLine("    \(pass.source) → \(pass.target)  [\(count)]")
+                    }
+                }
+                for change in report.configUpdates {
+                    emitLine("  wp-config.php: \(change.name) = \(change.value)")
+                }
+                emitLine("Total: \(report.replacements) replacement\(report.replacements == 1 ? "" : "s") across \(report.origins.count) origin\(report.origins.count == 1 ? "" : "s").")
+                if dryRun { emitLine("Dry run — nothing was written.") }
+                for warning in warnings {
+                    FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
+                }
+            }
         } catch {
             throw failCommand(error, json: output.json)
         }

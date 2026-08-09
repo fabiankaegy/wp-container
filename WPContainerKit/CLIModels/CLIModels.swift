@@ -134,6 +134,57 @@ public struct WorktreeDescriptor: Codable, Sendable {
     }
 }
 
+/// Result of `wp-container worktree fix-urls --json`.
+public struct FixURLsJSON: Codable, Sendable {
+    public struct Pass: Codable, Sendable {
+        public let source: String
+        public let target: String
+        /// null when `wp search-replace` printed no parseable count, or failed.
+        public let replacements: Int?
+        public let failed: Bool
+    }
+
+    public struct Origin: Codable, Sendable {
+        public let origin: String
+        public let replacements: Int
+        public let passes: [Pass]
+    }
+
+    public struct ConfigChange: Codable, Sendable {
+        public let constant: String
+        public let value: String
+    }
+
+    public let envSlug: String
+    public let url: String
+    /// The `host:port` every migrated url now points at.
+    public let target: String
+    /// True when nothing was written (`--dry-run`); the counts are what WOULD
+    /// have changed.
+    public let dryRun: Bool
+    public let replacements: Int
+    public let origins: [Origin]
+    public let configChanges: [ConfigChange]
+    public let warnings: [String]
+
+    public init(envSlug: String, url: String, report: URLMigrationReport, warnings: [String]) {
+        self.envSlug = envSlug
+        self.url = url
+        self.target = report.target
+        self.dryRun = report.dryRun
+        self.replacements = report.replacements
+        self.origins = report.origins.map { origin in
+            Origin(origin: origin.origin, replacements: origin.replacements,
+                   passes: origin.passes.map {
+                       Pass(source: $0.source, target: $0.target,
+                            replacements: $0.replacements, failed: $0.failed)
+                   })
+        }
+        self.configChanges = report.configUpdates.map { ConfigChange(constant: $0.name, value: $0.value) }
+        self.warnings = warnings
+    }
+}
+
 /// Error object printed to stderr (nonzero exit) when `--json` is set.
 public struct CLIErrorJSON: Codable, Sendable, Error {
     public let error: String
