@@ -88,18 +88,11 @@ struct WPContainerApp: App {
         // Menu bar extra (PLAN.md §2h): a compact list of all sites + running
         // envs with inline start/stop. Keeps the app alive when the main window
         // is closed; Dock presence stays normal.
-        MenuBarExtra {
+        // The `server.rack` SF Symbol renders as a template image, so macOS
+        // tints and sizes it like every other status item.
+        MenuBarExtra("WP Container", systemImage: "server.rack") {
             MenuBarContent()
                 .environment(viewModel)
-        } label: {
-            // A MONOCHROME TEMPLATE of the WordPress W-in-circle mark (PLAN.md
-            // §2h, updated): the "MenuBarIcon" asset is marked Render As Template
-            // (template-rendering-intent), so macOS tints it to match light/dark
-            // menu bars and accent colors exactly like every other status item.
-            // The asset is pre-sized to 18pt (36pt @2x) — MenuBarExtra ignores
-            // SwiftUI frame modifiers on its label and sizes from the image's
-            // intrinsic size.
-            Image("MenuBarIcon")
         }
         .menuBarExtraStyle(.window)
     }

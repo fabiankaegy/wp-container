@@ -6,13 +6,14 @@
     {
       "layers" : [
         {
-          "image-name" : "wp-container-fullbleed.png",
-          "name" : "wp-container-fullbleed",
+          "glass" : false,
+          "image-name" : "exec-6e209ba0-5509-4f6a-aecf-323c6db3e427.png",
+          "name" : "exec-6e209ba0-5509-4f6a-aecf-323c6db3e427",
           "position" : {
-            "scale" : 1.0,
+            "scale" : 0.93,
             "translation-in-points" : [
-              0,
-              0
+              -1.1368683772161603e-13,
+              -1.1368683772161603e-13
             ]
           }
         }

@@ -167,13 +167,6 @@ struct SidebarView: View {
 
     private var brand: some View {
         HStack(spacing: 9) {
-            // The real app icon artwork (Liquid Glass W mark) — reads far better
-            // at small size than an SF-symbol stand-in.
-            Image(nsImage: NSApp.applicationIconImage)
-                .resizable()
-                .interpolation(.high)
-                .frame(width: 26, height: 26)
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             Text("WP Container")
                 .font(.headline)
                 .foregroundStyle(Theme.onFrame)
