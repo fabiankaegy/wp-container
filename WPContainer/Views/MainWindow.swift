@@ -33,10 +33,14 @@ struct MainWindow: View {
                 }
 
                 panel
-                    .padding(.top, 10)
+                    .padding(.top, Theme.titlebarInset)
                     .padding(.trailing, 10)
                     .padding(.bottom, 10)
             }
+            // Lay out from the window's top edge rather than below the system
+            // title-bar safe area, so the dark band is exactly `titlebarInset`
+            // tall (just enough for the traffic lights), not safe area + padding.
+            .ignoresSafeArea(edges: .top)
         }
         .onAppear { sidebarWidth = persistedSidebarWidth.clamped(to: sidebarRange) }
         .sheet(isPresented: $vm.presentingAddSite) {

@@ -181,7 +181,7 @@ struct SidebarView: View {
             NewGroupButton { newGroupName = ""; newGroupPresented = true }
         }
         .padding(.horizontal, 16)
-        .padding(.top, Theme.titlebarInset + 8)
+        .padding(.top, Theme.titlebarInset + 14)
         .padding(.bottom, 12)
     }
 
