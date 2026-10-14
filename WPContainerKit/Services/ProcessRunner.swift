@@ -45,10 +45,15 @@ final class DataBox: @unchecked Sendable {
 /// Low-level `Process` launcher shared by `ContainerCLI`, `GitService`, and the
 /// CoW clone step. Argument-array based (never a shell string).
 ///
-/// stdout and stderr are drained on *separate* background threads to avoid the
-/// classic pipe-buffer deadlock on large output, and the whole blocking dance
-/// runs off the calling actor via a continuation so no cooperative thread is
-/// blocked.
+/// stdout and stderr are drained on *separate* threads to avoid the classic
+/// pipe-buffer deadlock on large output, and the whole blocking dance runs off
+/// the calling actor via a continuation so no cooperative thread is blocked.
+///
+/// Those threads are dedicated `Thread`s, never GCD's global pool. The blocking
+/// side waits for the drains, so if both lived in the pool a burst of parallel
+/// runs (stopping a site with ~30 branch envs) could fill GCD's thread soft
+/// limit with waiters, leaving no thread to run the drains they wait on — a
+/// permanent deadlock with every child already exited.
 ///
 /// Cancellation of the calling `Task` is honored: the child is sent `SIGTERM`,
 /// which closes its pipes, unblocks the drains, and lets the continuation resume
@@ -66,7 +71,7 @@ public enum ProcessRunner {
         let handle = ProcessHandle()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<CommandResult, Error>) in
-                DispatchQueue.global(qos: .userInitiated).async {
+                Thread.detachNewThread {
                     let process = Process()
                     process.executableURL = URL(fileURLWithPath: executable)
                     process.arguments = args
@@ -88,30 +93,25 @@ public enum ProcessRunner {
                     // If cancellation already fired, this terminates immediately.
                     handle.adopt(process.processIdentifier)
 
-                    let outBox = DataBox()
-                let errBox = DataBox()
-                let outFD = outPipe.fileHandleForReading.fileDescriptor
-                let errFD = errPipe.fileHandleForReading.fileDescriptor
-
-                let group = DispatchGroup()
-                group.enter()
-                DispatchQueue.global(qos: .userInitiated).async {
-                    outBox.set(drain(fd: outFD))
-                    group.leave()
-                }
-                group.enter()
-                DispatchQueue.global(qos: .userInitiated).async {
-                    errBox.set(drain(fd: errFD))
-                    group.leave()
-                }
-                group.wait()
-                process.waitUntilExit()
-                // Keep the pipes alive until draining completes.
-                _ = outPipe
-                _ = errPipe
+                    // stderr drains on a second dedicated thread; stdout drains
+                    // right here, then we wait for stderr and the exit.
+                    let errBox = DataBox()
+                    let errDone = DispatchSemaphore(value: 0)
+                    let outFD = outPipe.fileHandleForReading.fileDescriptor
+                    let errFD = errPipe.fileHandleForReading.fileDescriptor
+                    Thread.detachNewThread {
+                        errBox.set(drain(fd: errFD))
+                        errDone.signal()
+                    }
+                    let out = drain(fd: outFD)
+                    errDone.wait()
+                    process.waitUntilExit()
+                    // Keep the pipes alive until draining completes.
+                    _ = outPipe
+                    _ = errPipe
 
                     cont.resume(returning: CommandResult(
-                        stdout: String(decoding: outBox.data, as: UTF8.self),
+                        stdout: String(decoding: out, as: UTF8.self),
                         stderr: String(decoding: errBox.data, as: UTF8.self),
                         exitCode: process.terminationStatus
                     ))
