@@ -5,9 +5,10 @@
 <h1 align="center">WP Container</h1>
 
 <p align="center">
-  Local WordPress development for macOS, powered by
-  <a href="https://github.com/apple/container">Apple containers</a>.<br>
-  A native SwiftUI app in the spirit of WordPress Studio — plus a CLI and MCP server built for AI coding agents.
+  Local WordPress development on macOS, built on Apple's native
+  <a href="https://github.com/apple/container">container</a> runtime.<br>
+  A SwiftUI app, CLI, and MCP server for running sites and isolated git branch environments,
+  with the whole WordPress install in a plain folder you own.
 </p>
 
 ---
