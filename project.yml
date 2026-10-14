@@ -79,6 +79,11 @@ targets:
           copyFiles:
             destination: wrapper
             subpath: Contents/Library/LaunchDaemons
+      # License + third-party notices travel with the binaries (Contents/Resources).
+      - path: LICENSE
+        buildPhase: resources
+      - path: THIRD_PARTY_NOTICES.txt
+        buildPhase: resources
     dependencies:
       - target: WPContainerKit
       # Embed the helper executable into Contents/MacOS (code-signed on copy).

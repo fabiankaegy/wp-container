@@ -244,6 +244,7 @@ log "Building CLI zip"
 CLIZIP_STAGE="$DIST/.clistage"
 mkdir -p "$CLIZIP_STAGE"
 cp "$CLI" "$CLIZIP_STAGE/wp-container"
+cp "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.txt" "$CLIZIP_STAGE/"
 cat > "$CLIZIP_STAGE/install.sh" <<'INSTALL'
 #!/usr/bin/env bash
 # Install the wp-container CLI (+ `wpc` symlink) to /usr/local/bin and write the
@@ -270,6 +271,9 @@ Contents:
   install.sh     installs it to /usr/local/bin and adds a 'wpc' symlink. The
                  global 'wp' router is enabled separately (per-user) by running
                  'wp-container setup wp' — see below.
+  LICENSE        MIT license for WP Container
+  THIRD_PARTY_NOTICES.txt
+                 licenses of the open-source packages linked into the CLI
 
 Install:
   ./install.sh

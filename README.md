@@ -248,3 +248,12 @@ any size, whereas the shared path is always a logical dump and restore.
 - `scripts/validate-addons.sh` — Xdebug image build + Elasticsearch validation.
 - Targets: `WPContainerKit` (models + services), `WPContainer` (SwiftUI app),
   `wp-container` (CLI). Swift 6 strict concurrency throughout.
+
+## License
+
+WP Container is released under the [MIT License](LICENSE). The open-source
+packages it links are listed, with their licenses, in
+[THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt).
+
+WordPress is a trademark of the WordPress Foundation. WP Container is not
+affiliated with or endorsed by the WordPress Foundation or Automattic.
