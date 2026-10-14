@@ -40,7 +40,7 @@ Sites are provisioned automatically (no install wizard) and log in with
 </p>
 
 <p align="center">
-  <img src="docs/assets/screenshot-menubar.png" alt="Menu bar extra with per-site status and start/stop" width="420">
+  <img src="docs/assets/screenshot-menubar.png" alt="Menu bar extra with per-site status and start/stop" width="346">
 </p>
 
 ## Highlights
