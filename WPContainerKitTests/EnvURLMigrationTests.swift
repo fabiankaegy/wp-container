@@ -10,10 +10,10 @@ final class EnvURLMigrationTests: XCTestCase {
     // MARK: - Authority normalization
 
     func testAuthorityStripsSchemePathAndQuery() {
-        XCTAssertEqual(EnvURLMigration.authority(from: "https://ignite.test/wp-admin/?x=1"), "ignite.test")
-        XCTAssertEqual(EnvURLMigration.authority(from: "http://ignite.test"), "ignite.test")
-        XCTAssertEqual(EnvURLMigration.authority(from: "//ignite.test/foo"), "ignite.test")
-        XCTAssertEqual(EnvURLMigration.authority(from: "ignite.test"), "ignite.test")
+        XCTAssertEqual(EnvURLMigration.authority(from: "https://mysite.test/wp-admin/?x=1"), "mysite.test")
+        XCTAssertEqual(EnvURLMigration.authority(from: "http://mysite.test"), "mysite.test")
+        XCTAssertEqual(EnvURLMigration.authority(from: "//mysite.test/foo"), "mysite.test")
+        XCTAssertEqual(EnvURLMigration.authority(from: "mysite.test"), "mysite.test")
     }
 
     func testAuthorityKeepsThePort() {
@@ -25,8 +25,8 @@ final class EnvURLMigrationTests: XCTestCase {
     }
 
     func testAuthorityNormalizesCaseWhitespaceAndUserInfo() {
-        XCTAssertEqual(EnvURLMigration.authority(from: "  HTTPS://Ignite.TEST/  "), "ignite.test")
-        XCTAssertEqual(EnvURLMigration.authority(from: "https://user:pw@ignite.test"), "ignite.test")
+        XCTAssertEqual(EnvURLMigration.authority(from: "  HTTPS://Mysite.TEST/  "), "mysite.test")
+        XCTAssertEqual(EnvURLMigration.authority(from: "https://user:pw@mysite.test"), "mysite.test")
     }
 
     func testAuthorityRejectsUnusableValues() {
@@ -41,18 +41,18 @@ final class EnvURLMigrationTests: XCTestCase {
     // MARK: - Variant derivation
 
     func testPassesCoverEveryFormAndPutFullURLsFirst() {
-        let passes = EnvURLMigration.passes(from: "https://ignite.test", to: "127.0.0.1:8901")
+        let passes = EnvURLMigration.passes(from: "https://mysite.test", to: "127.0.0.1:8901")
         XCTAssertEqual(passes, [
-            EnvURLMigration.Pass(source: "https://ignite.test", target: "http://127.0.0.1:8901"),
-            EnvURLMigration.Pass(source: "http://ignite.test", target: "http://127.0.0.1:8901"),
-            EnvURLMigration.Pass(source: "//ignite.test", target: "//127.0.0.1:8901"),
-            EnvURLMigration.Pass(source: "ignite.test", target: "127.0.0.1:8901"),
+            EnvURLMigration.Pass(source: "https://mysite.test", target: "http://127.0.0.1:8901"),
+            EnvURLMigration.Pass(source: "http://mysite.test", target: "http://127.0.0.1:8901"),
+            EnvURLMigration.Pass(source: "//mysite.test", target: "//127.0.0.1:8901"),
+            EnvURLMigration.Pass(source: "mysite.test", target: "127.0.0.1:8901"),
         ])
     }
 
     func testPassesAreIdenticalWhicheverSchemeTheOriginArrivesIn() {
-        XCTAssertEqual(EnvURLMigration.passes(from: "http://ignite.test", to: "127.0.0.1:8901"),
-                       EnvURLMigration.passes(from: "ignite.test", to: "127.0.0.1:8901"))
+        XCTAssertEqual(EnvURLMigration.passes(from: "http://mysite.test", to: "127.0.0.1:8901"),
+                       EnvURLMigration.passes(from: "mysite.test", to: "127.0.0.1:8901"))
     }
 
     func testPassesCarryPortsThrough() {
@@ -74,36 +74,36 @@ final class EnvURLMigrationTests: XCTestCase {
 
     func testStaleOriginsDedupeAcrossFormsAndDropTheTarget() {
         let origins = EnvURLMigration.staleOrigins(
-            candidates: ["https://ignite.test", "http://ignite.test/", "ignite.test",
+            candidates: ["https://mysite.test", "http://mysite.test/", "mysite.test",
                          "http://127.0.0.1:8901", "127.0.0.1:8901", "192.168.64.242"],
             target: "127.0.0.1:8901")
-        XCTAssertEqual(origins, ["ignite.test", "192.168.64.242"])
+        XCTAssertEqual(origins, ["mysite.test", "192.168.64.242"])
     }
 
     func testStaleOriginsPreserveFirstSeenOrderAndSkipJunk() {
         let origins = EnvURLMigration.staleOrigins(
-            candidates: ["localhost:8901", "", "not a url", "https://ignite.test"],
+            candidates: ["localhost:8901", "", "not a url", "https://mysite.test"],
             target: "127.0.0.1:8901")
-        XCTAssertEqual(origins, ["localhost:8901", "ignite.test"])
+        XCTAssertEqual(origins, ["localhost:8901", "mysite.test"])
     }
 
     func testNetworkDomainIsMigratedLast() {
         // Until the bootstrap origin is rewritten, every earlier wp-cli call can
         // still find its network — so it has to go last.
         let origins = EnvURLMigration.staleOrigins(
-            candidates: ["ignite.test", "192.168.64.242", "localhost:8901"],
-            target: "127.0.0.1:8901", networkDomain: "ignite.test")
-        XCTAssertEqual(origins, ["192.168.64.242", "localhost:8901", "ignite.test"])
+            candidates: ["mysite.test", "192.168.64.242", "localhost:8901"],
+            target: "127.0.0.1:8901", networkDomain: "mysite.test")
+        XCTAssertEqual(origins, ["192.168.64.242", "localhost:8901", "mysite.test"])
     }
 
     func testNetworkDomainAbsentFromCandidatesChangesNothing() {
         let origins = EnvURLMigration.staleOrigins(
-            candidates: ["192.168.64.242"], target: "127.0.0.1:8901", networkDomain: "ignite.test")
+            candidates: ["192.168.64.242"], target: "127.0.0.1:8901", networkDomain: "mysite.test")
         XCTAssertEqual(origins, ["192.168.64.242"])
     }
 
     func testStaleOriginsIsEmptyForAnUnusableTarget() {
-        XCTAssertTrue(EnvURLMigration.staleOrigins(candidates: ["ignite.test"], target: "").isEmpty)
+        XCTAssertTrue(EnvURLMigration.staleOrigins(candidates: ["mysite.test"], target: "").isEmpty)
     }
 
     // MARK: - Multisite detection
@@ -148,7 +148,7 @@ final class EnvURLMigrationTests: XCTestCase {
 
     func testMultisiteCloneGetsDomainCurrentSite() {
         let updates = EnvURLMigration.configConstantUpdates(
-            existing: ["DOMAIN_CURRENT_SITE": "ignite.test"], targetAuthority: "127.0.0.1:8901", multisite: true)
+            existing: ["DOMAIN_CURRENT_SITE": "mysite.test"], targetAuthority: "127.0.0.1:8901", multisite: true)
         XCTAssertEqual(updates, [EnvURLMigration.ConstantUpdate(name: "DOMAIN_CURRENT_SITE", value: "127.0.0.1:8901")])
     }
 
@@ -166,13 +166,13 @@ final class EnvURLMigrationTests: XCTestCase {
 
     func testAStaleDomainCurrentSiteIsFixedEvenOnAnUndetectedNetwork() {
         let updates = EnvURLMigration.configConstantUpdates(
-            existing: ["DOMAIN_CURRENT_SITE": "ignite.test"], targetAuthority: "127.0.0.1:8901", multisite: false)
+            existing: ["DOMAIN_CURRENT_SITE": "mysite.test"], targetAuthority: "127.0.0.1:8901", multisite: false)
         XCTAssertEqual(updates.map(\.name), ["DOMAIN_CURRENT_SITE"])
     }
 
     func testHardcodedHomeAndSiteurlAreRewrittenToTheEnvURL() {
         let updates = EnvURLMigration.configConstantUpdates(
-            existing: ["WP_HOME": "https://ignite.test", "WP_SITEURL": "https://ignite.test"],
+            existing: ["WP_HOME": "https://mysite.test", "WP_SITEURL": "https://mysite.test"],
             targetAuthority: "127.0.0.1:8901", multisite: false)
         XCTAssertEqual(updates, [
             EnvURLMigration.ConstantUpdate(name: "WP_HOME", value: "http://127.0.0.1:8901"),
@@ -195,7 +195,7 @@ final class EnvURLMigrationTests: XCTestCase {
         define( 'DB_NAME', getenv_docker('WORDPRESS_DB_NAME', 'wordpress') );
         define( 'MULTISITE', true );
         define( 'SUBDOMAIN_INSTALL', false );
-        define( 'DOMAIN_CURRENT_SITE', 'ignite.test' );
+        define( 'DOMAIN_CURRENT_SITE', 'mysite.test' );
         define( 'PATH_CURRENT_SITE', '/' );
         $table_prefix = 'wp_';
         """)
@@ -225,8 +225,8 @@ final class EnvURLMigrationTests: XCTestCase {
     func testSetConstantRewritesHardcodedHomeURLs() throws {
         let folder = try makeTempWordPressFolder(config: """
         <?php
-        define( 'WP_HOME', 'https://ignite.test' );
-        define( 'WP_SITEURL', 'https://ignite.test' );
+        define( 'WP_HOME', 'https://mysite.test' );
+        define( 'WP_SITEURL', 'https://mysite.test' );
         $table_prefix = 'ig_';
         """)
         defer { try? FileManager.default.removeItem(at: folder) }

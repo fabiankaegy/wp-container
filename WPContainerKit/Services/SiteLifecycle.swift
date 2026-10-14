@@ -1092,7 +1092,7 @@ public actor SiteLifecycle {
     /// The probe's ONLY job is detecting that apache/php is up, so ANY HTTP
     /// response counts — 200, 3xx, even 500. Crucially it must NOT follow
     /// redirects: an HTTPS + custom-domain site answers the very first probe
-    /// with a canonical 301 to e.g. `https://democrats.local`, and following it
+    /// with a canonical 301 to e.g. `https://mysite.local`, and following it
     /// (URLSession's default) dead-ends when the reverse proxy isn't listening
     /// or the /etc/hosts entry is absent — misreading a perfectly healthy site
     /// as unresponsive until timeout (user-reported bug). Readiness must never

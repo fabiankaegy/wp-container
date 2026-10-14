@@ -10,7 +10,7 @@ final class HTTPSProxyRoutingTests: XCTestCase {
 
     private func env(slug: String, port: Int, branch: String = "feature/x") -> WorktreeEnv {
         WorktreeEnv(parentSiteID: parentID,
-                    parentSlug: "ignite-wp",
+                    parentSlug: "my-site",
                     envSlug: slug,
                     repoRelPath: "wp-content",
                     branch: branch,
@@ -23,50 +23,50 @@ final class HTTPSProxyRoutingTests: XCTestCase {
     // MARK: - Duplicate env slugs
 
     /// The real failure this guards: `sites.json` held two envs both slugged
-    /// `ignite-wp-wt-feature-…`, on ports 8906 and 8907. They collide on
+    /// `my-site-wt-feature-…`, on ports 8906 and 8907. They collide on
     /// `<envSlug>.localhost`, and whichever lost the dictionary write had its port
     /// orphaned — no listener bound it and it answered the unknown-host page.
     /// First wins, deterministically.
     func testDuplicateEnvSlugYieldsOneRouteKeepingTheFirst() {
         let envelope = StoreEnvelope(sites: [],
-                                     envs: [env(slug: "ignite-wp-wt-authors", port: 8906),
-                                            env(slug: "ignite-wp-wt-authors", port: 8907)])
+                                     envs: [env(slug: "my-site-wt-authors", port: 8906),
+                                            env(slug: "my-site-wt-authors", port: 8907)])
 
         let routes = HTTPSProxy.routes(from: envelope)
 
         XCTAssertEqual(routes.count, 1)
-        XCTAssertEqual(routes["ignite-wp-wt-authors.localhost"]?.port, 8906)
+        XCTAssertEqual(routes["my-site-wt-authors.localhost"]?.port, 8906)
     }
 
     func testDistinctEnvSlugsBothRoute() {
         let envelope = StoreEnvelope(sites: [],
-                                     envs: [env(slug: "ignite-wp-wt-authors", port: 8906),
-                                            env(slug: "ignite-wp-wt-blocks", port: 8907)])
+                                     envs: [env(slug: "my-site-wt-authors", port: 8906),
+                                            env(slug: "my-site-wt-blocks", port: 8907)])
 
         let routes = HTTPSProxy.routes(from: envelope)
 
         XCTAssertEqual(routes.count, 2)
-        XCTAssertEqual(routes["ignite-wp-wt-authors.localhost"]?.port, 8906)
-        XCTAssertEqual(routes["ignite-wp-wt-blocks.localhost"]?.port, 8907)
+        XCTAssertEqual(routes["my-site-wt-authors.localhost"]?.port, 8906)
+        XCTAssertEqual(routes["my-site-wt-blocks.localhost"]?.port, 8907)
     }
 
     func testEnvRoutesAreTaggedAsEnvsWithTheirParent() {
-        let envelope = StoreEnvelope(sites: [], envs: [env(slug: "ignite-wp-wt-authors", port: 8906)])
+        let envelope = StoreEnvelope(sites: [], envs: [env(slug: "my-site-wt-authors", port: 8906)])
 
-        let route = HTTPSProxy.routes(from: envelope)["ignite-wp-wt-authors.localhost"]
+        let route = HTTPSProxy.routes(from: envelope)["my-site-wt-authors.localhost"]
 
         XCTAssertEqual(route?.isEnv, true)
-        XCTAssertEqual(route?.parentSlug, "ignite-wp")
-        XCTAssertEqual(route?.slug, "ignite-wp-wt-authors")
+        XCTAssertEqual(route?.parentSlug, "my-site")
+        XCTAssertEqual(route?.slug, "my-site-wt-authors")
     }
 
     // MARK: - Local Network Privacy page
 
     func testLocalNetworkDeniedPageLinksToTheSettingsPaneAndSelfRefreshes() {
-        let route = HTTPSProxy.Route(port: 8906, slug: "ignite-wp-wt-authors",
-                                     displayName: "ignite-wp · feature/x",
-                                     containerName: "wpc-ignite-wp-wt-authors-wp",
-                                     isEnv: true, parentSlug: "ignite-wp")
+        let route = HTTPSProxy.Route(port: 8906, slug: "my-site-wt-authors",
+                                     displayName: "my-site · feature/x",
+                                     containerName: "wpc-my-site-wt-authors-wp",
+                                     isEnv: true, parentSlug: "my-site")
 
         let page = HTTPSProxy.localNetworkDeniedPage(host: "127.0.0.1:8906", route: route)
 
