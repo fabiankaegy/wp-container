@@ -13,6 +13,11 @@ public enum HostsFileService {
     public static let endMarker = "# wp-container end"
     public static let hostsPath = "/etc/hosts"
     public static let loopbackIPv4 = "127.0.0.1"
+    /// Written next to every IPv4 entry. Without an AAAA answer from
+    /// `/etc/hosts`, macOS sends the IPv6 lookup for a `.local` name to mDNS and
+    /// waits out its 5s timeout on every page load. The proxy listens dual-stack,
+    /// so `::1` reaches it too.
+    public static let loopbackIPv6 = "::1"
 
     public enum HostsError: Error, Sendable, CustomStringConvertible {
         case adminFailed(String)
@@ -45,10 +50,13 @@ public enum HostsFileService {
             lines.removeSubrange(begin...endRel)
         } else if let begin = lines.firstIndex(of: beginMarker) {
             // Corrupted: a begin without an end. Remove the marker and the run of
-            // our-format entry lines (`127.0.0.1\t<host>`) that follow it.
+            // our-format entry lines (`127.0.0.1\t<host>` / `::1\t<host>`) that follow it.
             var last = begin
             var i = begin + 1
-            while i < lines.count, lines[i].hasPrefix("\(loopbackIPv4)\t") { last = i; i += 1 }
+            while i < lines.count,
+                  lines[i].hasPrefix("\(loopbackIPv4)\t") || lines[i].hasPrefix("\(loopbackIPv6)\t") {
+                last = i; i += 1
+            }
             lines.removeSubrange(begin...last)
         }
         // Drop any orphaned marker lines left by a corrupted prior edit.
@@ -56,28 +64,43 @@ public enum HostsFileService {
         // Trim trailing blanks so we append cleanly.
         while lines.last?.isEmpty == true { lines.removeLast() }
 
-        var seen = Set<String>()
-        let clean = domains
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty && seen.insert($0).inserted }
-
-        if !clean.isEmpty {
+        let entries = entryLines(for: domains)
+        if !entries.isEmpty {
             if !lines.isEmpty { lines.append("") }
             lines.append(beginMarker)
-            for domain in clean { lines.append("\(loopbackIPv4)\t\(domain)") }
+            lines.append(contentsOf: entries)
             lines.append(endMarker)
         }
         return lines.joined(separator: "\n") + "\n"
     }
 
-    /// The domains currently listed inside the managed block of `contents`.
-    public static func managedDomains(in contents: String) -> [String] {
+    /// The lines the managed block should hold for `domains`: an IPv4 and an
+    /// IPv6 loopback entry per domain (deduped, order-preserving).
+    static func entryLines(for domains: [String]) -> [String] {
+        var seen = Set<String>()
+        return domains
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+            .flatMap { ["\(loopbackIPv4)\t\($0)", "\(loopbackIPv6)\t\($0)"] }
+    }
+
+    /// The raw lines between the managed block's markers, or [] when there is none.
+    private static func managedBlockLines(in contents: String) -> [String] {
         let lines = contents.components(separatedBy: "\n")
         guard let begin = lines.firstIndex(of: beginMarker),
               let endRel = lines[begin...].firstIndex(of: endMarker), endRel > begin else { return [] }
-        return lines[(begin + 1)..<endRel].compactMap { line in
+        return Array(lines[(begin + 1)..<endRel])
+    }
+
+    /// The domains currently listed inside the managed block of `contents`
+    /// (each once, even though it has both an IPv4 and an IPv6 line).
+    public static func managedDomains(in contents: String) -> [String] {
+        var seen = Set<String>()
+        return managedBlockLines(in: contents).compactMap { line in
             let parts = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
-            return parts.count >= 2 ? String(parts[1]) : nil
+            guard parts.count >= 2 else { return nil }
+            let domain = String(parts[1])
+            return seen.insert(domain).inserted ? domain : nil
         }
     }
 
@@ -93,11 +116,16 @@ public enum HostsFileService {
     }
 
     /// True if the managed block already exactly matches `domains` (no admin
-    /// prompt needed).
+    /// prompt needed). Compares whole lines, not just domains, so a block written
+    /// before the `::1` entries existed counts as stale and gets upgraded.
     public static func isUpToDate(domains: [String]) -> Bool {
         guard let current = try? String(contentsOfFile: hostsPath, encoding: .utf8) else { return false }
-        let want = Set(domains.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
-        return Set(managedDomains(in: current)) == want
+        return isUpToDate(current, domains: domains)
+    }
+
+    /// Pure form of `isUpToDate(domains:)` for testing.
+    static func isUpToDate(_ contents: String, domains: [String]) -> Bool {
+        Set(managedBlockLines(in: contents)) == Set(entryLines(for: domains))
     }
 
     /// Rewrite the managed block to exactly `domains` (the union across all

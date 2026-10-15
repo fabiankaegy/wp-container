@@ -14,6 +14,11 @@ enum HostsBlockRewriter {
     static let beginMarker = "# wp-container begin"
     static let endMarker = "# wp-container end"
     static let loopbackIPv4 = "127.0.0.1"
+    /// Written next to every IPv4 entry. Without an AAAA answer from
+    /// `/etc/hosts`, macOS sends the IPv6 lookup for a `.local` name to mDNS and
+    /// waits out its 5s timeout on every page load. Callers still send IPv4-only
+    /// entries; the helper derives the `::1` line itself.
+    static let loopbackIPv6 = "::1"
 
     enum ValidationError: Error, CustomStringConvertible, Equatable {
         case malformedEntry(String)
@@ -85,10 +90,10 @@ enum HostsBlockRewriter {
             lines.removeSubrange(begin...endRel)
         } else if let begin = lines.firstIndex(of: beginMarker) {
             // Corrupted: a begin without an end. Remove the marker and the run of
-            // our-format entry lines (`127.0.0.1\t<host>`) that follow it.
+            // our-format entry lines (`127.0.0.1\t<host>` / `::1\t<host>`) that follow it.
             var last = begin
             var i = begin + 1
-            while i < lines.count, lines[i].hasPrefix("\(loopbackIPv4)\t") { last = i; i += 1 }
+            while i < lines.count, isOurEntryLine(lines[i]) { last = i; i += 1 }
             lines.removeSubrange(begin...last)
         }
         lines.removeAll { $0 == beginMarker || $0 == endMarker }
@@ -96,8 +101,13 @@ enum HostsBlockRewriter {
         return lines
     }
 
+    private static func isOurEntryLine(_ line: String) -> Bool {
+        line.hasPrefix("\(loopbackIPv4)\t") || line.hasPrefix("\(loopbackIPv6)\t")
+    }
+
     /// Return `contents` with the managed block replaced by a fresh block built
     /// from `entries` (each `127.0.0.1 <hostname>`; deduped, order-preserving).
+    /// Every host is written twice: once for `127.0.0.1` and once for `::1`.
     /// Throws `ValidationError` if ANY entry is malformed or names an invalid
     /// hostname — the whole operation is rejected rather than partially applied.
     /// An empty `entries` removes the block entirely.
@@ -113,7 +123,10 @@ enum HostsBlockRewriter {
         if !hosts.isEmpty {
             if !lines.isEmpty { lines.append("") }
             lines.append(beginMarker)
-            for host in hosts { lines.append("\(loopbackIPv4)\t\(host)") }
+            for host in hosts {
+                lines.append("\(loopbackIPv4)\t\(host)")
+                lines.append("\(loopbackIPv6)\t\(host)")
+            }
             lines.append(endMarker)
         }
         return lines.joined(separator: "\n") + "\n"
