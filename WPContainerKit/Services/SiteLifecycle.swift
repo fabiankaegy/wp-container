@@ -1036,7 +1036,7 @@ public actor SiteLifecycle {
     /// One TCP connect attempt. True ⇒ the port accepted a connection.
     private static func tcpProbe(host: String, port: UInt16, timeout: Duration) async -> Bool {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else { return false }
-        let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .tcp)
+        let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .containerTCP)
         let once = ResumeOnce()
         return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
             connection.stateUpdateHandler = { state in

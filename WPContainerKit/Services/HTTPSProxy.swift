@@ -319,7 +319,7 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// or unroutable address says nothing about our permission.
     private func probeLocalNetworkAccess() async {
         guard let address = stateLock.withLock({ containerIPs.values.sorted().first }) else { return }
-        let connection = NWConnection(host: NWEndpoint.Host(address), port: 80, using: .tcp)
+        let connection = NWConnection(host: NWEndpoint.Host(address), port: 80, using: .containerTCP)
         let denied = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
             let decided = ResumeOnce()
             connection.stateUpdateHandler = { state in
@@ -1488,7 +1488,7 @@ public final class HTTPSProxy: @unchecked Sendable {
         let deadlineSeconds: Double = isSoleContainerIP ? 5 : 2
         let maxAttempts = isSoleContainerIP ? 2 : 1
         let upstream = NWConnection(host: NWEndpoint.Host(candidate.host),
-                                    port: NWEndpoint.Port(rawValue: candidate.port)!, using: .tcp)
+                                    port: NWEndpoint.Port(rawValue: candidate.port)!, using: .containerTCP)
         let decided = ResumeOnce()
         /// `evictHint`: whether to forget the cached IP (see `invalidatesIPHint`).
         /// `reason`: what ended this attempt, for the log line below.
