@@ -13,11 +13,13 @@ import Security
 /// SITE containers are never touched — they publish their own
 /// `127.0.0.1:<port>` and this proxy is purely additive in front of them.
 /// WORKTREE ENVS are different (issue #16 follow-through): their containers
-/// publish NOTHING, and this proxy binds `127.0.0.1:<env port>` itself, one
-/// loopback listener per env, relaying to the container's vmnet IP. That is what
-/// makes an env's single advertised URL observable by the idle clock and wakeable
-/// when parked — and it keeps env traffic off Apple's lossy port forwarder
-/// entirely. See `envPortListeners` / `RunnableInstance.publishesPort`.
+/// publish NOTHING, so every way into an env runs through this proxy — its
+/// domain URL (`WorktreeEnv.domainHost`, by Host on 443/80) and its legacy
+/// `127.0.0.1:<env port>`, which this proxy binds itself, one loopback listener
+/// per env. Both relay to the container's vmnet IP. That is what makes an env
+/// observable by the idle clock and wakeable when parked — and it keeps env
+/// traffic off Apple's lossy port forwarder entirely. See `envPortListeners` /
+/// `RunnableInstance.publishesPort`.
 ///
 /// Deliberately simple and correct rather than clever: TLS in, one HTTP/1.1
 /// request per connection (we force `Connection: close`), a header rewrite at the
@@ -418,11 +420,16 @@ public final class HTTPSProxy: @unchecked Sendable {
         return stateLock.withLock { envPortListeners[port] != nil }
     }
 
-    /// Build a routing table from a store envelope: every site and env is
-    /// reachable at `<slug>.localhost`, and custom-domain sites also at their
-    /// domain, regardless of `httpsEnabled` (the flag governs WordPress URL
-    /// rewriting, not proxy reachability). Subdomain-multisite wildcards are
-    /// handled by the leftmost-label fallback in `route(forHost:)`.
+    /// Build a routing table from a store envelope: every site is reachable at
+    /// `<slug>.localhost` and every env at its `domainHost`, and custom-domain
+    /// sites also at their domain, regardless of `httpsEnabled` (the flag
+    /// governs WordPress URL rewriting, not proxy reachability). Subdomain-
+    /// multisite wildcards are handled by the leftmost-label fallback in
+    /// `route(forHost:)`.
+    ///
+    /// An env route reached by Host takes the same path as one reached on the
+    /// env's own `127.0.0.1:<port>` listener (see `route(inbound:…)`): the same
+    /// idle-clock stamp, the same container-IP dial, the same wake gate.
     public static func routes(from envelope: StoreEnvelope) -> [String: Route] {
         var map: [String: Route] = [:]
         for site in envelope.sites {
@@ -440,7 +447,7 @@ public final class HTTPSProxy: @unchecked Sendable {
             }
         }
         for env in envelope.envs {
-            let host = "\(env.envSlug).localhost"
+            let host = env.domainHost
             // `sites.json` can end up with two envs sharing an `envSlug` (same
             // parent + branch, created twice). They collide on this key, and since
             // `portMap` is derived from these values the loser's port is left
@@ -487,8 +494,12 @@ public final class HTTPSProxy: @unchecked Sendable {
             // trusted when the proxy serves it (issue #10).
             if site.mailpitEnabled, site.mailpitPort != nil { hosts.insert("\(site.slug)-mail.localhost") }
         }
+        let subdomainParents = Set(envelope.sites.filter { $0.networkType.isSubdomain }.map(\.id))
         for env in envelope.envs {
-            hosts.insert("\(env.envSlug).localhost")
+            hosts.insert(env.domainHost)
+            // A subdomain-multisite clone serves its subsites at
+            // `<sub>.<env host>` (the bare-host migration pass puts them there).
+            if subdomainParents.contains(env.parentSiteID) { hosts.insert("*.\(env.domainHost)") }
             if env.mailpitEnabled, env.mailpitPort != nil { hosts.insert("\(env.envSlug)-mail.localhost") }
         }
         return Array(hosts)
@@ -1329,8 +1340,9 @@ public final class HTTPSProxy: @unchecked Sendable {
 
         let host = Self.headerValue("Host", in: lines) ?? ""
         // A request on a proxy-owned env port resolves by SOCKET, not by Host —
-        // `127.0.0.1:<port>` is what the env advertises and what WordPress has
-        // pinned, and it maps to no hostname at all. Everything downstream from
+        // `127.0.0.1:<port>` (what an env not yet moved onto its domain still
+        // advertises and has in its database) maps to no hostname at all. An
+        // env's domain URL resolves by Host like any site. Everything downstream from
         // here (dial, wake gate, waking/stopped/unresponsive pages, Retry-After)
         // is then identical for both entry points, by construction.
         let resolved = context.pinnedPort.map { self.route(forPort: $0) } ?? self.route(forHost: host)

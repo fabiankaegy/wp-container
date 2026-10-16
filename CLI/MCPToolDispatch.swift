@@ -467,7 +467,7 @@ enum MCPToolDispatch {
         let envs = envelope.envs.map { e -> [String: Any] in
             ["envSlug": e.envSlug, "parentSlug": e.parentSlug, "branch": e.branch,
              "status": running.contains(e.wpContainerName) ? "running" : "stopped",
-             "url": e.localURL.absoluteString, "port": e.port]
+             "url": e.url.absoluteString, "localUrl": e.localURL.absoluteString, "port": e.port]
         }
         return MCPResult.json(["sites": sites, "envs": envs])
     }
@@ -519,7 +519,7 @@ enum MCPToolDispatch {
         }
         let d = WorktreeDescriptor(from: env)
         var payload: [String: Any] = [
-            "url": d.url, "port": d.port, "path": d.path, "worktreePath": d.worktreePath,
+            "url": d.url, "localUrl": d.localUrl, "port": d.port, "path": d.path, "worktreePath": d.worktreePath,
             "branch": d.branch, "envSlug": d.envSlug, "containers": d.containers,
             // So an agent can see WHERE this env's data actually lives (#17).
             "database": ["name": env.databaseName, "container": env.dbContainerName,
@@ -540,7 +540,7 @@ enum MCPToolDispatch {
         let envs = envelope.envs.filter { filter == "*" || $0.parentSlug == filter }.map { e -> [String: Any] in
             ["envSlug": e.envSlug, "parentSlug": e.parentSlug, "branch": e.branch, "repoRelPath": e.repoRelPath,
              "status": running.contains(e.wpContainerName) ? "running" : "stopped",
-             "url": e.localURL.absoluteString, "port": e.port, "worktreePath": e.worktreePath.path,
+             "url": e.url.absoluteString, "localUrl": e.localURL.absoluteString, "port": e.port, "worktreePath": e.worktreePath.path,
              // Auto-stop-when-idle (issue #16), so an agent can see whether an env
              // may be parked under it and opt in/out via `set_idle_stop`.
              "idleStopMinutes": e.idleStopMinutes as Any? ?? NSNull(),

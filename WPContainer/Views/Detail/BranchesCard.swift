@@ -65,7 +65,7 @@ private struct EnvRow: View {
 
             HStack(spacing: 2) {
                 iconButton("safari", help: "Open in browser") {
-                    SystemActions.openInBrowser(env.localURL)
+                    SystemActions.openInBrowser(env.url)
                 }
                 .disabled(!env.status.isRunning)
 

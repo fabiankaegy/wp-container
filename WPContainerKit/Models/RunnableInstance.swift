@@ -93,10 +93,11 @@ public protocol RunnableInstance: Sendable {
     /// `container`'s port forwarder (issue #16 follow-through).
     ///
     /// True for sites, FALSE for worktree envs: the HTTPS proxy binds each env's
-    /// `127.0.0.1:<port>` socket itself and relays to the container's vmnet IP.
-    /// Two things fall out of that, both the point of the exercise — every request
-    /// to the env's advertised URL becomes visible to the idle clock, and a parked
-    /// env wakes at the exact URL users already hold — plus a third that is pure
+    /// `127.0.0.1:<port>` socket itself (and serves its domain URL by Host on
+    /// 443/80), relaying to the container's vmnet IP. Two things fall out of
+    /// that, both the point of the exercise — every request to either env URL
+    /// becomes visible to the idle clock, and a parked env wakes at the exact
+    /// URL users already hold — plus a third that is pure
     /// gain: env traffic stops crossing the lossy forwarder (see
     /// `HTTPSProxy.Route.containerName` for what "lossy" means here).
     ///
@@ -163,7 +164,8 @@ public extension RunnableInstance {
     /// The proxy hostname for the mailbox (`<slug>-mail.localhost`, issue #10).
     var mailboxHost: String { "\(containerSlug)-mail.localhost" }
     /// Default loopback set: the `<containerSlug>.localhost` proxy hostname.
-    /// Site overrides this to add its custom domain.
+    /// Site overrides this to add its custom domain; `WorktreeEnv` to use its
+    /// `domainHost`.
     var loopbackHosts: [String] { ["\(containerSlug).localhost"] }
     /// Default: the container publishes its own host port. `WorktreeEnv` opts out.
     var publishesPort: Bool { true }
