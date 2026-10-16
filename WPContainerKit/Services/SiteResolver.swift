@@ -21,6 +21,13 @@ public enum SiteResolver {
         /// schema on the parent's server (issue #17), and the router MUST pass
         /// this through or `wp` would operate on the parent's data.
         public let dbName: String
+        /// Sidecar container names whose addresses the router passes to wp-cli
+        /// (`WPC_MAILPIT_HOST`, `EP_HOST`) when they are running.
+        public let mailContainer: String
+        public let esContainer: String
+        /// The instance's `php/` overrides folder, mounted so wp-cli loads the
+        /// managed runtime handlers.
+        public let phpConfPath: String
     }
 
     /// The most-specific match for `path` (longest `wordpress/` prefix wins), or
@@ -42,7 +49,10 @@ public enum SiteResolver {
                              wordpressPath: wpPath, dbContainer: inst.dbContainerName,
                              port: inst.port, subpath: sub,
                              cliImage: WordPressImageCatalog.cliImage(for: inst.imageTag),
-                             dbName: inst.databaseName)
+                             dbName: inst.databaseName,
+                             mailContainer: inst.mailContainerName,
+                             esContainer: inst.esContainerName,
+                             phpConfPath: inst.phpConfFolder.path)
             }
         }
 

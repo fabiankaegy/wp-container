@@ -10,6 +10,11 @@ import Foundation
 /// path-relative commands (scaffold, `plugin`, …) land where the user expects.
 /// TTY is added only when stdout is a terminal; stdin is always attached so
 /// piping works.
+///
+/// Each invocation also mounts the instance's `php/` overrides folder and passes
+/// the running sidecars' addresses (`WPC_MAILPIT_HOST`, `EP_HOST`), so wp-cli
+/// loads the same managed runtime handlers as the wp container. A sidecar that
+/// isn't running yields an empty value, which the handlers treat as "not wired".
 public enum WPCLIShim {
     public static let containerBinary = ContainerCLI.defaultBinaryPath
     public static let cliPath = "/usr/local/bin/wp-container"
@@ -34,9 +39,20 @@ public enum WPCLIShim {
     /// site's PHP-matched cli image (was hardcoded `wordpress:cli`); v4 bakes in
     /// the real DB CONTAINER and SCHEMA instead of deriving them from the slug,
     /// so a shared-database worktree env resolves the parent's container and its
-    /// own `wpc_*` schema (issue #17).
-    public static let shimVersion = 4
+    /// own `wpc_*` schema (issue #17); v5 mounts the `php/` overrides folder and
+    /// passes the Mailpit/Elasticsearch sidecar addresses.
+    public static let shimVersion = 5
     private static let versionMarker = "# wpc-shim-version:"
+
+    /// Bash function shared by the shim and the router: prints a running
+    /// container's IPv4, or nothing when it isn't running. `|| true` keeps a
+    /// missing container from aborting a `set -euo pipefail` script.
+    static let containerIPFunction = """
+    container_ip() {
+      "$CONTAINER_BIN" inspect "$1" 2>/dev/null \\
+        | sed -n 's/.*"ipv4Address"[^"]*"\\([0-9.]*\\).*/\\1/p' | head -n1 || true
+    }
+    """
 
     // MARK: - Per-site shim
 
@@ -48,10 +64,17 @@ public enum WPCLIShim {
     /// slug (issue #17): they differ for a shared-database env, which talks to its
     /// PARENT's container and its own schema. Both default to the classic
     /// per-site values.
+    ///
+    /// `mailContainer`, `esContainer` and `phpConfFolder` default to the classic
+    /// per-site names and the `php/` folder beside `wordpressFolder`.
     public static func shimScript(slug: String, wordpressFolder: URL, cliImage: String,
                                   dbContainer: String? = nil,
-                                  databaseName: String = SiteRecipe.dbName) -> String {
-        """
+                                  databaseName: String = SiteRecipe.dbName,
+                                  mailContainer: String? = nil,
+                                  esContainer: String? = nil,
+                                  phpConfFolder: URL? = nil) -> String {
+        let phpDir = phpConfFolder ?? PrependService.phpFolder(forWordpress: wordpressFolder)
+        return """
         #!/bin/bash
         \(versionMarker) \(shimVersion)
         # WP Container wp-cli shim for site "\(slug)". Auto-generated — do not edit.
@@ -64,12 +87,17 @@ public enum WPCLIShim {
         CONTAINER_BIN="\(containerBinary)"
         SITE_SLUG="\(slug)"
         DB_CONTAINER="\(dbContainer ?? "wpc-\(slug)-db")"
+        MAIL_CONTAINER="\(mailContainer ?? "wpc-\(slug)-mail")"
+        ES_CONTAINER="\(esContainer ?? "wpc-\(slug)-es")"
         WP_DIR="\(wordpressFolder.path)"
+        PHP_DIR="\(phpDir.path)"
 
         if [ ! -x "$CONTAINER_BIN" ]; then
           echo "wp: Apple container CLI not found at $CONTAINER_BIN" >&2
           exit 1
         fi
+
+        \(containerIPFunction)
 
         # Map the current directory to a container workdir when inside wordpress/.
         WORKDIR="/var/www/html"
@@ -81,22 +109,33 @@ public enum WPCLIShim {
           WORKDIR="/var/www/html/${CUR#"$WP_REAL"/}"
         fi
 
-        DB_IP="$("$CONTAINER_BIN" inspect "$DB_CONTAINER" 2>/dev/null \\
-          | sed -n 's/.*"ipv4Address"[^"]*"\\([0-9.]*\\).*/\\1/p' | head -n1)"
+        DB_IP="$(container_ip "$DB_CONTAINER")"
         if [ -z "$DB_IP" ]; then
           echo "wp: database container '$DB_CONTAINER' is not running." >&2
           echo "    Start the site first (e.g. wp-container start $SITE_SLUG)." >&2
           exit 1
+        fi
+        MAIL_IP="$(container_ip "$MAIL_CONTAINER")"
+        ES_IP="$(container_ip "$ES_CONTAINER")"
+
+        # Managed runtime handlers load via the php/ overrides folder once it exists.
+        PHP_ARGS=()
+        if [ -d "$PHP_DIR" ]; then
+          PHP_ARGS=(-v "$PHP_DIR:\(SiteRecipe.phpConfContainerPath)" \\
+            -e "PHP_INI_SCAN_DIR=\(SiteRecipe.phpDefaultConfDir):\(SiteRecipe.phpConfContainerPath)")
         fi
 
         TTY=""
         [ -t 1 ] && TTY="-t"
         exec "$CONTAINER_BIN" run --rm -i $TTY -w "$WORKDIR" \\
           -v "$WP_DIR:/var/www/html" \\
+          ${PHP_ARGS[@]+"${PHP_ARGS[@]}"} \\
           -e "WORDPRESS_DB_HOST=$DB_IP" \\
           -e "WORDPRESS_DB_USER=\(SiteRecipe.dbUser)" \\
           -e "WORDPRESS_DB_PASSWORD=\(SiteRecipe.dbPassword)" \\
           -e "WORDPRESS_DB_NAME=\(databaseName)" \\
+          -e "WPC_MAILPIT_HOST=$MAIL_IP" \\
+          -e "EP_HOST=${ES_IP:+http://$ES_IP:9200}" \\
           "\(cliImage)" wp "$@"
         """
     }
@@ -109,12 +148,17 @@ public enum WPCLIShim {
     public static func writeShim(slug: String, siteRoot: URL, wordpressFolder: URL? = nil,
                                  cliImage: String = WordPressImageCatalog.baseCLIImage,
                                  dbContainer: String? = nil,
-                                 databaseName: String = SiteRecipe.dbName) throws -> URL {
+                                 databaseName: String = SiteRecipe.dbName,
+                                 mailContainer: String? = nil,
+                                 esContainer: String? = nil,
+                                 phpConfFolder: URL? = nil) throws -> URL {
         let url = siteRoot.appendingPathComponent("wp")
         let wp = wordpressFolder ?? siteRoot.appendingPathComponent("wordpress", isDirectory: true)
         try FileManager.default.createDirectory(at: siteRoot, withIntermediateDirectories: true)
         try shimScript(slug: slug, wordpressFolder: wp, cliImage: cliImage,
-                       dbContainer: dbContainer, databaseName: databaseName)
+                       dbContainer: dbContainer, databaseName: databaseName,
+                       mailContainer: mailContainer, esContainer: esContainer,
+                       phpConfFolder: phpConfFolder)
             .write(to: url, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
         return url
@@ -131,7 +175,10 @@ public enum WPCLIShim {
                       wordpressFolder: wordpressFolder ?? inst.wordpressFolder,
                       cliImage: SiteRecipe.cliImage(for: inst),
                       dbContainer: inst.dbContainerName,
-                      databaseName: inst.databaseName)
+                      databaseName: inst.databaseName,
+                      mailContainer: inst.mailContainerName,
+                      esContainer: inst.esContainerName,
+                      phpConfFolder: inst.phpConfFolder)
     }
 
     /// Whether the shim at `<siteRoot>/wp` is missing or older than the current
@@ -157,7 +204,9 @@ public enum WPCLIShim {
     /// calls on every invocation — does it for CLI-only users). v2 passes the
     /// resolved schema through as `WORDPRESS_DB_NAME`, which a shared-database
     /// worktree env needs to avoid operating on its PARENT's data (issue #17).
-    public static let routerVersion = 2
+    /// v3 mounts the resolved `php/` overrides folder and passes the
+    /// Mailpit/Elasticsearch sidecar addresses.
+    public static let routerVersion = 3
     private static let routerVersionMarker = "# wpc-router-version:"
     /// The flag the router announces its own body version with. `resolve-site`
     /// REFUSES to resolve a shared-database env for a router too old to honor
@@ -178,6 +227,8 @@ public enum WPCLIShim {
         CLI="\(cliPath)"
         CONTAINER_BIN="\(containerBinary)"
 
+        \(containerIPFunction)
+
         RESOLVED=""
         if [ -x "$CLI" ]; then
           RESOLVED="$("$CLI" resolve-site --path "$PWD" \(routerVersionFlag) \(routerVersion) --json 2>/dev/null || true)"
@@ -192,12 +243,24 @@ public enum WPCLIShim {
         print("WPC_SUB=" + shlex.quote(d.get("subpath", "")))
         print("WPC_CLI=" + shlex.quote(d.get("cliImage", "wordpress:cli")))
         print("WPC_DBNAME=" + shlex.quote(d.get("dbName", "\(SiteRecipe.dbName)")))
+        print("WPC_MAIL=" + shlex.quote(d.get("mailContainer", "")))
+        print("WPC_ES=" + shlex.quote(d.get("esContainer", "")))
+        print("WPC_PHP=" + shlex.quote(d.get("phpConfPath", "")))
         ')"
-          DB_IP="$("$CONTAINER_BIN" inspect "$WPC_DB" 2>/dev/null \\
-            | sed -n 's/.*"ipv4Address"[^"]*"\\([0-9.]*\\).*/\\1/p' | head -n1)"
+          DB_IP="$(container_ip "$WPC_DB")"
           if [ -z "$DB_IP" ]; then
             echo "wp: this WP Container site is not running (start it first)." >&2
             exit 1
+          fi
+          MAIL_IP=""
+          [ -n "$WPC_MAIL" ] && MAIL_IP="$(container_ip "$WPC_MAIL")"
+          ES_IP=""
+          [ -n "$WPC_ES" ] && ES_IP="$(container_ip "$WPC_ES")"
+          # Managed runtime handlers load via the php/ overrides folder once it exists.
+          PHP_ARGS=()
+          if [ -n "$WPC_PHP" ] && [ -d "$WPC_PHP" ]; then
+            PHP_ARGS=(-v "$WPC_PHP:\(SiteRecipe.phpConfContainerPath)" \\
+              -e "PHP_INI_SCAN_DIR=\(SiteRecipe.phpDefaultConfDir):\(SiteRecipe.phpConfContainerPath)")
           fi
           WORKDIR="/var/www/html"
           [ -n "$WPC_SUB" ] && WORKDIR="/var/www/html/$WPC_SUB"
@@ -205,10 +268,13 @@ public enum WPCLIShim {
           [ -t 1 ] && TTY="-t"
           exec "$CONTAINER_BIN" run --rm -i $TTY -w "$WORKDIR" \\
             -v "$WPC_WP:/var/www/html" \\
+            ${PHP_ARGS[@]+"${PHP_ARGS[@]}"} \\
             -e "WORDPRESS_DB_HOST=$DB_IP" \\
             -e "WORDPRESS_DB_USER=\(SiteRecipe.dbUser)" \\
             -e "WORDPRESS_DB_PASSWORD=\(SiteRecipe.dbPassword)" \\
             -e "WORDPRESS_DB_NAME=${WPC_DBNAME:-\(SiteRecipe.dbName)}" \\
+            -e "WPC_MAILPIT_HOST=$MAIL_IP" \\
+            -e "EP_HOST=${ES_IP:+http://$ES_IP:9200}" \\
             "${WPC_CLI:-\(WordPressImageCatalog.baseCLIImage)}" wp "$@"
         fi
 
@@ -273,18 +339,32 @@ public enum WPCLIShim {
     /// slug (issue #17) so an interactive shell for a shared-database env lands
     /// in the env's schema on the parent's server. Prefer
     /// `interactiveTerminalCommand(for:)`.
+    ///
+    /// Runs in the user's login shell (zsh or bash), so it sticks to syntax both
+    /// accept. The `php/` overrides folder exists from the first start onward,
+    /// which the running-DB check already implies, so it is mounted as-is.
     public static func interactiveTerminalCommand(slug: String, wordpressFolder: URL,
                                                   cliImage: String = WordPressImageCatalog.baseCLIImage,
                                                   dbContainer: String? = nil,
-                                                  databaseName: String = SiteRecipe.dbName) -> String {
+                                                  databaseName: String = SiteRecipe.dbName,
+                                                  mailContainer: String? = nil,
+                                                  esContainer: String? = nil,
+                                                  phpConfFolder: URL? = nil) -> String {
         let wp = wordpressFolder.path
+        let php = (phpConfFolder ?? PrependService.phpFolder(forWordpress: wordpressFolder)).path
         let db = dbContainer ?? "wpc-\(slug)-db"
+        let mail = mailContainer ?? "wpc-\(slug)-mail"
+        let es = esContainer ?? "wpc-\(slug)-es"
         return """
-        DB_IP=$(\(containerBinary) inspect \(shellQuote(db)) 2>/dev/null | sed -n 's/.*\"ipv4Address\"[^\"]*\"\\([0-9.]*\\).*/\\1/p' | head -n1); \
-        if [ -z "$DB_IP" ]; then echo 'Site \(slug) is not running — start it first.'; else \
+        DB_IP=\(terminalIPLookup(db)); MAIL_IP=\(terminalIPLookup(mail)); ES_IP=\(terminalIPLookup(es)); \
+        if [ -z "$DB_IP" ]; then echo 'Site \(slug) is not running — start it first.'; \
+        elif [ ! -d \(shellQuote(php)) ]; then echo 'Site \(slug) has not finished its first start yet.'; else \
         \(containerBinary) run -it --rm -w /var/www/html -v \(shellQuote(wp)):/var/www/html \
+        -v \(shellQuote(php)):\(SiteRecipe.phpConfContainerPath) \
+        -e PHP_INI_SCAN_DIR=\(SiteRecipe.phpDefaultConfDir):\(SiteRecipe.phpConfContainerPath) \
         -e WORDPRESS_DB_HOST=$DB_IP -e WORDPRESS_DB_USER=\(SiteRecipe.dbUser) \
         -e WORDPRESS_DB_PASSWORD=\(SiteRecipe.dbPassword) -e WORDPRESS_DB_NAME=\(databaseName) \
+        -e "WPC_MAILPIT_HOST=$MAIL_IP" -e "EP_HOST=${ES_IP:+http://$ES_IP:9200}" \
         \(cliImage) bash; fi
         """
     }
@@ -295,7 +375,16 @@ public enum WPCLIShim {
         interactiveTerminalCommand(slug: slug, wordpressFolder: inst.wordpressFolder,
                                    cliImage: SiteRecipe.cliImage(for: inst),
                                    dbContainer: inst.dbContainerName,
-                                   databaseName: inst.databaseName)
+                                   databaseName: inst.databaseName,
+                                   mailContainer: inst.mailContainerName,
+                                   esContainer: inst.esContainerName,
+                                   phpConfFolder: inst.phpConfFolder)
+    }
+
+    /// Command substitution printing a container's IPv4, or nothing when it
+    /// isn't running.
+    private static func terminalIPLookup(_ container: String) -> String {
+        "$(\(containerBinary) inspect \(shellQuote(container)) 2>/dev/null | sed -n 's/.*\"ipv4Address\"[^\"]*\"\\([0-9.]*\\).*/\\1/p' | head -n1)"
     }
 
     private static func shellQuote(_ s: String) -> String {
