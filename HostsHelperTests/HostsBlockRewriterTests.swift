@@ -27,8 +27,15 @@ final class HostsBlockRewriterTests: XCTestCase {
         XCTAssertTrue(out.contains("127.0.0.1\tlocalhost"))
         XCTAssertTrue(out.contains("255.255.255.255\tbroadcasthost"))
         XCTAssertTrue(out.contains("::1             localhost"))
-        // Managed block present with normalized tab-separated entries.
-        XCTAssertTrue(out.contains("# wp-container begin\n127.0.0.1\tmysite.local\n127.0.0.1\tshop.example.dev\n# wp-container end"))
+        // Managed block present with normalized tab-separated IPv4 + IPv6 entries.
+        XCTAssertTrue(out.contains("""
+        # wp-container begin
+        127.0.0.1\tmysite.local
+        ::1\tmysite.local
+        127.0.0.1\tshop.example.dev
+        ::1\tshop.example.dev
+        # wp-container end
+        """))
         XCTAssertTrue(out.hasSuffix("\n"))
     }
 
@@ -47,8 +54,8 @@ final class HostsBlockRewriterTests: XCTestCase {
             "127.0.0.1\ta.local",
             "127.0.0.1\tb.local",
         ])
-        let block = out.components(separatedBy: "\n").filter { $0.hasPrefix("127.0.0.1") }
-        XCTAssertEqual(block, ["127.0.0.1\tb.local", "127.0.0.1\ta.local"])
+        let block = out.components(separatedBy: "\n").filter { $0.hasPrefix("127.0.0.1") || $0.hasPrefix("::1") }
+        XCTAssertEqual(block, ["127.0.0.1\tb.local", "::1\tb.local", "127.0.0.1\ta.local", "::1\ta.local"])
     }
 
     func testEmptyEntriesRemovesBlockEntirely() throws {
@@ -75,6 +82,7 @@ final class HostsBlockRewriterTests: XCTestCase {
 
         # wp-container begin
         127.0.0.1\tstale-a.local
+        ::1\tstale-a.local
         127.0.0.1\tstale-b.local
         """
         let out = try HostsBlockRewriter.rewrite(corrupted, entries: ["127.0.0.1\tfresh.local"])
@@ -87,6 +95,15 @@ final class HostsBlockRewriterTests: XCTestCase {
 
     // MARK: - Hostile inputs (MUST reject the whole operation)
 
+    func testRewriteUpgradesIPv4OnlyBlock() throws {
+        // A block written before the ::1 entries existed is replaced, not merged.
+        let old = base + "\n\n# wp-container begin\n127.0.0.1\told.local\n# wp-container end\n"
+        let out = try HostsBlockRewriter.rewrite(old, entries: ["127.0.0.1\told.local"])
+        XCTAssertTrue(out.hasSuffix("# wp-container begin\n127.0.0.1\told.local\n::1\told.local\n# wp-container end\n"))
+        XCTAssertEqual(out.components(separatedBy: "\told.local").count - 1, 2)
+    }
+
+    // The helper derives the ::1 line itself; callers may only send IPv4 entries.
     func testRejectsNonLoopbackAddress() {
         assertRejected(["10.0.0.1\tevil.local"])
         assertRejected(["0.0.0.0\tevil.local"])
