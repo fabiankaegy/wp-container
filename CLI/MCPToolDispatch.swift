@@ -165,7 +165,13 @@ enum MCPToolDispatch {
         // Inject the Mailpit host so wp_mail from wp-cli is caught too (issue #10).
         var mailHost: String? = nil
         if site.mailpitEnabled { mailHost = (try? await ctx.cli.ipAddress(of: site.mailContainerName)) ?? nil }
-        let result = try await ctx.cli.runCapturing(SiteRecipe.wpProxyArgs(site, dbHost: host, wpArgs: wp, mailpitHost: mailHost))
+        // Point ElasticPress at the sidecar so `wp elasticpress …` works.
+        var esURL: String? = nil
+        if site.elasticsearchEnabled, let esIP = (try? await ctx.cli.ipAddress(of: site.esContainerName)) ?? nil {
+            esURL = SiteRecipe.elasticsearchURL(esHost: esIP)
+        }
+        let result = try await ctx.cli.runCapturing(SiteRecipe.wpProxyArgs(site, dbHost: host, wpArgs: wp,
+                                                                           mailpitHost: mailHost, elasticsearchURL: esURL))
         return MCPResult.json([
             "stdout": result.stdout,
             "stderr": result.stderr,

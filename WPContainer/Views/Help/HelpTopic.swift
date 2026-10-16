@@ -231,7 +231,7 @@ extension HelpTopic {
                 body: "Enabling Elasticsearch starts a per-site sidecar container alongside WordPress and wires it in automatically.",
                 bullets: [
                     "Single-node cluster, security disabled, with a modest 512 MB heap — tuned for local dev.",
-                    "Listens on port **9200** on the container network; WordPress reaches it via the injected `ELASTICSEARCH_URL` / `EP_HOST` environment variables.",
+                    "Listens on port **9200** on the container network; the `EP_HOST` constant ElasticPress reads is defined automatically to point at it.",
                     "Health is reported from `http://<es-host>:9200/_cluster/health` (green or yellow means ready).",
                 ]
             ),

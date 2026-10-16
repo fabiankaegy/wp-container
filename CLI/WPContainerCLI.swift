@@ -787,7 +787,13 @@ struct WPCommand: AsyncParsableCommand {
             // Route wp_mail through Mailpit too when the site has it enabled.
             var mailHost: String? = nil
             if inst.mailpitEnabled { mailHost = (try? await ctx.cli.ipAddress(of: inst.mailContainerName)) ?? nil }
-            let result = try await ctx.cli.runCapturing(SiteRecipe.wpProxyArgs(inst, dbHost: dbHost, wpArgs: passthroughArgs, mailpitHost: mailHost))
+            // Point ElasticPress at the sidecar so `wp elasticpress …` works.
+            var esURL: String? = nil
+            if inst.elasticsearchEnabled, let esIP = (try? await ctx.cli.ipAddress(of: inst.esContainerName)) ?? nil {
+                esURL = SiteRecipe.elasticsearchURL(esHost: esIP)
+            }
+            let result = try await ctx.cli.runCapturing(SiteRecipe.wpProxyArgs(inst, dbHost: dbHost, wpArgs: passthroughArgs,
+                                                                               mailpitHost: mailHost, elasticsearchURL: esURL))
             if jsonOut {
                 struct WPResult: Codable { let stdout: String; let stderr: String; let exitCode: Int32 }
                 emitLine(CLIJSON.string(WPResult(stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode)))

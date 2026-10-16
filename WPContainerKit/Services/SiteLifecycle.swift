@@ -241,6 +241,13 @@ public actor SiteLifecycle {
             } else {
                 MailpitService.removeHandler(phpConfFolder: inst.phpConfFolder)
             }
+            // ElasticPress reads EP_HOST as a constant only; the handler defines
+            // it from the injected env var.
+            if inst.elasticsearchEnabled {
+                try ElasticsearchService.writeHandler(phpConfFolder: inst.phpConfFolder)
+            } else {
+                ElasticsearchService.removeHandler(phpConfFolder: inst.phpConfFolder)
+            }
             MailpitService.cleanupLegacyMuPlugin(wordpressFolder: inst.wordpressFolder)
             RemoteMediaService.cleanupLegacyMuPlugin(wordpressFolder: inst.wordpressFolder,
                                                      phpConfFolder: inst.phpConfFolder)
@@ -438,7 +445,7 @@ public actor SiteLifecycle {
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
             if let ip = try await cli.ipAddress(of: inst.esContainerName), !ip.isEmpty {
-                return "http://\(ip):9200"
+                return SiteRecipe.elasticsearchURL(esHost: ip)
             }
             try await Task.sleep(for: delay)
             delay = min(delay * 2, .milliseconds(500))

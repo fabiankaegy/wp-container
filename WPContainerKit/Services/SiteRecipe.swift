@@ -281,9 +281,14 @@ public enum SiteRecipe {
         return args
     }
 
+    /// The sidecar's base URL as WordPress sees it, injected as `EP_HOST`.
+    public static func elasticsearchURL(esHost: String) -> String {
+        "http://\(esHost):9200"
+    }
+
     /// Probe ES cluster health (green/yellow ⇒ ready) from a one-shot curl.
     public static func elasticsearchHealthURL(esHost: String) -> String {
-        "http://\(esHost):9200/_cluster/health"
+        "\(elasticsearchURL(esHost: esHost))/_cluster/health"
     }
 
     // MARK: - Mailpit email catcher (issue #10, validated)
@@ -484,9 +489,13 @@ public enum SiteRecipe {
     ///   container otherwise lacks the env the long-lived wp container gets
     ///   (issue #10).
     public static func wpProxyArgs(_ inst: any RunnableInstance, dbHost: String, wpArgs: [String],
-                                   mailpitHost: String? = nil) -> [String] {
+                                   mailpitHost: String? = nil,
+                                   elasticsearchURL: String? = nil) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
         if let mailpitHost { args += ["-e", "WPC_MAILPIT_HOST=\(mailpitHost)"] }
+        // ElasticPress commands (`wp elasticpress sync`) need the sidecar's host;
+        // the managed handler defines `EP_HOST` from this env var.
+        if let elasticsearchURL { args += ["-e", "EP_HOST=\(elasticsearchURL)"] }
         // Mount the managed php/ overrides + scan dir so a one-shot wp-cli picks
         // up the same auto_prepend runtime handlers as the long-lived container
         // (issue #13) — e.g. `wp eval` that sends mail still hits Mailpit, and

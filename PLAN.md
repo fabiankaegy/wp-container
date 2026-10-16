@@ -196,7 +196,10 @@ toggling while running offers "Restart now".
   validated empirically — data in `<site>/elasticsearch/` bind mount if the image
   tolerates it, else a named managed volume as fallback).
 - Site start order becomes: db → es (if enabled) → wp. WP container gets
-  `-e ELASTICSEARCH_URL=http://<es-ip>:9200` (+ `EP_HOST` for ElasticPress).
+  `-e ELASTICSEARCH_URL=http://<es-ip>:9200` and `-e EP_HOST=…`. ElasticPress reads
+  `EP_HOST` only as a constant, so a managed `php/prepend.d/wpc-elasticpress.php`
+  handler defines it from the env var; `wp-container wp` and the MCP `wp_cli` tool
+  pass the same env var to their one-shot wp-cli containers.
   UI shows the ES endpoint + a "works with ElasticPress" hint. Worktree envs
   inherit the parent's toggles (their own es container).
 
