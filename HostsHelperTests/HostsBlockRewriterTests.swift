@@ -103,12 +103,85 @@ final class HostsBlockRewriterTests: XCTestCase {
         XCTAssertEqual(out.components(separatedBy: "\told.local").count - 1, 2)
     }
 
-    // The helper derives the ::1 line itself; callers may only send IPv4 entries.
+    // The helper derives the IPv6 line itself; callers may only send IPv4
+    // entries, and only for our two fixed addresses.
     func testRejectsNonLoopbackAddress() {
         assertRejected(["10.0.0.1\tevil.local"])
         assertRejected(["0.0.0.0\tevil.local"])
         assertRejected(["127.0.0.2\tevil.local"])
+        assertRejected(["127.0.0.78\tevil.local"])
         assertRejected(["::1\tevil.local"])
+        assertRejected(["fd77:7063::77\tevil.local"])
+    }
+
+    // MARK: - Owned loopback zone (§2f-ter)
+
+    func testZoneAddressesMatchSharedConstants() {
+        XCTAssertEqual(HostsBlockRewriter.zoneIPv4, LoopbackZone.ipv4)
+        XCTAssertEqual(HostsBlockRewriter.zoneIPv6, LoopbackZone.ipv6)
+    }
+
+    func testZoneEntryWritesAliasPair() throws {
+        let out = try HostsBlockRewriter.rewrite(base, entries: ["127.0.0.77\tmysite.local"])
+        XCTAssertTrue(out.hasSuffix("# wp-container begin\n127.0.0.77\tmysite.local\nfd77:7063::77\tmysite.local\n# wp-container end\n"))
+    }
+
+    func testRecoversCorruptedZoneBlock() throws {
+        let corrupted = base + "\n\n# wp-container begin\n127.0.0.77\tstale.local\nfd77:7063::77\tstale.local\n"
+        let out = try HostsBlockRewriter.rewrite(corrupted, entries: ["127.0.0.77\tfresh.local"])
+        XCTAssertFalse(out.contains("stale.local"))
+        XCTAssertEqual(out.components(separatedBy: "# wp-container begin").count - 1, 1)
+    }
+
+    func testRepointMovesExistingHostsBothWays() throws {
+        let legacy = try HostsBlockRewriter.rewrite(base, entries: ["127.0.0.1\ta.local", "127.0.0.1\tb.test"])
+        let zoned = try XCTUnwrap(HostsBlockRewriter.repoint(legacy, toZone: true))
+        XCTAssertTrue(zoned.hasSuffix("""
+        # wp-container begin
+        127.0.0.77\ta.local
+        fd77:7063::77\ta.local
+        127.0.0.77\tb.test
+        fd77:7063::77\tb.test
+        # wp-container end
+
+        """))
+        XCTAssertTrue(zoned.contains("255.255.255.255\tbroadcasthost"))
+        XCTAssertNil(HostsBlockRewriter.repoint(zoned, toZone: true), "already pointed there")
+        XCTAssertEqual(HostsBlockRewriter.repoint(zoned, toZone: false), legacy)
+    }
+
+    func testRepointUpgradesIPv4OnlyBlock() throws {
+        let old = base + "\n\n# wp-container begin\n127.0.0.1\told.local\n# wp-container end\n"
+        let out = try XCTUnwrap(HostsBlockRewriter.repoint(old, toZone: true))
+        XCTAssertTrue(out.hasSuffix("127.0.0.77\told.local\nfd77:7063::77\told.local\n# wp-container end\n"))
+    }
+
+    func testRepointLeavesUnvouchedBlocksAlone() {
+        XCTAssertNil(HostsBlockRewriter.repoint(base, toZone: true), "no block")
+        // A line we didn't write (foreign address / hostile hostname) inside the
+        // markers: never rewritten without an authorized write.
+        XCTAssertNil(HostsBlockRewriter.repoint(base + "\n# wp-container begin\n10.0.0.1\tevil.local\n# wp-container end\n", toZone: true))
+        XCTAssertNil(HostsBlockRewriter.repoint(base + "\n# wp-container begin\n127.0.0.1\tBAD host\n# wp-container end\n", toZone: true))
+        // Corrupted (no end marker) is the authorized rewrite's job, not ours.
+        XCTAssertNil(HostsBlockRewriter.repoint(base + "\n# wp-container begin\n127.0.0.1\ta.local\n", toZone: true))
+    }
+
+    func testHelperFeatureVersionGate() {
+        XCTAssertTrue(HostsHelperFeature.loopbackZone.isSupported(by: hostsHelperVersion))
+        XCTAssertFalse(HostsHelperFeature.loopbackZone.isSupported(by: "0.2.0"))
+        XCTAssertTrue(HostsHelperFeature.dnsRepair.isSupported(by: "0.2.0"))
+        XCTAssertTrue(HostsHelperFeature.dnsRepair.isSupported(by: "0.10.0"))
+        XCTAssertFalse(HostsHelperFeature.dnsRepair.isSupported(by: "0.1.9"))
+    }
+
+    func testPFRulesOnlyRedirectOntoOurFixedPorts() {
+        let rules = LoopbackZone.pfRules(legacyLoopback: false)
+        XCTAssertTrue(rules.contains("to 127.0.0.77 port 443 -> 127.0.0.1 port 47443"))
+        XCTAssertTrue(rules.contains("to fd77:7063::77 port 80 -> ::1 port 47080"))
+        XCTAssertTrue(rules.contains("on bridge100 inet proto tcp from any to (bridge100) port 443"))
+        XCTAssertFalse(rules.contains("to 127.0.0.1 port"), "legacy loopback capture must be opt-in")
+        XCTAssertTrue(LoopbackZone.pfRules(legacyLoopback: true).contains("to 127.0.0.1 port 443 -> 127.0.0.1 port 47443"))
+        XCTAssertFalse(LoopbackZone.pfRules(legacyLoopback: false, includeVMNet: false).contains("bridge100"))
     }
 
     func testRejectsNewlineInjection() {

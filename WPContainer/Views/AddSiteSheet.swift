@@ -139,7 +139,7 @@ struct AddSiteSheet: View {
                 }
                 .pickerStyle(.inline)
                 if networkType.isSubdomain {
-                    Text("Subdomain networks resolve zero-config on <slug>.localhost; use subdirectory for custom domains.")
+                    Text("Subdomain networks resolve zero-config on the site’s default host (<slug>.wpc.test, or <slug>.localhost without the helper); use subdirectory for custom domains.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }

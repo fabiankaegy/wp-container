@@ -180,7 +180,7 @@ extension HelpTopic {
                 body: "The app runs its own certificate authority and issues a wildcard cert for your sites. Once the CA is trusted, HTTPS sites load with a green padlock — no browser warnings.",
                 bullets: [
                     "Enable HTTPS per site to serve it at `https://<slug>.localhost`.",
-                    "The proxy listens on 443, or 8443 if another app already holds 443.",
+                    "With the privileged helper enabled, sites get their own loopback address (<slug>.wpc.test → 127.0.0.77) and never compete with other dev tools for 127.0.0.1:443. Without it, the proxy listens on 443, or 8443 if another app already holds 443.",
                 ]
             ),
             HelpSection(

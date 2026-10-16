@@ -210,6 +210,7 @@ targets:
       - path: HostsHelperTests
       - path: HostsHelper/HostsBlockRewriter.swift
       - path: Shared/HostsHelperProtocol.swift
+      - path: Shared/LoopbackZone.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.fabiankaegy.wpcontainer.hostshelpertests

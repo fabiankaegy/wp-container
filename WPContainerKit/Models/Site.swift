@@ -53,8 +53,20 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     /// throttled by `StorePersistence.recordActivity`.
     public var lastActivityAt: Date?
     /// Optional custom domain (e.g. `mysite.local`), routed via /etc/hosts + the
-    /// host proxy (PLAN.md §2i). nil = the zero-config `<slug>.localhost` name.
+    /// host proxy (PLAN.md §2i). nil = the zero-config `defaultHost` name.
     public var customDomain: String?
+    /// Whether this site's default hostname lives in the owned loopback zone
+    /// (`<slug>.wpc.test`, PLAN.md §2f-ter) rather than the legacy
+    /// `<slug>.localhost`.
+    ///
+    /// PER SITE and persisted, not derived from whether the zone is installed
+    /// right now, because the hostname is baked into the site's database
+    /// (`home`/`siteurl`, content, multisite domains) and must not silently
+    /// change under it. New sites get the zone when it is installed; existing
+    /// ones keep `.localhost` (absent key ⇒ false) until migrated with
+    /// `wp-container zone migrate` (`LoopbackZoneMigrator`), or until HTTPS is
+    /// next switched on, which rewrites the URL anyway.
+    public var usesLoopbackZone: Bool
     /// WordPress network type — single site or a multisite network (PLAN.md §2j).
     public var networkType: NetworkType
     /// Where the agent-tools artifacts (MCP configs + doc) were written, so
@@ -98,6 +110,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         case mailpitEnabled, mailpitPort
         case lastImportSourceURL
         case pendingSchemaDrops
+        case usesLoopbackZone
     }
 
     public init(
@@ -121,6 +134,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         idleStopMinutes: Int? = nil,
         lastActivityAt: Date? = nil,
         customDomain: String? = nil,
+        usesLoopbackZone: Bool = false,
         networkType: NetworkType = .none,
         agentToolsRoot: String? = nil,
         agentToolsDoc: String? = nil,
@@ -148,6 +162,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.idleStopMinutes = idleStopMinutes
         self.lastActivityAt = lastActivityAt
         self.customDomain = customDomain
+        self.usesLoopbackZone = usesLoopbackZone
         self.networkType = networkType
         self.agentToolsRoot = agentToolsRoot
         self.agentToolsDoc = agentToolsDoc
@@ -188,6 +203,9 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         // `HTTPSProxy.idleMinutes`.
         self.lastActivityAt = try? c.decodeIfPresent(Date.self, forKey: .lastActivityAt)
         self.customDomain = try? c.decodeIfPresent(String.self, forKey: .customDomain)
+        // Absent in stores written before the loopback zone (§2f-ter): those
+        // sites' databases say `<slug>.localhost`, so they stay there.
+        self.usesLoopbackZone = (try? c.decodeIfPresent(Bool.self, forKey: .usesLoopbackZone)) ?? false
         self.networkType = (try? c.decodeIfPresent(NetworkType.self, forKey: .networkType)) ?? .none
         self.agentToolsRoot = try? c.decodeIfPresent(String.self, forKey: .agentToolsRoot)
         self.agentToolsDoc = try? c.decodeIfPresent(String.self, forKey: .agentToolsDoc)
@@ -213,19 +231,38 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     }
 
     // MARK: HTTPS / domains (URL logic delegated to `SiteURL` — see §2f/§2i)
-    /// The `<slug>.localhost` hostname served by the host HTTPS proxy.
-    public var localhostHost: String { "\(slug).localhost" }
+    /// The zero-config hostname served by the host proxy — THE one place it is
+    /// derived: `<slug>.wpc.test` in the owned loopback zone (§2f-ter), else the
+    /// legacy `<slug>.localhost`. Routes, SANs, loopback hosts and URLs all
+    /// follow it.
+    public var defaultHost: String {
+        usesLoopbackZone ? LoopbackZone.host(slug) : legacyLocalhostHost
+    }
+    /// `<slug>.localhost` — the pre-zone default. The proxy keeps routing it
+    /// for every site as an alias, so links and bookmarks to it keep working
+    /// for as long as something still serves 127.0.0.1.
+    public var legacyLocalhostHost: String { "\(slug).localhost" }
     /// Legacy alias retained for callers written before custom domains.
     public var httpsHost: String { primaryHost }
-    /// The site's canonical hostname: a custom domain when set, else `<slug>.localhost`.
-    public var primaryHost: String { (customDomain?.isEmpty == false ? customDomain! : localhostHost) }
+    /// The site's canonical hostname: a custom domain when set, else `defaultHost`.
+    public var primaryHost: String { (customDomain?.isEmpty == false ? customDomain! : defaultHost) }
+    /// Move this site into the owned zone if it is installed — ONLY safe at a
+    /// moment the site's URL is being rewritten anyway (HTTPS switched on), or
+    /// by `LoopbackZoneMigrator`, which rewrites the database itself.
+    public mutating func adoptLoopbackZoneIfInstalled() {
+        if !usesLoopbackZone, LoopbackZone.isInstalled { usesLoopbackZone = true }
+    }
+    /// The Mailpit web UI's proxy hostname (`<slug>-mail.<default zone>`, issue #10).
+    public var mailboxProxyHost: String {
+        usesLoopbackZone ? LoopbackZone.host("\(slug)-mail") : "\(slug)-mail.localhost"
+    }
     /// All hostnames the proxy/cert must cover for this site (§2i/§2j):
-    /// `<slug>.localhost`, any custom domain, and a subdomain-multisite wildcard.
+    /// `defaultHost`, any custom domain, and a subdomain-multisite wildcard.
     public var proxyHosts: [String] {
-        var hosts = [localhostHost]
+        var hosts = [defaultHost]
         if let d = customDomain, !d.isEmpty { hosts.append(d) }
         if networkType.isSubdomain {
-            hosts.append("*.\(localhostHost)")
+            hosts.append("*.\(defaultHost)")
             if let d = customDomain, !d.isEmpty { hosts.append("*.\(d)") }
         }
         return hosts
@@ -235,7 +272,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     /// The site's effective public URL: proxy host name when HTTPS or a custom
     /// domain is in play, else the local port.
     public var url: URL {
-        SiteURL.effective(httpsEnabled: httpsEnabled, customDomain: customDomain, slug: slug, port: port)
+        SiteURL.effective(httpsEnabled: httpsEnabled, customDomain: customDomain, defaultHost: defaultHost, port: port)
     }
     /// The effective WP Admin URL, honoring HTTPS + custom domains.
     public var wpAdminURL: URL { url.appendingPathComponent("wp-admin") }
@@ -256,11 +293,11 @@ extension Site: RunnableInstance {
     public var displayName: String { name }
     public var isProvisioned: Bool { provisioned }
     public var extraMounts: [Mount] { [] }
-    /// `<slug>.localhost` plus any custom domain. Subdomain-multisite wildcards
+    /// `defaultHost` plus any custom domain. Subdomain-multisite wildcards
     /// are omitted — /etc/hosts can't express them; subsite loopbacks would
     /// need per-subsite entries (acceptable gap, matches the proxy SAN story).
     public var loopbackHosts: [String] {
-        var hosts = [localhostHost]
+        var hosts = [defaultHost]
         if let d = customDomain, !d.isEmpty { hosts.append(d.lowercased()) }
         return hosts
     }

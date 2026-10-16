@@ -264,7 +264,8 @@ wp-cli is a first-class citizen on all four surfaces (implementation: one-shot
 - **One wildcard leaf** signed by the CA: SANs `*.localhost`, `localhost`,
   `127.0.0.1` — `*.localhost` is a valid single-level wildcard, and every
   `<slug>.localhost` name resolves to 127.0.0.1 on macOS automatically (no
-  /etc/hosts edits ever).
+  /etc/hosts edits ever). Superseded for sites by the owned `*.wpc.test` zone
+  when the helper is installed (§2f-ter); the `*.localhost` SAN stays.
 - **HTTPS termination on the host, not in containers:** the app runs a lightweight
   TLS-terminating reverse proxy (Network.framework listener, port 443 — unprivileged
   on modern macOS — with 8443 fallback) that routes by Host header:
@@ -343,10 +344,12 @@ row. The list mirrors sidebar grouping order but flat/compact. App keeps running
 
 ## 2i. Custom domains
 
-- Default remains `http(s)://<slug>.localhost` (zero-config resolution). Optionally,
+- Default remains the zero-config `http(s)://<defaultHost>` (`<slug>.wpc.test`,
+  or `<slug>.localhost` without the helper — §2f-ter). Optionally,
   a site can set a **custom domain** (e.g. `mysite.local`, `client.test`) in
   Settings or at creation.
-- Resolution: custom domains get a `127.0.0.1 <domain>` line in `/etc/hosts`,
+- Resolution: custom domains get a `127.0.0.1 <domain>` line (`127.0.0.77` in
+  the owned zone, §2f-ter; plus the IPv6 partner) in `/etc/hosts`,
   managed inside clearly-delimited `# wp-container begin/end` markers (added/removed
   via one osascript admin prompt; batch edits). LocalWP-style.
 - Routing: the HTTPS/HTTP reverse proxy routes custom domains by Host header just
@@ -373,14 +376,15 @@ row. The list mirrors sidebar grouping order but flat/compact. App keeps running
   - **Preferred path (shipped):** `wpc-hosts-helper`, a tiny privileged daemon
     embedded at `WPContainer.app/Contents/MacOS/wpc-hosts-helper` with its
     launchd plist at `Contents/Library/LaunchDaemons/`, registered via
-    `SMAppService.daemon(plistName:)`. It vends exactly `writeHostsBlock(entries)`
-    / `removeHostsBlock()` over an XPC mach service. The app calls
+    `SMAppService.daemon(plistName:)`. It vends `writeHostsBlock(entries)`
+    / `removeHostsBlock()` (plus the promptless DNS repair and loopback-zone ops,
+    §2f-ter) over an XPC mach service. The app calls
     `AuthorizationCreate` + `AuthorizationCopyRights(kAuthorizationFlagInteractionAllowed)`
     against a custom right (`com.fabiankaegy.wpcontainer.modify-hosts`, rule
     `authenticate-admin`) → the Touch-ID-capable system dialog → passes the
     `AuthorizationExternalForm` over XPC; the helper re-verifies it WITHOUT
     interaction before acting. Security boundary (`HostsBlockRewriter`, duplicated
-    in the helper, never trusting the app): only `127.0.0.1 <strict-DNS-host>`
+    in the helper, never trusting the app): only `127.0.0.1|127.0.0.77 <strict-DNS-host>`
     lines, only the `# wp-container` marker block, atomic `0644 root:wheel` write
     with fsync. The helper pins the connecting client's code signature (team +
     bundle id) via `SecCodeCopyGuestWithAttributes` on the audit token. Enabled
@@ -391,14 +395,86 @@ row. The list mirrors sidebar grouping order but flat/compact. App keeps running
     `HostsFileService.apply` stages the rewritten file and copies it over via one
     `osascript … with administrator privileges` prompt.
 
+## 2f-ter. Owned loopback zone (`*.wpc.test` on 127.0.0.77)
+
+- **Problem.** The proxy bound `*:80`/`*:443` (wildcard, LAN-exposed): macOS
+  only lets unprivileged processes bind <1024 on the wildcard (binding
+  `127.0.0.1:81` as a user → EACCES). So every other local dev tool whose names
+  resolve to loopback (Valet/Herd, Local, Docker) landed in our proxy and got the
+  "unknown host" page — and `.localhost` names are hard-wired to 127.0.0.1 by
+  browsers, so as long as our defaults were `.localhost` we had to own it.
+- **Design (needs the privileged helper, §2f-bis; constants in
+  `Shared/LoopbackZone.swift`):**
+  - The helper adds lo0 aliases `127.0.0.77` and `fd77:7063::77/128` (ULA).
+  - It loads pf anchor `com.apple/wpcontainer` (Apple's stock pf.conf already
+    evaluates `rdr-anchor "com.apple/*"`; pf.conf is never edited) redirecting
+    alias:80/443 → `127.0.0.1`/`::1`:**47080/47443**, and `(bridge100)`:80/443 →
+    `127.0.0.1`:47080/47443 (in-container WordPress loopback requests reach the
+    proxy via the vmnet gateway — `SiteRecipe.injectLoopbackHostsArgs`). pf is
+    enabled with a reference token (`pfctl -E`, token in `/var/run`), never
+    disabled globally (`deactivate` releases only our token).
+  - The proxy binds those fixed unprivileged ports on `127.0.0.1` and `::1`
+    ONLY (`requiredLocalEndpoint`), never the wildcard.
+  - DNS: the helper writes `/etc/resolver/wpc.test` (`nameserver 127.0.0.1`,
+    `port 47053` — resolver(5) honours `port`; puma-dev/pow precedent). A tiny
+    UDP responder (`LoopbackZoneDNS`) answers `*.wpc.test` A → 127.0.0.77, AAAA →
+    the v6 alias, other types NODATA, other names REFUSED. It runs IN THE PROXY
+    PROCESS, not the helper: names only matter while the proxy serves them
+    (resolves ⇔ proxied), and packet parsing stays unprivileged. Wildcards make
+    subdomain multisite work without hosts entries.
+- **Fixed ports, not negotiated.** The helper's zone ops take ONE Bool
+  (`legacyLoopback`); every address/port/rule is compiled in, the resolver file
+  is static. If 47080/47443/47053 are taken, the proxy falls back to the legacy
+  wildcard listeners and asks the helper to tear the zone down (so nothing
+  advertises `.wpc.test` names nobody serves).
+- **Helper ops** `activateLoopbackZone(legacyLoopback:)` (proxy calls it on
+  every start — after a reboot that restores aliases + pf) and
+  `deactivateLoopbackZone()` (Settings › Disable, and zone start failure). No
+  authorization, like `repairDNSResolver`: fixed constants only, only our own
+  alias/anchor/resolver file, and the managed hosts block is only RE-POINTED
+  (`HostsBlockRewriter.repoint` — address swap of hostnames already there,
+  never an addition; a block with any line it can't validate is left alone).
+  Version-gated (`HostsHelperFeature.loopbackZone`, helper 0.3.0); an old
+  running helper degrades to legacy until it relaunches.
+- **Custom domains** keep hosts entries, pointed at `127.0.0.77` / `fd77:7063::77`
+  while the zone is installed (`LoopbackZone.isInstalled` = resolver file
+  exists), else `127.0.0.1` / `::1`. The helper accepts exactly those two IPv4
+  addresses and derives the IPv6 partner; corrupted-block recovery recognises
+  both formats. `MDNSHostCheck` treats either IPv4 as "ours".
+- **Sites.** `Site.usesLoopbackZone` (persisted; absent ⇒ false) selects
+  `Site.defaultHost` = `<slug>.wpc.test` vs legacy `<slug>.localhost`; URLs,
+  routes, SANs and loopback hosts derive from it. New sites get the zone when
+  installed; enabling HTTPS adopts it (the URL is rewritten anyway). The proxy
+  always routes `<slug>.localhost` too, as an alias.
+- **Legacy `.localhost` handling — chosen: explicit migration + a temporary
+  127.0.0.1 redirect, NOT eager migration.** Eager migration would rewrite user
+  databases behind their back on every upgrade. Instead
+  `HTTPSProxy.needsLegacyLoopback` keeps a pf redirect of `127.0.0.1`/`::1`
+  :80/:443 → the proxy ONLY while some HTTPS site still advertises
+  `<slug>.localhost` (or any worktree env exists — env hosts stay `.localhost`
+  until envs move into the zone, a follow-up). `wp-container zone migrate
+  <slug>|--all` (`LoopbackZoneMigrator`: one `--regex` search-replace that won't
+  touch `my-blog.localhost` when migrating `blog`, plus `DOMAIN_CURRENT_SITE`)
+  moves sites; the redirect drops as soon as nothing needs it (refresh loop),
+  and a clean proxy stop drops it too. `wp-container zone status` reports state.
+- **Degradation.** No helper (ad-hoc Debug builds, not approved, too old) ⇒
+  exactly the old behaviour: wildcard 443/8443 + 80/8080, `.localhost` names.
+- **Verification.** `scripts/spike-loopback-zone.sh` (needs sudo) checks the
+  three load-bearing assumptions with throwaway values: alias rdr onto a
+  127.0.0.1 listener, the `(bridgeN)` rule loading while absent + container →
+  gateway redirect, and `/etc/resolver` `port` via both `dscacheutil` and
+  `dns-sd` (Safari path). Note macOS 27 beta's L4S SYN bug
+  (`net.inet.tcp.l4s=1`) can masquerade as a gateway-redirect failure.
+
 ## 2j. Multisite support
 
 - Add Site setup offers Network type: **Single site** (default) / **Multisite —
   subdirectories** / **Multisite — subdomains**. Provisioning uses
   `wp core multisite-install` (+ MULTISITE constants via wp-config injection and
   the standard htaccess rules written into the mounted folder).
-- Subdomain networks work zero-config on `.localhost` base domains
-  (`site2.my-net.localhost` auto-resolves; cert SAN `*.<slug>.localhost` added).
+- Subdomain networks work zero-config on the default host
+  (`site2.my-net.wpc.test` via the zone's wildcard DNS, or
+  `site2.my-net.localhost`; cert SAN `*.<defaultHost>` added).
   On custom domains, subdomain mode requires a hosts entry per subsite — the UI
   offers "Register subsite domain…" (batched into the managed hosts block);
   subdirectory mode recommended for custom domains.

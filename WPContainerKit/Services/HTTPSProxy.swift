@@ -5,10 +5,18 @@ import Security
 
 /// TLS-terminating reverse proxy for trusted local HTTPS (PLAN.md §2f).
 ///
-/// Listens on 443 (falling back to 8443), terminates TLS with the CA's wildcard
-/// leaf identity, routes each request to the site's container by its `Host`
-/// header, and injects `X-Forwarded-Proto: https` / `X-Forwarded-Host` so
-/// WordPress builds correct HTTPS URLs.
+/// Terminates TLS with the CA's leaf identity, routes each request to the
+/// site's container by its `Host` header, and injects `X-Forwarded-Proto:
+/// https` / `X-Forwarded-Host` so WordPress builds correct HTTPS URLs.
+///
+/// Two ways to listen (PLAN.md §2f-ter):
+/// - **Owned loopback zone** (helper installed): TLS/HTTP listeners on the
+///   unprivileged fixed ports `LoopbackZone.httpsPort`/`httpPort`, bound to
+///   `127.0.0.1` and `::1` ONLY, plus the zone's DNS responder. The helper's pf
+///   anchor maps the zone aliases' (and the vmnet gateway's) :443/:80 onto them,
+///   so nothing here competes with other dev tools for `127.0.0.1:443`.
+/// - **Legacy** (no helper — e.g. ad-hoc Debug builds — or the fixed ports are
+///   taken): the wildcard `*:443` (falling back to 8443) and `*:80` (8080).
 ///
 /// SITE containers are never touched — they publish their own
 /// `127.0.0.1:<port>` and this proxy is purely additive in front of them.
@@ -147,6 +155,13 @@ public final class HTTPSProxy: @unchecked Sendable {
     private var idleTask: Task<Void, Never>?
     private var _boundPort: UInt16?
     private var _boundHTTPPort: UInt16?
+    /// Zone-mode listeners (`127.0.0.1` + `::1`, TLS + HTTP) and DNS responder;
+    /// empty/nil in legacy mode.
+    private var zoneListeners: [NWListener] = []
+    private var zoneDNS: LoopbackZoneDNS.Server?
+    /// The `legacyLoopback` flag the helper's pf anchor currently carries —
+    /// non-nil exactly while this proxy serves the owned loopback zone.
+    private var zoneLegacyLoopback: Bool?
     /// SAN hosts the leaf currently covers, to detect when a reload is needed.
     private var coveredHosts: Set<String> = []
 
@@ -253,6 +268,13 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// The plain-HTTP listener port, once started.
     public var boundHTTPPort: UInt16? {
         stateLock.withLock { _boundHTTPPort }
+    }
+
+    /// Whether this proxy serves the owned loopback zone (§2f-ter) rather than
+    /// the legacy wildcard 443/80 listeners. In zone mode `boundPort` is the
+    /// internal `LoopbackZone.httpsPort`; browsers still use plain :443.
+    public var isServingLoopbackZone: Bool {
+        stateLock.withLock { zoneLegacyLoopback != nil }
     }
 
     // MARK: - Local Network Privacy (macOS 15+ TCC)
@@ -418,25 +440,33 @@ public final class HTTPSProxy: @unchecked Sendable {
         return stateLock.withLock { envPortListeners[port] != nil }
     }
 
-    /// Build a routing table from a store envelope: every site and env is
-    /// reachable at `<slug>.localhost`, and custom-domain sites also at their
-    /// domain, regardless of `httpsEnabled` (the flag governs WordPress URL
-    /// rewriting, not proxy reachability). Subdomain-multisite wildcards are
-    /// handled by the leftmost-label fallback in `route(forHost:)`.
+    /// Build a routing table from a store envelope: every site is reachable at
+    /// its `defaultHost` (`<slug>.wpc.test` or `<slug>.localhost`) AND at the
+    /// legacy `<slug>.localhost` alias, every env at `<envSlug>.localhost`, and
+    /// custom-domain sites also at their domain — regardless of `httpsEnabled`
+    /// (the flag governs WordPress URL rewriting, not proxy reachability).
+    /// Subdomain-multisite wildcards are handled by the leftmost-label fallback
+    /// in `route(forHost:)`.
     public static func routes(from envelope: StoreEnvelope) -> [String: Route] {
         var map: [String: Route] = [:]
         for site in envelope.sites {
             let route = Route(port: site.port, slug: site.slug, displayName: site.name,
                               containerName: site.wpContainerName)
-            map["\(site.slug).localhost"] = route
+            map[site.defaultHost] = route
+            // Legacy alias: keeps bookmarks/links to a migrated site working
+            // wherever 127.0.0.1 still reaches us (legacy mode, or the zone's
+            // legacy-loopback redirect).
+            map[site.legacyLocalhostHost] = route
             if let domain = site.customDomain, !domain.isEmpty { map[domain.lowercased()] = route }
-            // Mailpit web UI at <slug>-mail.localhost (issue #10).
+            // Mailpit web UI at <slug>-mail.<zone> (issue #10), plus its legacy alias.
             if site.mailpitEnabled, let mp = site.mailpitPort {
-                map["\(site.slug)-mail.localhost"] = Route(port: mp, slug: site.slug,
-                                                           displayName: "\(site.name) · Mailbox",
-                                                           containerName: site.mailContainerName,
-                                                           containerPort: UInt16(SiteRecipe.mailpitWebPort),
-                                                           isMailbox: true)
+                let mailbox = Route(port: mp, slug: site.slug,
+                                    displayName: "\(site.name) · Mailbox",
+                                    containerName: site.mailContainerName,
+                                    containerPort: UInt16(SiteRecipe.mailpitWebPort),
+                                    isMailbox: true)
+                map[site.mailboxProxyHost] = mailbox
+                map["\(site.slug)-mail.localhost"] = mailbox
             }
         }
         for env in envelope.envs {
@@ -483,15 +513,32 @@ public final class HTTPSProxy: @unchecked Sendable {
         var hosts = Set<String>()
         for site in envelope.sites {
             site.proxyHosts.forEach { hosts.insert($0) }
-            // Cover the mailbox hostname so https://<slug>-mail.localhost is
+            // Cover the mailbox hostname so https://<slug>-mail.<zone> is
             // trusted when the proxy serves it (issue #10).
-            if site.mailpitEnabled, site.mailpitPort != nil { hosts.insert("\(site.slug)-mail.localhost") }
+            if site.mailpitEnabled, site.mailpitPort != nil { hosts.insert(site.mailboxProxyHost) }
         }
         for env in envelope.envs {
             hosts.insert("\(env.envSlug).localhost")
             if env.mailpitEnabled, env.mailpitPort != nil { hosts.insert("\(env.envSlug)-mail.localhost") }
         }
         return Array(hosts)
+    }
+
+    /// Whether, in zone mode, pf must ALSO capture `127.0.0.1`/`::1` :80/:443
+    /// (`LoopbackZone.pfRules(legacyLoopback:)`) — the migration bridge for
+    /// instances whose advertised URL is still a `*.localhost` name, which
+    /// browsers hard-wire to 127.0.0.1.
+    ///
+    /// True while any HTTPS site without a custom domain hasn't moved into the
+    /// zone yet (`wp-container zone migrate`), or any worktree env exists: env
+    /// hostnames stay `<envSlug>.localhost` until envs move into the zone too
+    /// (follow-up to §2f-ter). Once false, WP Container no longer touches
+    /// 127.0.0.1 at all.
+    public static func needsLegacyLoopback(_ envelope: StoreEnvelope) -> Bool {
+        if !envelope.envs.isEmpty { return true }
+        return envelope.sites.contains {
+            !$0.usesLoopbackZone && $0.httpsEnabled && ($0.customDomain ?? "").isEmpty
+        }
     }
 
     // MARK: - Lifecycle
@@ -505,7 +552,8 @@ public final class HTTPSProxy: @unchecked Sendable {
         // (explicit SANs — the *.localhost wildcard alone isn't honored by
         // OpenSSL/curl) BEFORE importing the identity.
         var hosts: [String] = []
-        if let env = try? await persistence.load() {
+        let envelope = try? await persistence.load()
+        if let env = envelope {
             updateHostMap(routes: Self.routes(from: env))
             hosts = Self.sanHosts(from: env)
         }
@@ -521,6 +569,35 @@ public final class HTTPSProxy: @unchecked Sendable {
         }
         sec_protocol_options_set_local_identity(tlsOptions.securityProtocolOptions, secIdentity)
 
+        let boundPort: UInt16
+        if let zonePort = await startLoopbackZone(tlsOptions: tlsOptions,
+                                                  legacyLoopback: envelope.map(Self.needsLegacyLoopback) ?? false) {
+            boundPort = zonePort
+        } else {
+            boundPort = try await startWildcardListeners(tlsOptions: tlsOptions)
+        }
+
+        // Warm the container-IP cache so even the first requests dial direct;
+        // the refresh loop keeps it current from here on. MUST precede the env
+        // port listeners: once we hold an env's port there is no loopback
+        // fallback, so a request arriving before the first IP refresh would have
+        // no upstream candidate at all.
+        await refreshContainerIPs()
+        // …and find out immediately whether we are even allowed to reach them.
+        await probeLocalNetworkAccess()
+        // Take ownership of every current env's `127.0.0.1:<port>` socket. From
+        // here the refresh loop keeps the set in sync.
+        stateLock.withLock { acceptingEnvPorts = true }
+        syncEnvPortListeners()
+
+        startRefreshLoop()
+        startIdleLoop()
+        return boundPort
+    }
+
+    /// Legacy listeners: wildcard 443 (8443 fallback) + 80 (8080 fallback).
+    /// Returns the TLS port.
+    private func startWildcardListeners(tlsOptions: NWProtocolTLS.Options) async throws -> UInt16 {
         var lastError: Error?
         var bound: UInt16?
         for candidate in Self.preferredPorts {
@@ -551,23 +628,85 @@ public final class HTTPSProxy: @unchecked Sendable {
                 break
             } catch { continue }
         }
-
-        // Warm the container-IP cache so even the first requests dial direct;
-        // the refresh loop keeps it current from here on. MUST precede the env
-        // port listeners: once we hold an env's port there is no loopback
-        // fallback, so a request arriving before the first IP refresh would have
-        // no upstream candidate at all.
-        await refreshContainerIPs()
-        // …and find out immediately whether we are even allowed to reach them.
-        await probeLocalNetworkAccess()
-        // Take ownership of every current env's `127.0.0.1:<port>` socket. From
-        // here the refresh loop keeps the set in sync.
-        stateLock.withLock { acceptingEnvPorts = true }
-        syncEnvPortListeners()
-
-        startRefreshLoop()
-        startIdleLoop()
         return boundPort
+    }
+
+    // MARK: - Owned loopback zone (PLAN.md §2f-ter)
+
+    /// Serve the owned loopback zone if the helper can set it up: bind the
+    /// fixed loopback-only listeners and the DNS responder, then have the helper
+    /// (re)load the aliases, resolver file and pf anchor. Returns the TLS port,
+    /// or nil to serve the legacy way.
+    ///
+    /// All or nothing: if a fixed port is taken or the helper refuses, every
+    /// zone listener is released again AND the helper is asked to tear the zone
+    /// down, so the machine never advertises `.wpc.test` names (resolver file,
+    /// hosts entries on the aliases) that nothing serves.
+    private func startLoopbackZone(tlsOptions: NWProtocolTLS.Options, legacyLoopback: Bool) async -> UInt16? {
+        // Ad-hoc builds can't run the helper — don't even try the XPC round-trip.
+        guard HostsHelperClient.isSupportedBuild,
+              let version = try? await HostsHelperClient.reachableVersion(),
+              HostsHelperFeature.loopbackZone.isSupported(by: version) else { return nil }
+
+        var listeners: [NWListener] = []
+        let dns = LoopbackZoneDNS.Server()
+        do {
+            for host in [NWEndpoint.Host.ipv4(.loopback), .ipv6(.loopback)] {
+                do {
+                    listeners.append(try await bindLoopback(host, port: LoopbackZone.httpsPort,
+                                                            params: NWParameters(tls: tlsOptions), proto: "https"))
+                    listeners.append(try await bindLoopback(host, port: LoopbackZone.httpPort,
+                                                            params: .tcp, proto: "http"))
+                } catch where host != .ipv4(.loopback) {
+                    // IPv6 is best effort: without it, the AAAA answer is refused
+                    // fast and browsers fall back to IPv4.
+                    Self.zoneLog.error("zone: no ::1 listener (\(String(describing: error), privacy: .public)); serving IPv4 only")
+                }
+            }
+            try dns.start()
+            try await HostsHelperClient.activateLoopbackZone(legacyLoopback: legacyLoopback)
+        } catch {
+            Self.zoneLog.error("zone: cannot serve the loopback zone (\(String(describing: error), privacy: .public)); falling back to the wildcard listeners")
+            listeners.forEach { $0.cancel() }
+            dns.stop()
+            try? await HostsHelperClient.deactivateLoopbackZone()
+            return nil
+        }
+        stateLock.withLock {
+            zoneListeners = listeners
+            zoneDNS = dns
+            zoneLegacyLoopback = legacyLoopback
+            _boundPort = LoopbackZone.httpsPort
+            _boundHTTPPort = LoopbackZone.httpPort
+        }
+        Self.zoneLog.notice("zone: serving *.\(LoopbackZone.zone, privacy: .public) via \(LoopbackZone.ipv4, privacy: .public) (legacy 127.0.0.1 redirect: \(legacyLoopback, privacy: .public))")
+        return LoopbackZone.httpsPort
+    }
+
+    private static let zoneLog = Logger(subsystem: "com.fabiankaegy.wpcontainer", category: "proxy-zone")
+
+    /// One listener on `host:port` ONLY (never the wildcard).
+    private func bindLoopback(_ host: NWEndpoint.Host, port: UInt16, params: NWParameters,
+                              proto: String) async throws -> NWListener {
+        params.allowLocalEndpointReuse = true
+        params.requiredLocalEndpoint = .hostPort(host: host, port: NWEndpoint.Port(rawValue: port)!)
+        let listener = try NWListener(using: params)
+        try await startListener(listener, context: InboundContext(forwardedProto: proto))
+        return listener
+    }
+
+    /// Keep the helper's legacy-loopback redirect in step with the store
+    /// (`needsLegacyLoopback`) — dropped the moment the last `.localhost`
+    /// instance is migrated, restored if one appears. No-op outside zone mode.
+    private func syncLegacyLoopback(_ envelope: StoreEnvelope) async {
+        let wanted = Self.needsLegacyLoopback(envelope)
+        guard let current = stateLock.withLock({ zoneLegacyLoopback }), current != wanted else { return }
+        do {
+            try await HostsHelperClient.activateLoopbackZone(legacyLoopback: wanted)
+            stateLock.withLock { if zoneLegacyLoopback != nil { zoneLegacyLoopback = wanted } }
+        } catch {
+            Self.zoneLog.error("zone: could not update the legacy 127.0.0.1 redirect: \(String(describing: error), privacy: .public)")
+        }
     }
 
     /// One `container list` per cycle → name→IP map for every running
@@ -614,6 +753,13 @@ public final class HTTPSProxy: @unchecked Sendable {
     }
 
     public func stop() {
+        // A clean stop must not leave pf capturing OTHER tools' 127.0.0.1:443
+        // for a proxy that is gone. The zone itself (aliases, resolver, the
+        // alias redirect) stays: it only ever reaches us. Best effort — an
+        // unclean exit leaves the redirect until the next start or reboot.
+        if stateLock.withLock({ zoneLegacyLoopback }) == true {
+            Task { try? await HostsHelperClient.activateLoopbackZone(legacyLoopback: false) }
+        }
         stopServing()
         // Full teardown gives the env sockets back too — anything else would
         // leave a dead process's ports held for the next owner.
@@ -646,6 +792,11 @@ public final class HTTPSProxy: @unchecked Sendable {
             httpListener?.cancel()
             httpListener = nil
             _boundHTTPPort = nil
+            zoneListeners.forEach { $0.cancel() }
+            zoneListeners.removeAll()
+            zoneDNS?.stop()
+            zoneDNS = nil
+            zoneLegacyLoopback = nil
         }
     }
 
@@ -870,6 +1021,7 @@ public final class HTTPSProxy: @unchecked Sendable {
                 await self.refreshContainerIPs()
                 guard let env = try? await self.persistence.load() else { continue }
                 self.updateHostMap(routes: Self.routes(from: env))
+                await self.syncLegacyLoopback(env)
                 // Diff the proxy-owned env ports against what is actually bound,
                 // which also RETRIES any port an earlier tick couldn't take.
                 self.syncEnvPortListeners()

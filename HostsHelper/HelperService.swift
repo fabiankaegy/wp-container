@@ -2,17 +2,23 @@ import Foundation
 import Security
 import os
 
-/// The object vended over XPC. Implements the two privileged operations. Every
-/// mutating call:
+/// The object vended over XPC. Every hosts-file write that can add a hostname:
 ///   1. re-verifies the caller's `AuthorizationExternalForm` grants our custom
 ///      right WITHOUT allowing interaction (the interactive Touch ID / password
 ///      dialog already happened in the client), and
 ///   2. re-validates every entry against `HostsBlockRewriter` (never trusting
 ///      the app), then
 ///   3. writes `/etc/hosts` atomically preserving `0644 root:wheel`, fsync'd.
+/// The loopback-zone ops (`LoopbackZoneManager`) and the DNS repair carry no
+/// authorization; see `HostsHelperProtocol` for why that is safe.
+///
+/// Mutations are serialized through `mutationLock`: NSXPC delivers each
+/// connection on its own queue, and a zone activation re-pointing the hosts
+/// block must not interleave with an authorized rewrite of it.
 final class HelperService: NSObject, HostsHelperProtocol {
     static let log = Logger(subsystem: "com.fabiankaegy.wpcontainer.hostshelper", category: "helper")
     static let hostsPath = "/etc/hosts"
+    static let mutationLock = NSLock()
 
     // MARK: HostsHelperProtocol
 
@@ -24,6 +30,7 @@ final class HelperService: NSObject, HostsHelperProtocol {
                          authorization: Data,
                          reply: @escaping @Sendable (String?) -> Void) {
         if let denied = verifyAuthorization(authorization) { reply(denied); return }
+        Self.mutationLock.lock(); defer { Self.mutationLock.unlock() }
         do {
             let current = (try? String(contentsOfFile: Self.hostsPath, encoding: .utf8)) ?? ""
             let updated = try HostsBlockRewriter.rewrite(current, entries: entries)
@@ -44,6 +51,7 @@ final class HelperService: NSObject, HostsHelperProtocol {
     func removeHostsBlock(authorization: Data,
                           reply: @escaping @Sendable (String?) -> Void) {
         if let denied = verifyAuthorization(authorization) { reply(denied); return }
+        Self.mutationLock.lock(); defer { Self.mutationLock.unlock() }
         do {
             let current = (try? String(contentsOfFile: Self.hostsPath, encoding: .utf8)) ?? ""
             let updated = HostsBlockRewriter.removeBlock(current)
@@ -63,6 +71,30 @@ final class HelperService: NSObject, HostsHelperProtocol {
         Self.log.notice("repairDNSResolver: restarting mDNSResponder at client request")
         Self.restartMDNSResponder()
         reply(nil)
+    }
+
+    func activateLoopbackZone(legacyLoopback: Bool, reply: @escaping @Sendable (String?) -> Void) {
+        // No authorization by design — see HostsHelperProtocol. Fixed constants
+        // only; the Bool picks between two compiled-in rule sets.
+        Self.mutationLock.lock(); defer { Self.mutationLock.unlock() }
+        do {
+            try LoopbackZoneManager.activate(legacyLoopback: legacyLoopback)
+            reply(nil)
+        } catch {
+            Self.log.error("activateLoopbackZone failed: \(String(describing: error), privacy: .public)")
+            reply(String(describing: error))
+        }
+    }
+
+    func deactivateLoopbackZone(reply: @escaping @Sendable (String?) -> Void) {
+        Self.mutationLock.lock(); defer { Self.mutationLock.unlock() }
+        do {
+            try LoopbackZoneManager.deactivate()
+            reply(nil)
+        } catch {
+            Self.log.error("deactivateLoopbackZone failed: \(String(describing: error), privacy: .public)")
+            reply(String(describing: error))
+        }
     }
 
     // MARK: - Authorization (verify, no interaction)
@@ -102,9 +134,12 @@ final class HelperService: NSObject, HostsHelperProtocol {
 
     // MARK: - Atomic write (root:wheel 0644, fsync)
 
+    /// Atomically replace `path` (staged next to it, then renamed). Used for
+    /// `/etc/hosts`, the zone's resolver file and the pf token file.
+
     static func atomicWrite(_ contents: String, to path: String) throws {
         let dir = (path as NSString).deletingLastPathComponent
-        let tmp = dir + "/.wpc-hosts.\(getpid()).\(UUID().uuidString).tmp"
+        let tmp = dir + "/.wpc.\(getpid()).\(UUID().uuidString).tmp"
         let bytes = Array(contents.utf8)
 
         let fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0o644)

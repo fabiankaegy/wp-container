@@ -15,12 +15,18 @@ public actor HTTPSIntegration {
 
     /// Enable HTTPS for `site`. Ensures certs exist, injects the wp-config
     /// snippet (backed up), and — if the DB container is running — points
-    /// home/siteurl at `https://<slug>.localhost`.
+    /// home/siteurl at `https://<primaryHost>` and maps that host to the gateway
+    /// inside the running wp container (the name may be new: enabling HTTPS is
+    /// when a legacy site adopts the `.wpc.test` zone, §2f-ter).
     public func enable(_ site: Site) async throws {
         try await ca.ensureGenerated()
         try WPConfigService.enableForwardedProto(wordpressFolder: site.wordpressFolder)
         if let dbHost = try? await cli.ipAddress(of: site.dbContainerName), !dbHost.isEmpty {
             try await cli.run(SiteRecipe.wpSetURLsArgs(site, dbHost: dbHost, url: site.secureURL.absoluteString))
+            if let gateway = try? await cli.gatewayAddress(of: site.wpContainerName),
+               let args = SiteRecipe.injectLoopbackHostsArgs(site, gateway: gateway) {
+                _ = try? await cli.runCapturing(args)
+            }
         }
     }
 
