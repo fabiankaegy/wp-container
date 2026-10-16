@@ -539,10 +539,13 @@ public enum SiteRecipe {
     /// - `dryRun`: report the counts without writing anything. The summary line
     ///   changes wording too (`… to be made`), which
     ///   `EnvURLMigration.parseReplacementCount` accounts for.
+    /// - `regex`: `source` is a PCRE pattern (`--regex`); must not contain `/`.
     public static func wpSearchReplaceArgs(_ inst: any RunnableInstance, dbHost: String, source: String, target: String,
-                                           network: Bool = false, dryRun: Bool = false) -> [String] {
+                                           network: Bool = false, dryRun: Bool = false,
+                                           regex: Bool = false) -> [String] {
         var wpArgs = ["search-replace", source, target, "--all-tables", "--precise"]
         if network { wpArgs.append("--network") }
+        if regex { wpArgs.append("--regex") }
         if dryRun { wpArgs.append("--dry-run") }
         return wpProxyArgs(inst, dbHost: dbHost, wpArgs: wpArgs)
     }
