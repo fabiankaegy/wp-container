@@ -155,14 +155,17 @@ public final class AppViewModel {
     public func setHTTPS(_ site: Site, enabled: Bool) {
         Task {
             do {
+                var updated = site
                 if enabled {
-                    try await httpsIntegration.enable(site)
+                    // Turning HTTPS on rewrites the URL anyway — the free moment
+                    // to move a legacy site into the owned zone (§2f-ter).
+                    updated.adoptLoopbackZoneIfInstalled()
+                    try await httpsIntegration.enable(updated)
                     await refreshProxyRouting()
                 } else {
                     try await httpsIntegration.disable(site)
                     try? await ca.removeLeafCoverage(site.proxyHosts)
                 }
-                var updated = site
                 updated.httpsEnabled = enabled
                 await store.upsertSite(updated)   // @Observable → every URL surface re-renders
             } catch {
@@ -851,7 +854,11 @@ public final class AppViewModel {
             let site = Site(name: name, slug: slug, path: sitePath,
                             port: port, imageTag: imageTag, phpVersion: phpVersion, groupID: groupID,
                             xdebugEnabled: xdebugEnabled, elasticsearchEnabled: elasticsearchEnabled,
-                            customDomain: customDomain, networkType: networkType)
+                            customDomain: customDomain,
+                            // New sites live in the owned zone whenever it is set
+                            // up (§2f-ter); see `Site.usesLoopbackZone`.
+                            usesLoopbackZone: LoopbackZone.isInstalled,
+                            networkType: networkType)
             envelope.sites.append(site)
             return site
         }

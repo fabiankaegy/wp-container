@@ -3,7 +3,13 @@ import Foundation
 /// Manages a clearly-delimited block in `/etc/hosts` for custom-domain sites
 /// (PLAN.md §2i). All entries live between `# wp-container begin` / `# wp-container
 /// end` markers so nothing outside our block is ever touched; the file is
-/// rewritten in one shot and installed via a single `osascript` admin prompt.
+/// rewritten in one shot via the privileged helper (or a single `osascript`
+/// admin prompt when it is unavailable).
+///
+/// Entries point at the owned loopback zone's aliases (`LoopbackZone.ipv4` /
+/// `.ipv6`, §2f-ter) once the helper has set the zone up, else at
+/// `127.0.0.1` / `::1` where the legacy wildcard proxy listens. The helper also
+/// re-points an existing block itself when the zone is activated or torn down.
 ///
 /// The block-manipulation core (`rewrite` / `managedDomains`) is pure and
 /// side-effect free so it can be unit/spot tested against a copy of the file
@@ -15,9 +21,23 @@ public enum HostsFileService {
     public static let loopbackIPv4 = "127.0.0.1"
     /// Written next to every IPv4 entry. Without an AAAA answer from
     /// `/etc/hosts`, macOS sends the IPv6 lookup for a `.local` name to mDNS and
-    /// waits out its 5s timeout on every page load. The proxy listens dual-stack,
-    /// so `::1` reaches it too.
+    /// waits out its 5s timeout on every page load. The legacy proxy listens
+    /// dual-stack, so `::1` reaches it too (in zone mode the pair is the zone's
+    /// IPv4/IPv6 aliases instead).
     public static let loopbackIPv6 = "::1"
+
+    /// The (IPv4, IPv6) pair entries point at: the zone aliases when `zone`,
+    /// else the classic loopback addresses.
+    static func addresses(zone: Bool) -> (v4: String, v6: String) {
+        zone ? (LoopbackZone.ipv4, LoopbackZone.ipv6) : (loopbackIPv4, loopbackIPv6)
+    }
+
+    /// Whether `line` is in one of the formats we write — old or zone — so a
+    /// corrupted block left by any version is recognised and cleaned up.
+    private static func isOurEntryLine(_ line: String) -> Bool {
+        [loopbackIPv4, loopbackIPv6, LoopbackZone.ipv4, LoopbackZone.ipv6]
+            .contains { line.hasPrefix("\($0)\t") }
+    }
 
     public enum HostsError: Error, Sendable, CustomStringConvertible {
         case adminFailed(String)
@@ -39,9 +59,10 @@ public enum HostsFileService {
     // MARK: - Pure block manipulation (testable)
 
     /// Return `contents` with the managed block replaced by fresh entries for
-    /// `domains` (deduped, order-preserving). An empty `domains` removes the
-    /// block entirely. Robust to a missing or half-written (corrupted) block.
-    public static func rewrite(_ contents: String, domains: [String]) -> String {
+    /// `domains` (deduped, order-preserving), pointed at the zone aliases when
+    /// `zone`. An empty `domains` removes the block entirely. Robust to a
+    /// missing or half-written (corrupted) block.
+    public static func rewrite(_ contents: String, domains: [String], zone: Bool = false) -> String {
         var lines = contents.components(separatedBy: "\n")
 
         // Remove a well-formed managed block if present.
@@ -50,11 +71,10 @@ public enum HostsFileService {
             lines.removeSubrange(begin...endRel)
         } else if let begin = lines.firstIndex(of: beginMarker) {
             // Corrupted: a begin without an end. Remove the marker and the run of
-            // our-format entry lines (`127.0.0.1\t<host>` / `::1\t<host>`) that follow it.
+            // our-format entry lines (any of the four addresses) that follow it.
             var last = begin
             var i = begin + 1
-            while i < lines.count,
-                  lines[i].hasPrefix("\(loopbackIPv4)\t") || lines[i].hasPrefix("\(loopbackIPv6)\t") {
+            while i < lines.count, isOurEntryLine(lines[i]) {
                 last = i; i += 1
             }
             lines.removeSubrange(begin...last)
@@ -64,7 +84,7 @@ public enum HostsFileService {
         // Trim trailing blanks so we append cleanly.
         while lines.last?.isEmpty == true { lines.removeLast() }
 
-        let entries = entryLines(for: domains)
+        let entries = entryLines(for: domains, zone: zone)
         if !entries.isEmpty {
             if !lines.isEmpty { lines.append("") }
             lines.append(beginMarker)
@@ -75,13 +95,14 @@ public enum HostsFileService {
     }
 
     /// The lines the managed block should hold for `domains`: an IPv4 and an
-    /// IPv6 loopback entry per domain (deduped, order-preserving).
-    static func entryLines(for domains: [String]) -> [String] {
+    /// IPv6 entry per domain (deduped, order-preserving), at `addresses(zone:)`.
+    static func entryLines(for domains: [String], zone: Bool = false) -> [String] {
         var seen = Set<String>()
+        let (v4, v6) = addresses(zone: zone)
         return domains
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty && seen.insert($0).inserted }
-            .flatMap { ["\(loopbackIPv4)\t\($0)", "\(loopbackIPv6)\t\($0)"] }
+            .flatMap { ["\(v4)\t\($0)", "\(v6)\t\($0)"] }
     }
 
     /// The raw lines between the managed block's markers, or [] when there is none.
@@ -117,15 +138,16 @@ public enum HostsFileService {
 
     /// True if the managed block already exactly matches `domains` (no admin
     /// prompt needed). Compares whole lines, not just domains, so a block written
-    /// before the `::1` entries existed counts as stale and gets upgraded.
+    /// before the `::1` entries existed — or pointing at the wrong addresses for
+    /// the current zone state — counts as stale and gets upgraded.
     public static func isUpToDate(domains: [String]) -> Bool {
         guard let current = try? String(contentsOfFile: hostsPath, encoding: .utf8) else { return false }
-        return isUpToDate(current, domains: domains)
+        return isUpToDate(current, domains: domains, zone: LoopbackZone.isInstalled)
     }
 
     /// Pure form of `isUpToDate(domains:)` for testing.
-    static func isUpToDate(_ contents: String, domains: [String]) -> Bool {
-        Set(managedBlockLines(in: contents)) == Set(entryLines(for: domains))
+    static func isUpToDate(_ contents: String, domains: [String], zone: Bool = false) -> Bool {
+        Set(managedBlockLines(in: contents)) == Set(entryLines(for: domains, zone: zone))
     }
 
     /// Rewrite the managed block to exactly `domains` (the union across all
@@ -137,12 +159,16 @@ public enum HostsFileService {
     /// connection dropped, or an ad-hoc Debug build where it can't run) it falls
     /// back to the legacy single `osascript … with administrator privileges`
     /// prompt — behavior unchanged from before the helper existed.
+    ///
+    /// Entries target the zone aliases whenever the zone is installed (only the
+    /// helper ever installs it, and pf only routes the aliases while it does).
     public static func apply(domains: [String]) async throws {
         if isUpToDate(domains: domains) { return }
+        let zone = LoopbackZone.isInstalled
 
         if HostsHelperClient.isEnabled {
             do {
-                try await HostsHelperClient.apply(domains: domains)
+                try await HostsHelperClient.apply(domains: domains, address: addresses(zone: zone).v4)
                 return
             } catch HostsHelperClient.HelperError.cancelled {
                 throw HostsError.cancelled
@@ -155,7 +181,7 @@ public enum HostsFileService {
         }
 
         let current = (try? String(contentsOfFile: hostsPath, encoding: .utf8)) ?? ""
-        let updated = rewrite(current, domains: domains)
+        let updated = rewrite(current, domains: domains, zone: zone)
 
         // Stage the new file in a user-writable temp location, then copy it over
         // /etc/hosts under admin (cp preserves the destination's root:wheel/644).

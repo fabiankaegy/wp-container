@@ -10,7 +10,7 @@ public enum SiteURL {
         URL(string: "http://127.0.0.1:\(port)")!
     }
 
-    /// The HTTPS URL for a proxy-served hostname (e.g. `<slug>.localhost`).
+    /// The HTTPS URL for a proxy-served hostname (e.g. `<slug>.wpc.test`).
     public static func secure(host: String) -> URL {
         URL(string: "https://\(host)")!
     }
@@ -23,12 +23,13 @@ public enum SiteURL {
 
     /// The effective public URL, accounting for HTTPS and custom domains (§2f/§2i):
     /// - custom domain set → `http(s)://<domain>` (always via the host proxy),
-    /// - else HTTPS on → `https://<slug>.localhost`,
+    /// - else HTTPS on → `https://<defaultHost>` (`<slug>.wpc.test`, or the
+    ///   legacy `<slug>.localhost` — see `Site.defaultHost`),
     /// - else → `http://127.0.0.1:<port>` (direct container port).
-    public static func effective(httpsEnabled: Bool, customDomain: String?, slug: String, port: Int) -> URL {
+    public static func effective(httpsEnabled: Bool, customDomain: String?, defaultHost: String, port: Int) -> URL {
         if let domain = customDomain, !domain.isEmpty {
             return httpsEnabled ? secure(host: domain) : plain(host: domain)
         }
-        return httpsEnabled ? secure(host: "\(slug).localhost") : local(port: port)
+        return httpsEnabled ? secure(host: defaultHost) : local(port: port)
     }
 }

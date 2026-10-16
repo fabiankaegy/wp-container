@@ -4,13 +4,14 @@ import ServiceManagement
 import os
 
 /// App/CLI-side driver for the privileged `wpc-hosts-helper` daemon (PLAN.md
-/// §2f-bis). Owns three things:
+/// §2f-bis, §2f-ter). Owns three things:
 ///   1. SMAppService registration state for the embedded daemon,
 ///   2. the interactive authorization (`AuthorizationCreate` +
 ///      `AuthorizationCopyRights` with interaction → the Touch ID-capable system
 ///      dialog), and
-///   3. the XPC round-trip that hands the resulting `AuthorizationExternalForm`
-///      to the helper, which re-verifies everything before writing `/etc/hosts`.
+///   3. the XPC round-trips: hosts writes (carrying the resulting
+///      `AuthorizationExternalForm`, which the helper re-verifies before writing
+///      `/etc/hosts`), and the promptless DNS repair and loopback-zone ops.
 ///
 /// The security boundary lives in the helper; this side is a thin, best-effort
 /// client. `HostsFileService` prefers it when the helper is registered and falls
@@ -77,14 +78,20 @@ public enum HostsHelperClient {
 
     // MARK: - Privileged operations
 
-    /// Write the managed block for `domains` via the helper (empty ⇒ remove).
+    /// Write the managed block for `domains` via the helper (empty ⇒ remove),
+    /// each pointing at `address` (`127.0.0.1`, or `LoopbackZone.ipv4` — the
+    /// helper rejects anything else and derives the IPv6 line itself).
     /// Presents the Touch ID-capable authorization dialog, then hands the signed
     /// external form to the daemon over XPC.
-    public static func apply(domains: [String]) async throws {
+    public static func apply(domains: [String], address: String = HostsFileService.loopbackIPv4) async throws {
         let clean = domains
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-        let entries = clean.map { "\(HostsFileService.loopbackIPv4)\t\($0)" }
+        let entries = clean.map { "\(address)\t\($0)" }
+        if address != HostsFileService.loopbackIPv4 {
+            // Zone-addressed entries are rejected wholesale by a pre-0.3.0 helper.
+            try await requireFeature(.loopbackZone)
+        }
 
         let authData = try makeAuthorizationExternalForm()
 
@@ -111,10 +118,7 @@ public enum HostsHelperClient {
     /// helper that implements the call — older daemons are reported as
     /// `.unavailable` via the version gate.
     public static func repairDNSResolver() async throws {
-        let remote = try await reachableVersion()
-        guard remote == hostsHelperVersion else {
-            throw HelperError.unavailable("helper v\(remote) predates DNS repair (need v\(hostsHelperVersion))")
-        }
+        try await requireFeature(.dnsRepair)
         try await withConnection { (proxy, resumer: Resumer<Void>) in
             proxy.repairDNSResolver { errString in
                 if let errString {
@@ -122,6 +126,47 @@ public enum HostsHelperClient {
                 } else {
                     resumer.resume(returning: ())
                 }
+            }
+        }
+    }
+
+    /// Set up the owned loopback zone (lo0 aliases, resolver file, pf anchor;
+    /// PLAN.md §2f-ter) — no prompt, see `HostsHelperProtocol`. Called by the
+    /// proxy on every start; idempotent. Throws `.unavailable` when the helper
+    /// is unreachable or too old, which the proxy treats as "serve the legacy
+    /// way".
+    public static func activateLoopbackZone(legacyLoopback: Bool) async throws {
+        try await requireFeature(.loopbackZone)
+        try await withConnection { (proxy, resumer: Resumer<Void>) in
+            proxy.activateLoopbackZone(legacyLoopback: legacyLoopback, reply: replyHandler(resumer))
+        }
+    }
+
+    /// Tear the loopback zone down again (aliases, anchor, resolver file) and
+    /// re-point custom-domain hosts entries at 127.0.0.1. Used before the
+    /// helper is turned off, and by a proxy that can't serve the zone.
+    public static func deactivateLoopbackZone() async throws {
+        try await requireFeature(.loopbackZone)
+        try await withConnection { (proxy, resumer: Resumer<Void>) in
+            proxy.deactivateLoopbackZone(reply: replyHandler(resumer))
+        }
+    }
+
+    /// Throw `.unavailable` unless the reachable helper implements `feature`.
+    private static func requireFeature(_ feature: HostsHelperFeature) async throws {
+        let remote = try await reachableVersion()
+        guard feature.isSupported(by: remote) else {
+            throw HelperError.unavailable("helper v\(remote) predates this operation (need v\(feature.rawValue)); it updates when the helper next relaunches (e.g. after a restart)")
+        }
+    }
+
+    /// A `String?` XPC reply mapped onto a `Void` resumer.
+    private static func replyHandler(_ resumer: Resumer<Void>) -> @Sendable (String?) -> Void {
+        { errString in
+            if let errString {
+                resumer.resume(throwing: HelperError.rejected(errString))
+            } else {
+                resumer.resume(returning: ())
             }
         }
     }

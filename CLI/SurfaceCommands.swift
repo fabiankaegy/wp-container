@@ -107,17 +107,24 @@ struct HTTPSCommand: AsyncParsableCommand {
 }
 
 struct HTTPSEnable: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "enable", abstract: "Enable HTTPS for a site (https://<slug>.localhost).")
+    static let configuration = CommandConfiguration(commandName: "enable", abstract: "Enable HTTPS for a site (https://<slug>.wpc.test, or <slug>.localhost without the helper).")
     @Argument(help: "Site slug.") var slug: String
     @OptionGroup var output: JSONOptions
 
     func run() async throws {
         let ctx = CLIContext()
         do {
-            let site = try await loadSite(slug, ctx)
+            var site = try await loadSite(slug, ctx)
+            // HTTPS on rewrites the URL anyway — move a legacy site into the
+            // owned zone while we're at it (§2f-ter).
+            site.adoptLoopbackZoneIfInstalled()
             try await HTTPSIntegration(cli: ctx.cli).enable(site)
+            let (siteID, zoned) = (site.id, site.usesLoopbackZone)
             _ = try await ctx.persistence.mutate { env in
-                if let i = env.sites.firstIndex(where: { $0.id == site.id }) { env.sites[i].httpsEnabled = true }
+                if let i = env.sites.firstIndex(where: { $0.id == siteID }) {
+                    env.sites[i].httpsEnabled = true
+                    env.sites[i].usesLoopbackZone = zoned
+                }
             }
             if output.json { emitLine(MCPJSON.string(["ok": true, "url": site.secureURL.absoluteString])) }
             else { emitLine("Enabled HTTPS for \(slug): \(site.secureURL.absoluteString) (needs the proxy running + CA trusted).") }

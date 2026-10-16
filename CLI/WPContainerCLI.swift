@@ -256,7 +256,9 @@ struct CreateCommand: AsyncParsableCommand {
                 var s = Site(name: siteName, slug: slug, path: sitePath,
                              port: port, imageTag: siteImageTag, phpVersion: sitePHPLabel,
                              cpuLimit: siteCPU, memoryLimitMB: siteMemory,
-                             customDomain: siteDomain, networkType: siteNetwork)
+                             customDomain: siteDomain,
+                             usesLoopbackZone: LoopbackZone.isInstalled, // §2f-ter
+                             networkType: siteNetwork)
                 if let groupName, !groupName.trimmingCharacters(in: .whitespaces).isEmpty {
                     if let existing = env.groups.first(where: { $0.name.caseInsensitiveCompare(groupName) == .orderedSame }) {
                         s.groupID = existing.id

@@ -19,8 +19,9 @@ import dnssd
 /// `HostsHelperProtocol`.
 public enum MDNSHostCheck {
 
-    /// Whether `host` resolves to `127.0.0.1` via mDNSResponder within
-    /// `timeout` seconds. Returns `false` on negative answers, on timeout, AND
+    /// Whether `host` resolves to one of our loopback targets — `127.0.0.1`
+    /// (legacy) or `LoopbackZone.ipv4` (owned zone, §2f-ter) — via
+    /// mDNSResponder within `timeout` seconds. Returns `false` on negative answers, on timeout, AND
     /// when mDNSResponder is unreachable (e.g. mid-restart) — callers that just
     /// restarted the daemon should retry against their own deadline.
     ///
@@ -53,7 +54,9 @@ public enum MDNSHostCheck {
                     let ip = address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
                         $0.pointee.sin_addr.s_addr
                     }
-                    if ip == inet_addr("127.0.0.1") { answer.isLoopback = true }
+                    if ip == inet_addr("127.0.0.1") || ip == inet_addr(LoopbackZone.ipv4) {
+                        answer.isLoopback = true
+                    }
                     answer.isTerminal = true
                 } else if flags & DNSServiceFlags(kDNSServiceFlagsMoreComing) == 0 {
                     answer.isTerminal = true
