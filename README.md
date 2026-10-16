@@ -59,7 +59,8 @@ Sites are provisioned automatically (no install wizard) and log in with
   ```bash
   wp-container worktree create --site my-blog \
     --repo wp-content/plugins/my-plugin --branch feature-x --json
-  # → {"url": "http://127.0.0.1:8882", "path": …, "worktreePath": …}
+  # → {"url": "http://my-blog-wt-feature-x.localhost",
+  #    "localUrl": "http://127.0.0.1:8882", "path": …, "worktreePath": …}
   ```
 - **`wp-container` CLI** — everything the app does, scriptable, with `--json`
   everywhere: `list`, `create` (`--wp/--php/--multisite/--domain/--group`),
@@ -187,9 +188,10 @@ site.
 - **Environments: on by default (3 hours), with a 6-hour grace period after
   creation. Sites: off by default.** The difference between envs and sites is
   observability, not importance. An environment's container
-  publishes no host port — the proxy binds `127.0.0.1:<env port>` itself and
-  relays to the container — so the one URL every surface advertises (and that
-  WordPress has pinned as `home`/`siteurl`) runs through the proxy. Every request
+  publishes no host port — the proxy serves its `<env>.localhost` domain (the URL
+  every surface advertises, and that WordPress has as `home`/`siteurl`) and binds
+  `127.0.0.1:<env port>` itself, relaying both to the container — so every way
+  into an environment runs through the proxy. Every request
   to an environment therefore counts as use, and reopening a parked one wakes it
   **at that same URL**. A *site* still publishes its own port, and a request
   straight to `http://127.0.0.1:<port>` bypasses the proxy — that's the one

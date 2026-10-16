@@ -63,6 +63,18 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
     /// when the env has its own DB container. PERSISTED, never recomputed from
     /// the slug at use time (issue #17).
     public private(set) var databaseSchema: String?
+    /// Whether this env's database has been migrated onto its domain URL
+    /// (`domainURL`, routed by the proxy by Host) rather than its loopback port.
+    /// Set by `WorktreeEnvService.create` and `worktree fix-urls` after a
+    /// successful migration. Records written before env domains decode as
+    /// `false`, so an existing env keeps advertising the IP URL its database
+    /// actually holds until `fix-urls` moves it.
+    public var usesDomainURL: Bool
+    /// The scheme the env was migrated onto — the parent's `httpsEnabled` at
+    /// migration time. Persisted rather than read live from the parent because
+    /// it describes what is in the env's database, which doesn't change when
+    /// the parent toggles HTTPS later.
+    public var httpsEnabled: Bool
 
     /// Runtime-derived; NOT persisted.
     public var status: SiteStatus = .stopped
@@ -72,7 +84,8 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
              worktreePath, envPath, port, imageTag, createdAt, provisioned,
              xdebugEnabled, elasticsearchEnabled, cpuLimit, memoryLimitMB,
              idleStopMinutes, lastActivityAt,
-             mailpitEnabled, mailpitPort, sharedDatabase, databaseSchema
+             mailpitEnabled, mailpitPort, sharedDatabase, databaseSchema,
+             usesDomainURL, httpsEnabled
     }
 
     public init(
@@ -98,6 +111,8 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         lastActivityAt: Date? = nil,
         sharedDatabase: Bool = false,
         databaseSchema: String? = nil,
+        usesDomainURL: Bool = false,
+        httpsEnabled: Bool = false,
         status: SiteStatus = .stopped
     ) {
         self.id = id
@@ -123,6 +138,8 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         // Enforce the shared-DB invariant at the only two entry points.
         self.databaseSchema = databaseSchema
         self.sharedDatabase = sharedDatabase && databaseSchema != nil
+        self.usesDomainURL = usesDomainURL
+        self.httpsEnabled = httpsEnabled
         self.status = status
     }
 
@@ -160,6 +177,10 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         let schema = try? c.decodeIfPresent(String.self, forKey: .databaseSchema)
         self.databaseSchema = schema
         self.sharedDatabase = ((try? c.decode(Bool.self, forKey: .sharedDatabase)) ?? false) && schema != nil
+        // Absent in envs written before env domains — their database still
+        // holds `127.0.0.1:<port>`, so they must keep advertising it.
+        self.usesDomainURL = (try? c.decode(Bool.self, forKey: .usesDomainURL)) ?? false
+        self.httpsEnabled = (try? c.decode(Bool.self, forKey: .httpsEnabled)) ?? false
     }
 
     public var wordpressFolder: URL { envPath.appendingPathComponent("wordpress", isDirectory: true) }
@@ -167,6 +188,21 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
     /// env never materializes this folder (issue #17) — `SiteFolders.ensure`
     /// skips it, and `SiteRecipe.runDatabaseArgs` is never called for the env.
     public var databaseFolder: URL { envPath.appendingPathComponent("database", isDirectory: true) }
+
+    // MARK: - URLs
+
+    /// The env's proxy hostname. Everything that names the env by host — proxy
+    /// routes, cert SANs, `loopbackHosts`, `domainURL` — derives from this.
+    public var domainHost: String { SiteURL.envHost(envSlug: envSlug) }
+    /// `http(s)://<domainHost>`, whether or not the env has been migrated onto it.
+    public var domainURL: URL { SiteURL.env(host: domainHost, https: httpsEnabled) }
+    /// The URL the env is advertised at (app, CLI, MCP, magic login): its domain
+    /// once migrated, else the loopback-port URL its database still holds.
+    /// `localURL` stays the `http://127.0.0.1:<port>` form either way.
+    public var url: URL { usesDomainURL ? domainURL : localURL }
+    /// WP Admin on `url`. Shadows `RunnableInstance.adminURL` (the loopback-port
+    /// form) for concrete `WorktreeEnv` values.
+    public var adminURL: URL { url.appendingPathComponent("wp-admin") }
 
     /// Compose the env slug from a parent slug + branch slug.
     public static func makeSlug(parentSlug: String, branch: String) -> String {
@@ -206,10 +242,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         })
         let full = schemaPrefix + sanitized
         guard full.count > maxSchemaNameLength else { return full }
-        // Built by hand rather than `String(format: "%06x", …)`: `%x` reads only
-        // 32 bits off the vararg list, so feeding it a UInt64 is a trap.
-        let digits = String(stableHash(slug) & 0xFF_FFFF, radix: 16)
-        let hash = String(repeating: "0", count: max(0, 6 - digits.count)) + digits
+        let hash = shortHash(slug)
         let keep = maxSchemaNameLength - hash.count - 1 // "_" + hash
         return String(full.prefix(keep)) + "_" + hash
     }
@@ -221,6 +254,15 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         guard name.hasPrefix(schemaPrefix), name.count > schemaPrefix.count,
               name.count <= maxSchemaNameLength else { return false }
         return name.allSatisfy { ($0.isASCII && ($0.isLetter || $0.isNumber)) || $0 == "_" }
+    }
+
+    /// Six lowercase hex digits of `stableHash`, zero-padded — the suffix that
+    /// keeps truncated names (schemas, DNS labels) unique.
+    static func shortHash(_ s: String) -> String {
+        // Built by hand rather than `String(format: "%06x", …)`: `%x` reads only
+        // 32 bits off the vararg list, so feeding it a UInt64 is a trap.
+        let digits = String(stableHash(s) & 0xFF_FFFF, radix: 16)
+        return String(repeating: "0", count: max(0, 6 - digits.count)) + digits
     }
 
     /// FNV-1a (64-bit). Deterministic across processes and releases — Swift's
@@ -261,9 +303,14 @@ extension WorktreeEnv: RunnableInstance {
     public var extraMounts: [Mount] {
         [SiteRecipe.shadowMount(worktreePath: worktreePath, repoRelPath: repoRelPath)]
     }
+    /// The env's proxy hostname, so WordPress loopback requests (wp-cron, Site
+    /// Health, REST self-calls) to its domain URL reach the host proxy.
+    public var loopbackHosts: [String] { [domainHost] }
     /// An env's wp container does NOT publish a host port (issue #16
     /// follow-through). The reverse proxy binds `127.0.0.1:<port>` for it and
-    /// relays to the container's vmnet IP, which is what makes the env's ONE
-    /// advertised URL both idle-trackable and wakeable. See `publishesPort`.
+    /// relays to the container's vmnet IP; the env's domain URL reaches the same
+    /// container through the proxy's 443/80 listeners, routed by Host. Either
+    /// way every request is proxied, which is what makes the env idle-trackable
+    /// and wakeable. See `publishesPort`.
     public var publishesPort: Bool { false }
 }

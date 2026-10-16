@@ -223,8 +223,9 @@ struct IdleCommand: AsyncParsableCommand {
         6 hours regardless of use — pass --minutes or --off to opt out of the \
         grace period too, since an explicit value always wins immediately. An \
         environment's container publishes no port of its own — the \
-        proxy owns its http://127.0.0.1:<port> URL — so every request to it \
-        counts as activity, and a parked environment wakes at that same URL. \
+        proxy serves both its <envSlug>.localhost domain and its \
+        http://127.0.0.1:<port> — so every request to either counts as \
+        activity, and a parked environment wakes at that same URL. \
         So do wp-cli, MCP tool calls and magic-login links.
 
         SITES: off by default, opt-in. A site publishes its own \

@@ -116,6 +116,12 @@ final class WorktreeEnvIdlePolicyTests: XCTestCase {
         XCTAssertNil(env.cpuLimit)
         XCTAssertFalse(env.sharedDatabase)
         XCTAssertNil(env.databaseSchema)
+        // Predates env domains: its database holds 127.0.0.1:<port>, so that
+        // is what it must keep advertising until `fix-urls` moves it.
+        XCTAssertFalse(env.usesDomainURL)
+        XCTAssertFalse(env.httpsEnabled)
+        XCTAssertEqual(env.url.absoluteString, "http://127.0.0.1:9001")
+        XCTAssertEqual(env.adminURL.absoluteString, "http://127.0.0.1:9001/wp-admin")
         // Resolves to the (now 180-minute) built-in default, and — being from
         // 2025 — is long past the creation-grace window.
         XCTAssertEqual(env.effectiveIdleStopMinutes, IdlePolicy.defaultEnvMinutes)
