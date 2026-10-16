@@ -303,12 +303,12 @@ private struct HostsHelperSettingsSection: View {
         switch status {
         case .enabled:
             HStack(alignment: .top, spacing: 8) {
-                Label("Enabled — custom domain changes use Touch ID (no password).",
+                Label("Enabled — custom domain changes use Touch ID (no password), and sites are served from their own *.\(LoopbackZone.zone) loopback address (relaunch WP Container once after enabling).",
                       systemImage: "checkmark.seal.fill")
                     .font(.callout).foregroundStyle(.green)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
-                Button("Disable") { setEnabled(false) }
+                Button("Disable") { Task { await disable() } }
                     .controlSize(.small)
             }
         case .requiresApproval:
@@ -336,6 +336,14 @@ private struct HostsHelperSettingsSection: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
         }
+    }
+
+    /// Tear the loopback zone down while the helper can still do it (aliases,
+    /// pf anchor, resolver file; custom-domain entries back to 127.0.0.1), then
+    /// unregister. The next proxy start serves the legacy wildcard way.
+    private func disable() async {
+        try? await HostsHelperClient.deactivateLoopbackZone()
+        setEnabled(false)
     }
 
     private func setEnabled(_ enabled: Bool) {
