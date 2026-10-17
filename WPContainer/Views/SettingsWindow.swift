@@ -370,6 +370,7 @@ private struct SitesSettingsPane: View {
     @AppStorage(AppSettings.defaultWordPressVersionKey) private var defaultWordPress = "latest"
     @AppStorage(AppSettings.defaultPHPVersionKey) private var defaultPHP = WordPressImageCatalog.defaultPHP
     @AppStorage(ExternalEditors.targetKey) private var openInTarget = OpenInTarget.siteFolder.rawValue
+    @AppStorage(AppSettings.terminalAppKey) private var terminalApp = TerminalApp.terminal.rawValue
     @AppStorage(AppSettings.defaultHTTPSKey) private var defaultHTTPS = true
     @AppStorage(AppSettings.defaultWPDebugKey) private var defaultWPDebug = true
     @AppStorage(AppSettings.defaultScriptDebugKey) private var defaultScriptDebug = true
@@ -431,6 +432,14 @@ private struct SitesSettingsPane: View {
                                explanation: "Which folder the Open In button and menus hand to external editors.") {
                         Picker("", selection: $openInTarget) {
                             ForEach(OpenInTarget.allCases) { t in Text(t.label).tag(t.rawValue) }
+                        }
+                        .labelsHidden().fixedSize()
+                    }
+
+                    SettingRow(title: "Terminal app",
+                               explanation: "Which app the Terminal buttons and menus open. Ghostty 1.3 or later appears here when installed.") {
+                        Picker("", selection: $terminalApp) {
+                            ForEach(TerminalApps.installed()) { app in Text(app.name).tag(app.rawValue) }
                         }
                         .labelsHidden().fixedSize()
                     }

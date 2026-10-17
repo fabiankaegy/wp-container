@@ -124,6 +124,9 @@ targets:
         # proxy's only upstream for a worktree env, so the app served a 502 for
         # every env and every wake timed out (v0.2.0 regression).
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: "WP Container connects to your local WordPress containers on the container network to serve their sites in your browser."
+        # Shown in the Automation prompt the first time a Terminal button drives
+        # Terminal or Ghostty through AppleScript.
+        INFOPLIST_KEY_NSAppleEventsUsageDescription: "WP Container opens a window in your terminal app for the site you choose."
         INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Fabian Kaegy. All rights reserved."
         COMBINE_HIDPI_IMAGES: "YES"
 

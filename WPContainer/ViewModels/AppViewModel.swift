@@ -701,7 +701,7 @@ public final class AppViewModel {
         if WPCLIShim.routerInstalled { _ = try? WPCLIShim.writeRouter() }
     }
 
-    /// Open an interactive wp-cli shell for the site in Terminal.app (§2e).
+    /// Open an interactive wp-cli shell for the site in the chosen terminal app (§2e).
     public func openWPCLI(_ site: Site) {
         let command = WPCLIShim.interactiveTerminalCommand(for: site, slug: site.slug)
         SystemActions.openTerminalRunning(command)
