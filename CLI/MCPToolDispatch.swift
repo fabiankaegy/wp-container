@@ -34,9 +34,10 @@ enum MCPToolDispatch {
             case "worktree_create":   return try await worktreeCreate(args, ctx: ctx, slug: scopedSlug)
             case "worktree_list":     return try await worktreeList(args, ctx: ctx, slug: scopedSlug)
             case "worktree_delete":   return try await worktreeDelete(args, ctx: ctx)
-            case "xdebug_toggle":     return try await addonToggle(args, ctx: ctx, slug: scopedSlug, kind: .xdebug)
-            case "elasticsearch_toggle": return try await addonToggle(args, ctx: ctx, slug: scopedSlug, kind: .elasticsearch)
-            case "mailpit_toggle":    return try await mailpitToggle(args, ctx: ctx, slug: scopedSlug)
+            case "xdebug_toggle":     return try await xdebugToggle(args, ctx: ctx, slug: scopedSlug)
+            case "elasticsearch_toggle": return try await sidecarToggle(args, ctx: ctx, slug: scopedSlug, addon: SidecarAddons.elasticsearch)
+            case "mailpit_toggle":    return try await sidecarToggle(args, ctx: ctx, slug: scopedSlug, addon: SidecarAddons.mailpit)
+            case "redis_toggle":      return try await sidecarToggle(args, ctx: ctx, slug: scopedSlug, addon: SidecarAddons.redis)
             case "db_import":         return try await dbImport(args, ctx: ctx, slug: scopedSlug)
             case "set_idle_stop":     return try await setIdleStop(args, ctx: ctx, slug: scopedSlug)
             default:
@@ -162,16 +163,11 @@ enum MCPToolDispatch {
         let host = try await dbHost(for: site, ctx: ctx)
         let wp = wpArgs(from: args)
         guard !wp.isEmpty else { throw ToolError("bad_args", "Provide `args` (array) or `command` (string).") }
-        // Inject the Mailpit host so wp_mail from wp-cli is caught too (issue #10).
-        var mailHost: String? = nil
-        if site.mailpitEnabled { mailHost = (try? await ctx.cli.ipAddress(of: site.mailContainerName)) ?? nil }
-        // Point ElasticPress at the sidecar so `wp elasticpress …` works.
-        var esURL: String? = nil
-        if site.elasticsearchEnabled, let esIP = (try? await ctx.cli.ipAddress(of: site.esContainerName)) ?? nil {
-            esURL = SiteRecipe.elasticsearchURL(esHost: esIP)
-        }
+        // Reach the running sidecars: wp_mail lands in Mailpit (issue #10),
+        // ElasticPress finds Elasticsearch.
+        let sidecarEnvironment = await SidecarAddons.environment(for: site, cli: ctx.cli)
         let result = try await ctx.cli.runCapturing(SiteRecipe.wpProxyArgs(site, dbHost: host, wpArgs: wp,
-                                                                           mailpitHost: mailHost, elasticsearchURL: esURL))
+                                                                           sidecarEnvironment: sidecarEnvironment))
         return MCPResult.json([
             "stdout": result.stdout,
             "stderr": result.stderr,
@@ -270,6 +266,7 @@ enum MCPToolDispatch {
             "provisioned": site.provisioned,
             "mailpitEnabled": site.mailpitEnabled,
             "mailboxUrl": site.mailboxURL?.absoluteString as Any? ?? NSNull(),
+            "redisEnabled": site.redisEnabled,
             // Auto-stop-when-idle (issue #16). `idleStopMinutes` is the persisted
             // setting (null = follow the default), `effectiveIdleStopMinutes` the
             // timeout actually in force with the default resolved — 0 means the
@@ -301,8 +298,7 @@ enum MCPToolDispatch {
         let site = try await resolveSite(slug, ctx: ctx)
         let host = try await dbHost(for: site, ctx: ctx)
         let user = args["user"]?.stringValue ?? SiteRecipe.adminUser
-        var mailHost: String? = nil
-        if site.mailpitEnabled { mailHost = (try? await ctx.cli.ipAddress(of: site.mailContainerName)) ?? nil }
+        let sidecarEnvironment = await SidecarAddons.environment(for: site, cli: ctx.cli)
         // The site is running (dbHost resolved). If the handler wasn't already
         // active this container predates it and must be restarted.
         let alreadyActive = MagicLoginService.isLoginActive(for: site)
@@ -310,7 +306,7 @@ enum MCPToolDispatch {
         try MagicLoginService.ensureLoginHandler(for: site)
         do {
             let link = try await MagicLoginService.issueLoginLink(for: site, publicURL: site.url, dbHost: host,
-                                                                 cli: ctx.cli, user: user, mailpitHost: mailHost)
+                                                                 cli: ctx.cli, user: user, sidecarEnvironment: sidecarEnvironment)
             let iso = ISO8601DateFormatter().string(from: link.expiresAt)
             var payload: [String: Any] = [
                 "url": link.url.absoluteString,
@@ -581,79 +577,41 @@ enum MCPToolDispatch {
 
     // MARK: - Add-on toggles (§2c)
 
-    private enum Addon { case xdebug, elasticsearch }
-
-    private static func addonToggle(_ args: [String: Value], ctx: CLIContext, slug: String, kind: Addon) async throws -> CallTool.Result {
+    private static func xdebugToggle(_ args: [String: Value], ctx: CLIContext, slug: String) async throws -> CallTool.Result {
         guard let enabled = args["enabled"]?.boolValue else { throw ToolError("bad_args", "`enabled` is required.") }
         let site = try await resolveSite(slug, ctx: ctx)
         let updated = try await ctx.persistence.mutate { env in
-            if let i = env.sites.firstIndex(where: { $0.id == site.id }) {
-                switch kind {
-                case .xdebug:        env.sites[i].xdebugEnabled = enabled
-                case .elasticsearch: env.sites[i].elasticsearchEnabled = enabled
-                }
-            }
+            if let i = env.sites.firstIndex(where: { $0.id == site.id }) { env.sites[i].xdebugEnabled = enabled }
         }
         let newSite = updated.sites.first { $0.id == site.id } ?? site
-        let running = await ctx.runningContainerNames()
-        var restarted = false
-        if running.contains(site.wpContainerName) {
-            await ctx.lifecycle.stop(newSite)
-            _ = try await ctx.lifecycle.startSite(newSite)
-            await ctx.lifecycle.markRunning(newSite.id)
-            restarted = true
-        }
-        return MCPResult.json([
-            "ok": true,
-            "addon": kind == .xdebug ? "xdebug" : "elasticsearch",
-            "enabled": enabled,
-            "restarted": restarted,
-        ])
+        let restarted = try await restartIfRunning(newSite, ctx: ctx)
+        return MCPResult.json(["ok": true, "addon": "xdebug", "enabled": enabled, "restarted": restarted])
     }
 
-    // MARK: - Mailpit toggle (issue #10)
-
-    private static func mailpitToggle(_ args: [String: Value], ctx: CLIContext, slug: String) async throws -> CallTool.Result {
+    /// `elasticsearch_toggle`, `mailpit_toggle`, `redis_toggle`: returns `{ok, addon, enabled,
+    /// restarted}`, plus the addon's endpoint under its `endpointKey`.
+    private static func sidecarToggle(_ args: [String: Value], ctx: CLIContext, slug: String,
+                                      addon: any SidecarAddon) async throws -> CallTool.Result {
         guard let enabled = args["enabled"]?.boolValue else { throw ToolError("bad_args", "`enabled` is required.") }
         let site = try await resolveSite(slug, ctx: ctx)
-        let updated: Site
-        if enabled {
-            try MailpitService.writeHandler(phpConfFolder: site.phpConfFolder)
-            if site.mailpitPort == nil {
-                guard let (_, reservedSite, _) = try await ctx.persistence.allocatePort(reserve: { port, env -> Site? in
-                    guard let i = env.sites.firstIndex(where: { $0.id == site.id }) else { return nil }
-                    env.sites[i].mailpitPort = port
-                    env.sites[i].mailpitEnabled = true
-                    return env.sites[i]
-                }), let s = reservedSite else { throw ToolError("no_free_port", "No free port available for the mailbox.") }
-                updated = s
-            } else {
-                let env = try await ctx.persistence.mutate { e in
-                    if let i = e.sites.firstIndex(where: { $0.id == site.id }) { e.sites[i].mailpitEnabled = true }
-                }
-                updated = env.sites.first { $0.id == site.id } ?? site
-            }
-        } else {
-            MailpitService.removeHandler(phpConfFolder: site.phpConfFolder)
-            let env = try await ctx.persistence.mutate { e in
-                if let i = e.sites.firstIndex(where: { $0.id == site.id }) { e.sites[i].mailpitEnabled = false }
-            }
-            updated = env.sites.first { $0.id == site.id } ?? site
+        guard let updated = try await ctx.persistence.setSidecar(addon, enabled: enabled, siteID: site.id)?.site else {
+            throw ToolError("no_free_port", "No free port available for \(addon.displayName).")
         }
-        let running = await ctx.runningContainerNames()
-        var restarted = false
-        if running.contains(site.wpContainerName) {
-            await ctx.lifecycle.stop(updated)
-            _ = try await ctx.lifecycle.startSite(updated)
-            await ctx.lifecycle.markRunning(updated.id)
-            restarted = true
+        let restarted = try await restartIfRunning(updated, ctx: ctx)
+        var payload: [String: Any] = ["ok": true, "addon": addon.id, "enabled": enabled, "restarted": restarted]
+        if let key = addon.endpointKey {
+            payload[key] = addon.endpointURL(for: updated)?.absoluteString as Any? ?? NSNull()
         }
-        return MCPResult.json([
-            "ok": true,
-            "enabled": enabled,
-            "restarted": restarted,
-            "mailboxUrl": updated.mailboxURL?.absoluteString as Any? ?? NSNull(),
-        ])
+        return MCPResult.json(payload)
+    }
+
+    /// Restart `site` when its wp container is running so a toggle takes effect.
+    private static func restartIfRunning(_ site: Site, ctx: CLIContext) async throws -> Bool {
+        guard await ctx.runningContainerNames().contains(site.wpContainerName) else { return false }
+        await ctx.lifecycle.stop(site)
+        _ = try await ctx.lifecycle.startSite(site)
+        await ctx.lifecycle.markRunning(site.id)
+        return true
     }
 
     // MARK: - db_import (PLAN.md §2m)

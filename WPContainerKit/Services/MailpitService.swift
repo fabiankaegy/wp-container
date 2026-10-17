@@ -55,6 +55,9 @@ public enum MailpitService {
     } );
     """
 
+    /// The handler as the Mailpit sidecar addon registers it.
+    public static let handler = PrependHandler(fileName: handlerFileName, marker: marker, contents: pluginContents)
+
     /// Whether our managed handler is present in `php/prepend.d/` (marker match).
     public static func isHandlerPresent(phpConfFolder: URL) -> Bool {
         PrependService.isHandlerPresent(phpConfFolder: phpConfFolder, name: handlerFileName, marker: marker)

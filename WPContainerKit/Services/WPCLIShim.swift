@@ -12,9 +12,9 @@ import Foundation
 /// piping works.
 ///
 /// Each invocation also mounts the instance's `php/` overrides folder and passes
-/// the running sidecars' addresses (`WPC_MAILPIT_HOST`, `EP_HOST`), so wp-cli
-/// loads the same managed runtime handlers as the wp container. A sidecar that
-/// isn't running yields an empty value, which the handlers treat as "not wired".
+/// every sidecar's env vars (`SidecarAddons`), so wp-cli loads the same managed
+/// runtime handlers as the wp container. A sidecar that isn't running yields an
+/// empty value, which the handlers treat as "not wired".
 public enum WPCLIShim {
     public static let containerBinary = ContainerCLI.defaultBinaryPath
     public static let cliPath = "/usr/local/bin/wp-container"
@@ -40,8 +40,9 @@ public enum WPCLIShim {
     /// the real DB CONTAINER and SCHEMA instead of deriving them from the slug,
     /// so a shared-database worktree env resolves the parent's container and its
     /// own `wpc_*` schema (issue #17); v5 mounts the `php/` overrides folder and
-    /// passes the Mailpit/Elasticsearch sidecar addresses.
-    public static let shimVersion = 5
+    /// passes the Mailpit/Elasticsearch sidecar addresses; v6 passes every
+    /// registered sidecar's env vars; v7 adds Redis.
+    public static let shimVersion = 7
     private static let versionMarker = "# wpc-shim-version:"
 
     /// Bash function shared by the shim and the router: prints a running
@@ -65,15 +66,18 @@ public enum WPCLIShim {
     /// PARENT's container and its own schema. Both default to the classic
     /// per-site values.
     ///
-    /// `mailContainer`, `esContainer` and `phpConfFolder` default to the classic
-    /// per-site names and the `php/` folder beside `wordpressFolder`.
+    /// `sidecars` and `phpConfFolder` default to the classic per-site container
+    /// names and the `php/` folder beside `wordpressFolder`.
     public static func shimScript(slug: String, wordpressFolder: URL, cliImage: String,
                                   dbContainer: String? = nil,
                                   databaseName: String = SiteRecipe.dbName,
-                                  mailContainer: String? = nil,
-                                  esContainer: String? = nil,
+                                  sidecars: [SidecarRef]? = nil,
                                   phpConfFolder: URL? = nil) -> String {
         let phpDir = phpConfFolder ?? PrependService.phpFolder(forWordpress: wordpressFolder)
+        let refs = sidecars ?? SidecarAddons.refs(slug: slug)
+        let lookups = sidecarLookups(refs) { "\"$(container_ip \(shellQuote($0)))\"" }
+            .joined(separator: "\n")
+        let envFlags = sidecarEnvFlags(refs).map { "  \($0) \\\n" }.joined()
         return """
         #!/bin/bash
         \(versionMarker) \(shimVersion)
@@ -87,8 +91,6 @@ public enum WPCLIShim {
         CONTAINER_BIN="\(containerBinary)"
         SITE_SLUG="\(slug)"
         DB_CONTAINER="\(dbContainer ?? "wpc-\(slug)-db")"
-        MAIL_CONTAINER="\(mailContainer ?? "wpc-\(slug)-mail")"
-        ES_CONTAINER="\(esContainer ?? "wpc-\(slug)-es")"
         WP_DIR="\(wordpressFolder.path)"
         PHP_DIR="\(phpDir.path)"
 
@@ -115,8 +117,7 @@ public enum WPCLIShim {
           echo "    Start the site first (e.g. wp-container start $SITE_SLUG)." >&2
           exit 1
         fi
-        MAIL_IP="$(container_ip "$MAIL_CONTAINER")"
-        ES_IP="$(container_ip "$ES_CONTAINER")"
+        \(lookups)
 
         # Managed runtime handlers load via the php/ overrides folder once it exists.
         PHP_ARGS=()
@@ -134,9 +135,7 @@ public enum WPCLIShim {
           -e "WORDPRESS_DB_USER=\(SiteRecipe.dbUser)" \\
           -e "WORDPRESS_DB_PASSWORD=\(SiteRecipe.dbPassword)" \\
           -e "WORDPRESS_DB_NAME=\(databaseName)" \\
-          -e "WPC_MAILPIT_HOST=$MAIL_IP" \\
-          -e "EP_HOST=${ES_IP:+http://$ES_IP:9200}" \\
-          "\(cliImage)" wp "$@"
+        \(envFlags)  "\(cliImage)" wp "$@"
         """
     }
 
@@ -149,16 +148,14 @@ public enum WPCLIShim {
                                  cliImage: String = WordPressImageCatalog.baseCLIImage,
                                  dbContainer: String? = nil,
                                  databaseName: String = SiteRecipe.dbName,
-                                 mailContainer: String? = nil,
-                                 esContainer: String? = nil,
+                                 sidecars: [SidecarRef]? = nil,
                                  phpConfFolder: URL? = nil) throws -> URL {
         let url = siteRoot.appendingPathComponent("wp")
         let wp = wordpressFolder ?? siteRoot.appendingPathComponent("wordpress", isDirectory: true)
         try FileManager.default.createDirectory(at: siteRoot, withIntermediateDirectories: true)
         try shimScript(slug: slug, wordpressFolder: wp, cliImage: cliImage,
                        dbContainer: dbContainer, databaseName: databaseName,
-                       mailContainer: mailContainer, esContainer: esContainer,
-                       phpConfFolder: phpConfFolder)
+                       sidecars: sidecars, phpConfFolder: phpConfFolder)
             .write(to: url, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
         return url
@@ -176,8 +173,7 @@ public enum WPCLIShim {
                       cliImage: SiteRecipe.cliImage(for: inst),
                       dbContainer: inst.dbContainerName,
                       databaseName: inst.databaseName,
-                      mailContainer: inst.mailContainerName,
-                      esContainer: inst.esContainerName,
+                      sidecars: SidecarAddons.refs(for: inst),
                       phpConfFolder: inst.phpConfFolder)
     }
 
@@ -205,8 +201,9 @@ public enum WPCLIShim {
     /// resolved schema through as `WORDPRESS_DB_NAME`, which a shared-database
     /// worktree env needs to avoid operating on its PARENT's data (issue #17).
     /// v3 mounts the resolved `php/` overrides folder and passes the
-    /// Mailpit/Elasticsearch sidecar addresses.
-    public static let routerVersion = 3
+    /// Mailpit/Elasticsearch sidecar addresses. v5 passes every sidecar
+    /// `resolve-site` reports.
+    public static let routerVersion = 5
     private static let routerVersionMarker = "# wpc-router-version:"
     /// The flag the router announces its own body version with. `resolve-site`
     /// REFUSES to resolve a shared-database env for a router too old to honor
@@ -243,19 +240,32 @@ public enum WPCLIShim {
         print("WPC_SUB=" + shlex.quote(d.get("subpath", "")))
         print("WPC_CLI=" + shlex.quote(d.get("cliImage", "wordpress:cli")))
         print("WPC_DBNAME=" + shlex.quote(d.get("dbName", "\(SiteRecipe.dbName)")))
-        print("WPC_MAIL=" + shlex.quote(d.get("mailContainer", "")))
-        print("WPC_ES=" + shlex.quote(d.get("esContainer", "")))
         print("WPC_PHP=" + shlex.quote(d.get("phpConfPath", "")))
+        sc = []
+        for s in d.get("sidecars", []):
+            for e in s.get("environment", []):
+                sc += [s["container"], e["key"], e.get("prefix", ""), e.get("suffix", "")]
+        print("WPC_SIDECARS=(" + " ".join(shlex.quote(x) for x in sc) + ")")
         ')"
           DB_IP="$(container_ip "$WPC_DB")"
           if [ -z "$DB_IP" ]; then
             echo "wp: this WP Container site is not running (start it first)." >&2
             exit 1
           fi
-          MAIL_IP=""
-          [ -n "$WPC_MAIL" ] && MAIL_IP="$(container_ip "$WPC_MAIL")"
-          ES_IP=""
-          [ -n "$WPC_ES" ] && ES_IP="$(container_ip "$WPC_ES")"
+          # WPC_SIDECARS holds (container, key, prefix, suffix) per env var; a
+          # sidecar that isn't running passes an empty value.
+          SIDECAR_ARGS=()
+          LAST_SIDECAR=""
+          SIDECAR_IP=""
+          i=0
+          while [ "$i" -lt "${#WPC_SIDECARS[@]}" ]; do
+            if [ "${WPC_SIDECARS[$i]}" != "$LAST_SIDECAR" ]; then
+              LAST_SIDECAR="${WPC_SIDECARS[$i]}"
+              SIDECAR_IP="$(container_ip "$LAST_SIDECAR")"
+            fi
+            SIDECAR_ARGS+=(-e "${WPC_SIDECARS[$((i + 1))]}=${SIDECAR_IP:+${WPC_SIDECARS[$((i + 2))]}$SIDECAR_IP${WPC_SIDECARS[$((i + 3))]}}")
+            i=$((i + 4))
+          done
           # Managed runtime handlers load via the php/ overrides folder once it exists.
           PHP_ARGS=()
           if [ -n "$WPC_PHP" ] && [ -d "$WPC_PHP" ]; then
@@ -273,8 +283,7 @@ public enum WPCLIShim {
             -e "WORDPRESS_DB_USER=\(SiteRecipe.dbUser)" \\
             -e "WORDPRESS_DB_PASSWORD=\(SiteRecipe.dbPassword)" \\
             -e "WORDPRESS_DB_NAME=${WPC_DBNAME:-\(SiteRecipe.dbName)}" \\
-            -e "WPC_MAILPIT_HOST=$MAIL_IP" \\
-            -e "EP_HOST=${ES_IP:+http://$ES_IP:9200}" \\
+            ${SIDECAR_ARGS[@]+"${SIDECAR_ARGS[@]}"} \\
             "${WPC_CLI:-\(WordPressImageCatalog.baseCLIImage)}" wp "$@"
         fi
 
@@ -347,16 +356,16 @@ public enum WPCLIShim {
                                                   cliImage: String = WordPressImageCatalog.baseCLIImage,
                                                   dbContainer: String? = nil,
                                                   databaseName: String = SiteRecipe.dbName,
-                                                  mailContainer: String? = nil,
-                                                  esContainer: String? = nil,
+                                                  sidecars: [SidecarRef]? = nil,
                                                   phpConfFolder: URL? = nil) -> String {
         let wp = wordpressFolder.path
         let php = (phpConfFolder ?? PrependService.phpFolder(forWordpress: wordpressFolder)).path
         let db = dbContainer ?? "wpc-\(slug)-db"
-        let mail = mailContainer ?? "wpc-\(slug)-mail"
-        let es = esContainer ?? "wpc-\(slug)-es"
+        let refs = sidecars ?? SidecarAddons.refs(slug: slug)
+        let lookups = sidecarLookups(refs) { terminalIPLookup($0) }.map { $0 + "; " }.joined()
+        let envFlags = sidecarEnvFlags(refs).joined(separator: " ")
         return """
-        DB_IP=\(terminalIPLookup(db)); MAIL_IP=\(terminalIPLookup(mail)); ES_IP=\(terminalIPLookup(es)); \
+        DB_IP=\(terminalIPLookup(db)); \(lookups)\
         if [ -z "$DB_IP" ]; then echo 'Site \(slug) is not running — start it first.'; \
         elif [ ! -d \(shellQuote(php)) ]; then echo 'Site \(slug) has not finished its first start yet.'; else \
         \(containerBinary) run -it --rm -w /var/www/html -v \(shellQuote(wp)):/var/www/html \
@@ -364,7 +373,7 @@ public enum WPCLIShim {
         -e PHP_INI_SCAN_DIR=\(SiteRecipe.phpDefaultConfDir):\(SiteRecipe.phpConfContainerPath) \
         -e WORDPRESS_DB_HOST=$DB_IP -e WORDPRESS_DB_USER=\(SiteRecipe.dbUser) \
         -e WORDPRESS_DB_PASSWORD=\(SiteRecipe.dbPassword) -e WORDPRESS_DB_NAME=\(databaseName) \
-        -e "WPC_MAILPIT_HOST=$MAIL_IP" -e "EP_HOST=${ES_IP:+http://$ES_IP:9200}" \
+        \(envFlags) \
         \(cliImage) bash; fi
         """
     }
@@ -376,8 +385,7 @@ public enum WPCLIShim {
                                    cliImage: SiteRecipe.cliImage(for: inst),
                                    dbContainer: inst.dbContainerName,
                                    databaseName: inst.databaseName,
-                                   mailContainer: inst.mailContainerName,
-                                   esContainer: inst.esContainerName,
+                                   sidecars: SidecarAddons.refs(for: inst),
                                    phpConfFolder: inst.phpConfFolder)
     }
 
@@ -385,6 +393,36 @@ public enum WPCLIShim {
     /// isn't running.
     private static func terminalIPLookup(_ container: String) -> String {
         "$(\(containerBinary) inspect \(shellQuote(container)) 2>/dev/null | sed -n 's/.*\"ipv4Address\"[^\"]*\"\\([0-9.]*\\).*/\\1/p' | head -n1)"
+    }
+
+    // MARK: - Sidecar env
+
+    /// `SIDECAR_IP_<n>=<lookup>` for each sidecar, numbered from 1.
+    private static func sidecarLookups(_ sidecars: [SidecarRef], lookup: (String) -> String) -> [String] {
+        sidecars.enumerated().map { "SIDECAR_IP_\($0.offset + 1)=\(lookup($0.element.container))" }
+    }
+
+    /// `-e "KEY=${SIDECAR_IP_<n>:+prefix${SIDECAR_IP_<n>}suffix}"` per env var:
+    /// empty when the sidecar isn't running. Valid in bash and zsh.
+    static func sidecarEnvFlags(_ sidecars: [SidecarRef]) -> [String] {
+        sidecars.enumerated().flatMap { index, sidecar -> [String] in
+            let ip = "SIDECAR_IP_\(index + 1)"
+            return sidecar.environment.map { env in
+                "-e \"\(env.key)=${\(ip):+\(doubleQuoteEscape(env.prefix))${\(ip)}\(doubleQuoteEscape(env.suffix))}\""
+            }
+        }
+    }
+
+    /// Escapes `s` for use inside a double-quoted shell string.
+    private static func doubleQuoteEscape(_ s: String) -> String {
+        var out = ""
+        for ch in s {
+            switch ch {
+            case "\\", "\"", "$", "`": out += "\\\(ch)"
+            default: out.append(ch)
+            }
+        }
+        return out
     }
 
     private static func shellQuote(_ s: String) -> String {

@@ -103,7 +103,7 @@ public actor WorktreeEnvService {
     /// the final record keeps the same identity.
     public static func descriptor(parent: Site, repoRelPath: String, branch: String, port: Int) -> WorktreeEnv {
         let branchSlug = Slug.make(branch)
-        return WorktreeEnv(
+        var env = WorktreeEnv(
             parentSiteID: parent.id,
             parentSlug: parent.slug,
             envSlug: WorktreeEnv.makeSlug(parentSlug: parent.slug, branch: branch),
@@ -115,27 +115,31 @@ public actor WorktreeEnvService {
             imageTag: parent.imageTag,
             provisioned: false,
             xdebugEnabled: parent.xdebugEnabled,
-            elasticsearchEnabled: parent.elasticsearchEnabled,
-            mailpitEnabled: parent.mailpitEnabled,
             cpuLimit: parent.cpuLimit,
             memoryLimitMB: parent.memoryLimitMB
         )
+        // Inherit the parent's sidecars at creation.
+        for addon in SidecarAddons.enabled(for: parent) {
+            addon.setEnabled(true, on: &env)
+        }
+        return env
     }
 
-    /// Build the env descriptor AND append it to `envelope`, reserving a second
-    /// free port for the env's own Mailpit web UI when the parent has Mailpit
-    /// enabled (issue #10). Call inside a locked `allocatePort` reserve closure
-    /// (which already reserved the env's main `port`): both ports land in the
-    /// same critical section, so a concurrent creator can't reuse either.
+    /// Build the env descriptor AND append it to `envelope`, reserving a free
+    /// host port for each enabled sidecar that publishes one (the env's own
+    /// Mailpit web UI, issue #10). Call inside a locked `allocatePort` reserve
+    /// closure (which already reserved the env's main `port`): every port lands
+    /// in the same critical section, so a concurrent creator can't reuse any.
     public static func reservedDescriptor(parent: Site, repoRelPath: String, branch: String,
                                           port: Int, into envelope: inout StoreEnvelope) -> WorktreeEnv {
         var env = descriptor(parent: parent, repoRelPath: repoRelPath, branch: branch, port: port)
-        if parent.mailpitEnabled {
-            let taken = Set(envelope.sites.map(\.port)).union(envelope.envs.map(\.port))
-                .union(envelope.sites.compactMap(\.mailpitPort))
-                .union(envelope.envs.compactMap(\.mailpitPort))
-                .union([port])
-            env.mailpitPort = PortAllocator.firstFreePort(from: port + 1, excluding: taken)
+        var taken = Set(envelope.sites.map(\.port)).union(envelope.envs.map(\.port))
+            .union(SidecarAddons.reservedHostPorts(sites: envelope.sites, envs: envelope.envs))
+            .union([port])
+        for addon in SidecarAddons.enabled(for: env) where addon.publishesHostPort {
+            guard let hostPort = PortAllocator.firstFreePort(from: port + 1, excluding: taken) else { continue }
+            addon.setHostPort(hostPort, on: &env)
+            taken.insert(hostPort)
         }
         envelope.envs.append(env)
         return env

@@ -19,6 +19,11 @@ import Foundation
 ///                           remote media), each a normal `add_action`/`add_filter`
 ///                           file because by `muplugins_loaded` WordPress is
 ///                           bootstrapping normally.
+///   php/prepend.d/early/*.php — handlers included at prepend time, before
+///                           wp-config.php, for hooks that fire before
+///                           `muplugins_loaded` (Redis, which must be wired
+///                           before the object-cache drop-in loads). They register
+///                           pre-initialized hooks only.
 ///
 /// The pre-initialized-hook trick is WordPress-supported: a raw array left in
 /// `$GLOBALS['wp_filter']` before `wp-includes/plugin.php` loads is converted by
@@ -28,6 +33,8 @@ public enum PrependService {
     static let masterFileName = "wpc-prepend.php"
     static let masterIniName = "wpc-prepend.ini"
     static let prependDirName = "prepend.d"
+    /// Subfolder of `prepend.d` whose handlers load at prepend time.
+    static let earlyDirName = "early"
 
     static let masterMarker = "WP Container: master auto_prepend loader (managed — do not edit)"
     static let iniMarker = "; WP Container: auto_prepend loader (managed — do not edit)"
@@ -44,9 +51,10 @@ public enum PrependService {
     <?php
     /*
      * \(masterMarker)
-     * WP Container master auto_prepend loader (issue #13). Registers ONE
-     * pre-initialized hook (muplugins_loaded, priority 0) that includes every
-     * managed runtime handler in ./prepend.d/*.php. Those handlers live in the
+     * WP Container master auto_prepend loader (issue #13). Includes the handlers
+     * in ./prepend.d/early/*.php right away, and registers ONE pre-initialized
+     * hook (muplugins_loaded, priority 0) that includes every managed runtime
+     * handler in ./prepend.d/*.php. Those handlers live in the
      * site's private php/ folder — OUTSIDE the project tree — so nothing WP
      * Container manages at runtime can be committed to a user's repo by accident.
      * Do not edit.
@@ -59,6 +67,15 @@ public enum PrependService {
             }
         }
     }
+
+    if ( ! function_exists( 'wpc_prepend_load_early_handlers' ) ) {
+        function wpc_prepend_load_early_handlers() {
+            foreach ( glob( __DIR__ . '/\(prependDirName)/\(earlyDirName)/*.php' ) ?: array() as $wpc_handler ) {
+                include_once $wpc_handler;
+            }
+        }
+    }
+    wpc_prepend_load_early_handlers();
 
     // Pre-initialized hook: WP_Hook::build_preinitialized_hooks() (wp-includes/
     // plugin.php) turns this raw array into a real hook when WordPress boots.
@@ -115,10 +132,11 @@ public enum PrependService {
 
     // MARK: - prepend.d handler helpers (used by the individual services)
 
+    /// Write a handler; `name` may include a subfolder (`early/wpc-redis.php`).
     public static func writeHandler(phpConfFolder: URL, name: String, contents: String) throws {
-        try FileManager.default.createDirectory(at: prependDirURL(phpConfFolder: phpConfFolder),
-                                                withIntermediateDirectories: true)
-        try writeIfDiffers(contents, to: handlerURL(phpConfFolder: phpConfFolder, name: name))
+        let url = handlerURL(phpConfFolder: phpConfFolder, name: name)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try writeIfDiffers(contents, to: url)
     }
 
     /// Remove a handler, but only when it carries `marker` (never a user file).

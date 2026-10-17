@@ -17,12 +17,13 @@ final class WPCLIShimTests: XCTestCase {
         XCTAssertTrue(script.contains("PHP_INI_SCAN_DIR=\(SiteRecipe.phpDefaultConfDir):\(SiteRecipe.phpConfContainerPath)"))
     }
 
-    func testShimPassesSidecarAddresses() {
+    func testShimPassesEverySidecar() {
         let script = WPCLIShim.shimScript(slug: "example", wordpressFolder: wordpress, cliImage: "wordpress:cli")
-        XCTAssertTrue(script.contains(#"MAIL_CONTAINER="wpc-example-mail""#))
-        XCTAssertTrue(script.contains(#"ES_CONTAINER="wpc-example-es""#))
-        XCTAssertTrue(script.contains(#"-e "WPC_MAILPIT_HOST=$MAIL_IP""#))
-        XCTAssertTrue(script.contains(#"-e "EP_HOST=${ES_IP:+http://$ES_IP:9200}""#))
+        XCTAssertTrue(script.contains(#"SIDECAR_IP_1="$(container_ip 'wpc-example-es')""#))
+        XCTAssertTrue(script.contains(#"SIDECAR_IP_2="$(container_ip 'wpc-example-mail')""#))
+        XCTAssertTrue(script.contains(#"-e "EP_HOST=${SIDECAR_IP_1:+http://${SIDECAR_IP_1}:9200}""#))
+        XCTAssertTrue(script.contains(#"-e "ELASTICSEARCH_URL=${SIDECAR_IP_1:+http://${SIDECAR_IP_1}:9200}""#))
+        XCTAssertTrue(script.contains(#"-e "WPC_MAILPIT_HOST=${SIDECAR_IP_2:+${SIDECAR_IP_2}}""#))
     }
 
     func testShimForAnInstanceUsesItsContainerNames() throws {
@@ -34,8 +35,8 @@ final class WPCLIShimTests: XCTestCase {
 
         let url = try WPCLIShim.writeShim(for: site, siteRoot: root, slug: site.slug)
         let script = try String(contentsOf: url, encoding: .utf8)
-        XCTAssertTrue(script.contains(#"MAIL_CONTAINER="\#(site.mailContainerName)""#))
-        XCTAssertTrue(script.contains(#"ES_CONTAINER="\#(site.esContainerName)""#))
+        XCTAssertTrue(script.contains("container_ip '\(site.esContainerName)'"))
+        XCTAssertTrue(script.contains("container_ip '\(site.mailContainerName)'"))
         XCTAssertTrue(script.contains(#"PHP_DIR="\#(site.phpConfFolder.path)""#))
     }
 
@@ -48,11 +49,10 @@ final class WPCLIShimTests: XCTestCase {
 
     func testRouterPassesResolvedSidecarsAndPHPFolder() {
         let script = WPCLIShim.routerScript()
-        XCTAssertTrue(script.contains(#"d.get("mailContainer", "")"#))
-        XCTAssertTrue(script.contains(#"d.get("esContainer", "")"#))
+        XCTAssertTrue(script.contains(#"d.get("sidecars", [])"#))
         XCTAssertTrue(script.contains(#"d.get("phpConfPath", "")"#))
         XCTAssertTrue(script.contains(#"-v "$WPC_PHP:\#(SiteRecipe.phpConfContainerPath)""#))
-        XCTAssertTrue(script.contains(#"-e "EP_HOST=${ES_IP:+http://$ES_IP:9200}""#))
+        XCTAssertTrue(script.contains(#"${SIDECAR_ARGS[@]+"${SIDECAR_ARGS[@]}"}"#))
     }
 
     func testRouterIsValidBash() throws {
@@ -66,7 +66,8 @@ final class WPCLIShimTests: XCTestCase {
         XCTAssertTrue(command.contains("-v '/tmp/Example Sites/example/php':\(SiteRecipe.phpConfContainerPath)"))
         XCTAssertTrue(command.contains("'wpc-example-mail'"))
         XCTAssertTrue(command.contains("'wpc-example-es'"))
-        XCTAssertTrue(command.contains(#"-e "EP_HOST=${ES_IP:+http://$ES_IP:9200}""#))
+        XCTAssertTrue(command.contains(#"-e "EP_HOST=${SIDECAR_IP_1:+http://${SIDECAR_IP_1}:9200}""#))
+        XCTAssertTrue(command.contains(#"-e "WPC_MAILPIT_HOST=${SIDECAR_IP_2:+${SIDECAR_IP_2}}""#))
     }
 
     func testTerminalCommandIsValidInBashAndZsh() throws {
@@ -86,6 +87,7 @@ final class WPCLIShimTests: XCTestCase {
         XCTAssertEqual(match.mailContainer, site.mailContainerName)
         XCTAssertEqual(match.esContainer, site.esContainerName)
         XCTAssertEqual(match.phpConfPath, site.phpConfFolder.path)
+        XCTAssertEqual(match.sidecars, SidecarAddons.refs(for: site))
     }
 
     // MARK: - Helpers

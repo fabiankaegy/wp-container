@@ -84,6 +84,8 @@ public protocol RunnableInstance: Sendable {
     var mailpitEnabled: Bool { get }
     /// The localhost port the Mailpit web UI is published on (issue #10).
     var mailpitPort: Int? { get }
+    /// Whether a per-instance Redis container runs for the object cache.
+    var redisEnabled: Bool { get }
     /// Public hostnames (no wildcards) that must resolve to the HOST from
     /// inside the wp container, so WordPress loopback requests (wp-cron spawn,
     /// Site Health checks, REST self-calls) reach the host proxy exactly like a
@@ -115,9 +117,9 @@ public extension RunnableInstance {
     /// Default: the instance runs (and therefore owns) its own DB container.
     var ownsDatabaseContainer: Bool { true }
     /// Per-instance Elasticsearch sidecar container name (§2c).
-    var esContainerName: String { "wpc-\(containerSlug)-es" }
+    var esContainerName: String { SidecarAddons.elasticsearch.containerName(for: self) }
     /// Per-instance Mailpit container name (issue #10).
-    var mailContainerName: String { "wpc-\(containerSlug)-mail" }
+    var mailContainerName: String { SidecarAddons.mailpit.containerName(for: self) }
     var localURL: URL { URL(string: "http://127.0.0.1:\(port)")! }
     var adminURL: URL { URL(string: "http://127.0.0.1:\(port)/wp-admin")! }
     var extraMounts: [Mount] { [] }
@@ -139,6 +141,7 @@ public extension RunnableInstance {
     }
     var mailpitEnabled: Bool { false }
     var mailpitPort: Int? { nil }
+    var redisEnabled: Bool { false }
     /// Per-instance Elasticsearch data directory bind mount host path.
     var elasticsearchFolder: URL {
         wordpressFolder.deletingLastPathComponent().appendingPathComponent("elasticsearch", isDirectory: true)

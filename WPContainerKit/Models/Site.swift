@@ -32,6 +32,8 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     /// #10). Assigned on first enable and kept (stable mailbox URL, reserved
     /// against other sites); nil until Mailpit has ever been enabled.
     public var mailpitPort: Int?
+    /// Whether a per-site Redis container runs for the object cache.
+    public var redisEnabled: Bool
     /// Optional per-site CPU cap passed to `container run --cpus` (issue #11).
     /// nil = the `container` default (4).
     public var cpuLimit: Int?
@@ -96,6 +98,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         case cpuLimit, memoryLimitMB
         case idleStopMinutes, lastActivityAt
         case mailpitEnabled, mailpitPort
+        case redisEnabled
         case lastImportSourceURL
         case pendingSchemaDrops
     }
@@ -116,6 +119,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         elasticsearchEnabled: Bool = false,
         mailpitEnabled: Bool = false,
         mailpitPort: Int? = nil,
+        redisEnabled: Bool = false,
         cpuLimit: Int? = nil,
         memoryLimitMB: Int? = nil,
         idleStopMinutes: Int? = nil,
@@ -143,6 +147,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.elasticsearchEnabled = elasticsearchEnabled
         self.mailpitEnabled = mailpitEnabled
         self.mailpitPort = mailpitPort
+        self.redisEnabled = redisEnabled
         self.cpuLimit = cpuLimit
         self.memoryLimitMB = memoryLimitMB
         self.idleStopMinutes = idleStopMinutes
@@ -176,6 +181,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         // Absent in stores written before issue #10.
         self.mailpitEnabled = (try? c.decode(Bool.self, forKey: .mailpitEnabled)) ?? false
         self.mailpitPort = try? c.decodeIfPresent(Int.self, forKey: .mailpitPort)
+        self.redisEnabled = (try? c.decode(Bool.self, forKey: .redisEnabled)) ?? false
         // Absent in stores written before issue #11.
         self.cpuLimit = try? c.decodeIfPresent(Int.self, forKey: .cpuLimit)
         self.memoryLimitMB = try? c.decodeIfPresent(Int.self, forKey: .memoryLimitMB)

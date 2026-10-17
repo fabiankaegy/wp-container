@@ -9,9 +9,8 @@ public enum LifecycleError: Error, Sendable, CustomStringConvertible {
     /// the whole time (e.g. "the port never accepted a connection" vs "kept
     /// failing with …") so the failure is self-diagnosing.
     case httpNotReady(observed: String)
-    case elasticsearchNotReady
-    case elasticsearchIPUnavailable
-    case mailpitIPUnavailable
+    /// A sidecar container (`SidecarAddon.displayName`) never reported an IP.
+    case sidecarIPUnavailable(name: String)
     /// A shared-database env was started without its parent's descriptor while
     /// the parent's DB container wasn't already up, so there is nothing to
     /// connect to and nothing that may legitimately start it (issue #17).
@@ -23,9 +22,7 @@ public enum LifecycleError: Error, Sendable, CustomStringConvertible {
         case .databaseIPUnavailable: return "Could not resolve the database container's IP address."
         case .httpNotReady(let observed):
             return "WordPress did not start responding over HTTP in time (\(observed))."
-        case .elasticsearchNotReady: return "The Elasticsearch container did not become ready in time."
-        case .elasticsearchIPUnavailable: return "Could not resolve the Elasticsearch container's IP address."
-        case .mailpitIPUnavailable: return "Could not resolve the Mailpit container's IP address."
+        case .sidecarIPUnavailable(let name): return "Could not resolve the \(name) container's IP address."
         case .sharedDatabaseUnavailable(let name):
             return "This environment shares its parent site's database container (\(name)), which is not running — start the parent site first."
         }
@@ -232,21 +229,18 @@ public actor SiteLifecycle {
             // Managed runtime PHP handlers (issue #13) live in php/prepend.d,
             // loaded by a single master auto_prepend — never in the project tree.
             // Ensure the loader, keep the always-on magic-login handler current,
-            // sync the Mailpit handler to its enabled state, and shed any legacy
-            // in-tree mu-plugins left by pre-#13 builds (even when now disabled).
+            // sync each sidecar's handler to its enabled state, and shed any
+            // legacy in-tree mu-plugins left by pre-#13 builds (even when now
+            // disabled).
             try PrependService.ensure(for: inst)
             try MagicLoginService.ensureLoginHandler(for: inst)
-            if inst.mailpitEnabled {
-                try MailpitService.writeHandler(phpConfFolder: inst.phpConfFolder)
-            } else {
-                MailpitService.removeHandler(phpConfFolder: inst.phpConfFolder)
-            }
-            // ElasticPress reads EP_HOST as a constant only; the handler defines
-            // it from the injected env var.
-            if inst.elasticsearchEnabled {
-                try ElasticsearchService.writeHandler(phpConfFolder: inst.phpConfFolder)
-            } else {
-                ElasticsearchService.removeHandler(phpConfFolder: inst.phpConfFolder)
+            for addon in SidecarAddons.all {
+                guard let handler = addon.handler else { continue }
+                if addon.isEnabled(for: inst) {
+                    try handler.write(phpConfFolder: inst.phpConfFolder)
+                } else {
+                    handler.remove(phpConfFolder: inst.phpConfFolder)
+                }
             }
             MailpitService.cleanupLegacyMuPlugin(wordpressFolder: inst.wordpressFolder)
             RemoteMediaService.cleanupLegacyMuPlugin(wordpressFolder: inst.wordpressFolder,
@@ -263,8 +257,7 @@ public actor SiteLifecycle {
             // php8.4 site pulls wordpress:cli-php8.4 on the same path as the
             // base images.
             var imageTags = [SiteRecipe.databaseImage, inst.imageTag, SiteRecipe.cliImage(for: inst)]
-            if inst.elasticsearchEnabled { imageTags.append(SiteRecipe.elasticsearchImage) }
-            if inst.mailpitEnabled { imageTags.append(SiteRecipe.mailpitImage) }
+            imageTags += SidecarAddons.enabled(for: inst).map(\.image)
             var imageWarnings: [String] = []
             try await withThrowingTaskGroup(of: String?.self) { group in
                 for tag in imageTags {
@@ -286,16 +279,14 @@ public actor SiteLifecycle {
             }
 
             // Launch the wp container's dependencies CONCURRENTLY (issue #9):
-            // db run + IP, es run + IP (no green gate), Xdebug derived image.
-            // WP needs only the IP VALUES at `container run` time.
+            // db run + IP, each sidecar's run + IP (no readiness gate), Xdebug
+            // derived image. WP needs only the IP VALUES at `container run` time.
             async let dbAddresses = launchDatabase(inst, provider: dbProvider)
-            async let esURL = launchElasticsearch(inst)
-            async let mailHost = launchMailpit(inst)
+            async let sidecars = launchSidecars(inst)
             async let xdebugImage = ensureXdebugImage(inst)
 
             let (dbHost, gateway) = try await dbAddresses
-            let elasticsearchURL = try await esURL
-            let mailpitHost = try await mailHost
+            let sidecarEnvironment = try await sidecars
             let imageOverride = try await xdebugImage
             // Gateway (host address as seen from containers) comes from the
             // same inspect that resolved the DB IP — never hardcoded.
@@ -316,8 +307,7 @@ public actor SiteLifecycle {
                 }
                 try await cli.run(SiteRecipe.runWordPressArgs(
                     inst, dbHost: dbHost, imageOverride: imageOverride,
-                    xdebugClientHost: xdebugClientHost, elasticsearchURL: elasticsearchURL,
-                    mailpitHost: mailpitHost))
+                    xdebugClientHost: xdebugClientHost, sidecarEnvironment: sidecarEnvironment))
                 timer.mark("wp-run")
             }
             // Make the site's own hostnames resolvable in-guest (→ host proxy)
@@ -431,49 +421,45 @@ public actor SiteLifecycle {
         try await task.value
     }
 
-    /// Start the Elasticsearch sidecar (when enabled) and return the
-    /// `http://<es-ip>:9200` URL as soon as the IP is assigned (§2c). No green
-    /// gate (issue #9): ElasticPress retries, and nothing in the start path
-    /// depends on cluster health — a sidecar that fails to boot surfaces via
-    /// logs/reconcile, not by holding the whole site start hostage.
-    private func launchElasticsearch(_ inst: any RunnableInstance) async throws -> String? {
-        guard inst.elasticsearchEnabled else { return nil }
-        try FileManager.default.createDirectory(at: inst.elasticsearchFolder, withIntermediateDirectories: true)
-        try await cli.run(SiteRecipe.runElasticsearchArgs(inst))
-        var delay = Duration.milliseconds(100)
-        let deadline = ContinuousClock.now.advanced(by: .seconds(15))
-        while ContinuousClock.now < deadline {
-            try Task.checkCancellation()
-            if let ip = try await cli.ipAddress(of: inst.esContainerName), !ip.isEmpty {
-                return SiteRecipe.elasticsearchURL(esHost: ip)
+    /// Start every enabled sidecar concurrently and return the env assignments
+    /// the wp container needs (`EP_HOST=…`, `WPC_MAILPIT_HOST=…`), in registry
+    /// order, as soon as each IP is assigned. No readiness gate (issue #9):
+    /// ElasticPress retries and PHPMailer connects only when mail is sent, so a
+    /// sidecar that fails to boot surfaces via logs, not by holding the whole
+    /// site start hostage.
+    private func launchSidecars(_ inst: any RunnableInstance) async throws -> [String] {
+        let addons = SidecarAddons.enabled(for: inst)
+        let assignments = try await withThrowingTaskGroup(of: (String, [String]).self) { group in
+            for addon in addons {
+                group.addTask { (addon.id, try await self.launchSidecar(addon, for: inst)) }
             }
-            try await Task.sleep(for: delay)
-            delay = min(delay * 2, .milliseconds(500))
+            var byID: [String: [String]] = [:]
+            for try await (id, values) in group { byID[id] = values }
+            return byID
         }
-        throw LifecycleError.elasticsearchIPUnavailable
+        return addons.flatMap { assignments[$0.id] ?? [] }
     }
 
-    /// Start the Mailpit container (when enabled) and return its IP as soon as
-    /// assigned, for `WPC_MAILPIT_HOST` injection into WordPress (issue #10). No
-    /// readiness gate (matches ES, issue #9): PHPMailer connects only when mail
-    /// is actually sent, long after boot; a mail container that fails surfaces
-    /// via logs, not by holding the whole site start hostage. The web UI is
-    /// published on the instance's assigned `mailpitPort`.
-    private func launchMailpit(_ inst: any RunnableInstance) async throws -> String? {
-        guard inst.mailpitEnabled, let webPort = inst.mailpitPort else { return nil }
-        try FileManager.default.createDirectory(at: inst.mailpitFolder, withIntermediateDirectories: true)
-        try await cli.run(SiteRecipe.runMailpitArgs(inst, webPort: webPort))
+    /// Run one sidecar and return its env assignments once its IP is known, or
+    /// none when the instance cannot run it yet (Mailpit before a port is set).
+    private func launchSidecar(_ addon: any SidecarAddon, for inst: any RunnableInstance) async throws -> [String] {
+        guard let args = addon.runArgs(for: inst) else { return [] }
+        for folder in addon.dataFolders(for: inst) {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        try await cli.run(args)
+        let name = addon.containerName(for: inst)
         var delay = Duration.milliseconds(100)
         let deadline = ContinuousClock.now.advanced(by: .seconds(15))
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
-            if let ip = try await cli.ipAddress(of: inst.mailContainerName), !ip.isEmpty {
-                return ip
+            if let ip = try await cli.ipAddress(of: name), !ip.isEmpty {
+                return addon.assignments(ip: ip)
             }
             try await Task.sleep(for: delay)
             delay = min(delay * 2, .milliseconds(500))
         }
-        throw LifecycleError.mailpitIPUnavailable
+        throw LifecycleError.sidecarIPUnavailable(name: addon.displayName)
     }
 
     /// Ensure the Xdebug derived image exists (when enabled). Cached ⇒ ~50ms.
@@ -597,8 +583,7 @@ public actor SiteLifecycle {
             neededImages.insert(SiteRecipe.databaseImage)
             neededImages.insert(inst.imageTag)
             neededImages.insert(SiteRecipe.cliImage(for: inst))
-            if inst.elasticsearchEnabled { neededImages.insert(SiteRecipe.elasticsearchImage) }
-            if inst.mailpitEnabled { neededImages.insert(SiteRecipe.mailpitImage) }
+            neededImages.formUnion(SidecarAddons.enabled(for: inst).map(\.image))
         }
         collectImages(site)
         for env in envs { collectImages(env) }
@@ -873,7 +858,7 @@ public actor SiteLifecycle {
     /// `stopSharedDatabaseIfUnused` for the counterpart that does retire it once
     /// nothing needs it.
     private static func ownedContainerNames(of inst: any RunnableInstance) -> [String] {
-        var names = [inst.wpContainerName, inst.esContainerName, inst.mailContainerName]
+        var names = [inst.wpContainerName] + SidecarAddons.all.map { $0.containerName(for: inst) }
         if inst.ownsDatabaseContainer { names.append(inst.dbContainerName) }
         return names
     }
