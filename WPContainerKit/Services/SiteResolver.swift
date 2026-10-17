@@ -21,8 +21,10 @@ public enum SiteResolver {
         /// schema on the parent's server (issue #17), and the router MUST pass
         /// this through or `wp` would operate on the parent's data.
         public let dbName: String
-        /// Sidecar container names whose addresses the router passes to wp-cli
-        /// (`WPC_MAILPIT_HOST`, `EP_HOST`) when they are running.
+        /// Every sidecar's container and env vars, which the router passes to
+        /// wp-cli (`EP_HOST`, `WPC_MAILPIT_HOST`, …) when it is running.
+        public let sidecars: [SidecarRef]
+        /// Mailpit and Elasticsearch container names, read by routers before v5.
         public let mailContainer: String
         public let esContainer: String
         /// The instance's `php/` overrides folder, mounted so wp-cli loads the
@@ -50,6 +52,7 @@ public enum SiteResolver {
                              port: inst.port, subpath: sub,
                              cliImage: WordPressImageCatalog.cliImage(for: inst.imageTag),
                              dbName: inst.databaseName,
+                             sidecars: SidecarAddons.refs(for: inst),
                              mailContainer: inst.mailContainerName,
                              esContainer: inst.esContainerName,
                              phpConfPath: inst.phpConfFolder.path)

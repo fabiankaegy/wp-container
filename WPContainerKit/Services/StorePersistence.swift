@@ -126,18 +126,49 @@ public actor StorePersistence {
         try ensureDirectory()
         return try withLock {
             var envelope = (try? readUnlocked()) ?? StoreEnvelope()
-            // Include Mailpit web ports (issue #10) so a mailbox port is never
-            // handed out again as a site/env port or another mailbox port.
+            // Include sidecar host ports (Mailpit's web UI, issue #10) so one is
+            // never handed out again as a site/env port or another sidecar's.
             let taken = Set(envelope.sites.map(\.port))
                 .union(envelope.envs.map(\.port))
-                .union(envelope.sites.compactMap(\.mailpitPort))
-                .union(envelope.envs.compactMap(\.mailpitPort))
+                .union(SidecarAddons.reservedHostPorts(sites: envelope.sites, envs: envelope.envs))
             guard let port = PortAllocator.firstFreePort(from: base, excluding: taken) else { return nil }
             let value = reserve(port, &envelope)
             envelope.version = StoreEnvelope.currentVersion
             try writeUnlocked(envelope)
             return (port, value, envelope)
         }
+    }
+
+    /// Turn `addon` on or off for a site and sync its PHP handler. The first
+    /// enable of an addon that publishes a host port reserves the port in the
+    /// same locked write; the port stays reserved after a disable. Returns the
+    /// updated site and store, or nil when the site is gone or no port is free.
+    public func setSidecar(_ addon: any SidecarAddon, enabled: Bool,
+                           siteID: UUID) throws -> (site: Site, envelope: StoreEnvelope)? {
+        guard let site = try load().sites.first(where: { $0.id == siteID }) else { return nil }
+        let envelope: StoreEnvelope
+        if enabled, addon.publishesHostPort, addon.hostPort(of: site) == nil {
+            guard let result = try allocatePort(reserve: { port, env -> Bool in
+                guard let i = env.sites.firstIndex(where: { $0.id == siteID }) else { return false }
+                addon.setHostPort(port, on: &env.sites[i])
+                addon.setEnabled(true, on: &env.sites[i])
+                return true
+            }), result.value else { return nil }
+            envelope = result.envelope
+        } else {
+            envelope = try mutate { env in
+                if let i = env.sites.firstIndex(where: { $0.id == siteID }) { addon.setEnabled(enabled, on: &env.sites[i]) }
+            }
+        }
+        guard let updated = envelope.sites.first(where: { $0.id == siteID }) else { return nil }
+        if let handler = addon.handler {
+            if enabled {
+                try handler.write(phpConfFolder: updated.phpConfFolder)
+            } else {
+                handler.remove(phpConfFolder: updated.phpConfFolder)
+            }
+        }
+        return (updated, envelope)
     }
 
     // MARK: - Internals

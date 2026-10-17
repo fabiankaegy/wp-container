@@ -46,8 +46,7 @@ struct LoginCommand: AsyncParsableCommand {
             case .site(let s): publicURL = s.url
             case .env(let e): publicURL = e.localURL
             }
-            var mailHost: String? = nil
-            if inst.mailpitEnabled { mailHost = (try? await ctx.cli.ipAddress(of: inst.mailContainerName)) ?? nil }
+            let sidecarEnvironment = await SidecarAddons.environment(for: inst, cli: ctx.cli)
 
             // The site is running (dbHost resolved). Capture whether the handler
             // was already active BEFORE ensuring; if not, this running container
@@ -67,7 +66,7 @@ struct LoginCommand: AsyncParsableCommand {
                 warnings.append(warning)
             }
             let link = try await MagicLoginService.issueLoginLink(for: inst, publicURL: publicURL, dbHost: dbHost,
-                                                                 cli: ctx.cli, user: user, mailpitHost: mailHost)
+                                                                 cli: ctx.cli, user: user, sidecarEnvironment: sidecarEnvironment)
             if output.json {
                 emitLine(CLIJSON.string(LoginLinkOutput(url: link.url.absoluteString, user: link.user,
                                                         expiresAt: link.expiresAt,

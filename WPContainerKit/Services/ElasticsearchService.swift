@@ -44,6 +44,9 @@ public enum ElasticsearchService {
     }
     """
 
+    /// The handler as the Elasticsearch sidecar addon registers it.
+    public static let handler = PrependHandler(fileName: handlerFileName, marker: marker, contents: handlerContents)
+
     /// Whether our managed handler is present in `php/prepend.d/` (marker match).
     public static func isHandlerPresent(phpConfFolder: URL) -> Bool {
         PrependService.isHandlerPresent(phpConfFolder: phpConfFolder, name: handlerFileName, marker: marker)

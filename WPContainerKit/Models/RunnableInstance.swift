@@ -115,9 +115,9 @@ public extension RunnableInstance {
     /// Default: the instance runs (and therefore owns) its own DB container.
     var ownsDatabaseContainer: Bool { true }
     /// Per-instance Elasticsearch sidecar container name (§2c).
-    var esContainerName: String { "wpc-\(containerSlug)-es" }
+    var esContainerName: String { SidecarAddons.elasticsearch.containerName(for: self) }
     /// Per-instance Mailpit container name (issue #10).
-    var mailContainerName: String { "wpc-\(containerSlug)-mail" }
+    var mailContainerName: String { SidecarAddons.mailpit.containerName(for: self) }
     var localURL: URL { URL(string: "http://127.0.0.1:\(port)")! }
     var adminURL: URL { URL(string: "http://127.0.0.1:\(port)/wp-admin")! }
     var extraMounts: [Mount] { [] }
