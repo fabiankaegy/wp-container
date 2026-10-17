@@ -205,8 +205,9 @@ public enum WPCLIShim {
     /// resolved schema through as `WORDPRESS_DB_NAME`, which a shared-database
     /// worktree env needs to avoid operating on its PARENT's data (issue #17).
     /// v3 mounts the resolved `php/` overrides folder and passes the
-    /// Mailpit/Elasticsearch sidecar addresses.
-    public static let routerVersion = 3
+    /// Mailpit/Elasticsearch sidecar addresses. v4 mounts a worktree env's
+    /// checkout over its `wordpress/` copy, so wp-cli loads the branch's code.
+    public static let routerVersion = 4
     private static let routerVersionMarker = "# wpc-router-version:"
     /// The flag the router announces its own body version with. `resolve-site`
     /// REFUSES to resolve a shared-database env for a router too old to honor
@@ -246,6 +247,7 @@ public enum WPCLIShim {
         print("WPC_MAIL=" + shlex.quote(d.get("mailContainer", "")))
         print("WPC_ES=" + shlex.quote(d.get("esContainer", "")))
         print("WPC_PHP=" + shlex.quote(d.get("phpConfPath", "")))
+        print("WPC_MOUNTS=(" + " ".join("-v " + shlex.quote(m) for m in d.get("mounts", [])) + ")")
         ')"
           DB_IP="$(container_ip "$WPC_DB")"
           if [ -z "$DB_IP" ]; then
@@ -268,6 +270,7 @@ public enum WPCLIShim {
           [ -t 1 ] && TTY="-t"
           exec "$CONTAINER_BIN" run --rm -i $TTY -w "$WORKDIR" \\
             -v "$WPC_WP:/var/www/html" \\
+            ${WPC_MOUNTS[@]+"${WPC_MOUNTS[@]}"} \\
             ${PHP_ARGS[@]+"${PHP_ARGS[@]}"} \\
             -e "WORDPRESS_DB_HOST=$DB_IP" \\
             -e "WORDPRESS_DB_USER=\(SiteRecipe.dbUser)" \\
