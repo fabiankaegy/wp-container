@@ -18,6 +18,7 @@ struct WPContainerCLI: AsyncParsableCommand {
             DeleteCommand.self,
             WorktreeCommand.self,
             WPCommand.self,
+            RunCommand.self,
             LoginCommand.self,
             MCPCommand.self,
             AgentToolsCommand.self,
@@ -100,6 +101,19 @@ struct CLIContext {
             let parent = envelope.sites.first { $0.id == env.parentSiteID }
             _ = try await lifecycle.startInstance(env, dbProvider: parent)
         }
+    }
+
+    /// The Mailpit host and Elasticsearch URL a one-shot container passes on so
+    /// mail and ElasticPress reach the instance's sidecars. Each is nil when its
+    /// sidecar is disabled or not running.
+    func sidecarAddresses(for inst: any RunnableInstance) async -> (mailpitHost: String?, elasticsearchURL: String?) {
+        var mailpitHost: String? = nil
+        if inst.mailpitEnabled { mailpitHost = (try? await cli.ipAddress(of: inst.mailContainerName)) ?? nil }
+        var elasticsearchURL: String? = nil
+        if inst.elasticsearchEnabled, let esIP = (try? await cli.ipAddress(of: inst.esContainerName)) ?? nil {
+            elasticsearchURL = SiteRecipe.elasticsearchURL(esHost: esIP)
+        }
+        return (mailpitHost, elasticsearchURL)
     }
 }
 
@@ -784,16 +798,11 @@ struct WPCommand: AsyncParsableCommand {
             // form (e.g. `wp itest-alpha -- core version`); wp-cli itself treats
             // "--" as an unknown command, so strip a single leading occurrence.
             if passthroughArgs.first == "--" { passthroughArgs.removeFirst() }
-            // Route wp_mail through Mailpit too when the site has it enabled.
-            var mailHost: String? = nil
-            if inst.mailpitEnabled { mailHost = (try? await ctx.cli.ipAddress(of: inst.mailContainerName)) ?? nil }
-            // Point ElasticPress at the sidecar so `wp elasticpress …` works.
-            var esURL: String? = nil
-            if inst.elasticsearchEnabled, let esIP = (try? await ctx.cli.ipAddress(of: inst.esContainerName)) ?? nil {
-                esURL = SiteRecipe.elasticsearchURL(esHost: esIP)
-            }
+            // Route wp_mail through Mailpit and point ElasticPress at its sidecar.
+            let sidecars = await ctx.sidecarAddresses(for: inst)
             let result = try await ctx.cli.runCapturing(SiteRecipe.wpProxyArgs(inst, dbHost: dbHost, wpArgs: passthroughArgs,
-                                                                               mailpitHost: mailHost, elasticsearchURL: esURL))
+                                                                               mailpitHost: sidecars.mailpitHost,
+                                                                               elasticsearchURL: sidecars.elasticsearchURL))
             if jsonOut {
                 struct WPResult: Codable { let stdout: String; let stderr: String; let exitCode: Int32 }
                 emitLine(CLIJSON.string(WPResult(stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode)))
