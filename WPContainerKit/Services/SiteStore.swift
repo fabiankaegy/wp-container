@@ -47,8 +47,7 @@ public final class SiteStore {
 
     public var takenPorts: Set<Int> {
         Set(sites.map(\.port)).union(envs.map(\.port))
-            .union(sites.compactMap(\.mailpitPort))
-            .union(envs.compactMap(\.mailpitPort))
+            .union(SidecarAddons.reservedHostPorts(sites: sites, envs: envs))
     }
     public var existingSlugs: Set<String> {
         Set(sites.map(\.slug))
@@ -181,6 +180,17 @@ public final class SiteStore {
         groups = result.envelope.groups
         applyStatuses()
         return (result.port, result.value)
+    }
+
+    /// Turn a sidecar on or off for a site (see `StorePersistence.setSidecar`).
+    /// Returns the updated site, or nil when the site is gone or no port is free.
+    public func setSidecar(_ addon: any SidecarAddon, enabled: Bool, siteID: UUID) async throws -> Site? {
+        guard let result = try await persistence.setSidecar(addon, enabled: enabled, siteID: siteID) else { return nil }
+        sites = result.envelope.sites
+        envs = result.envelope.envs
+        groups = result.envelope.groups
+        applyStatuses()
+        return result.site
     }
 
     // MARK: - Group mutations (write-through to disk under lock)

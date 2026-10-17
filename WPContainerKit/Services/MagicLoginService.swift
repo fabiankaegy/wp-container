@@ -138,12 +138,12 @@ public enum MagicLoginService {
                                       cli: ContainerCLI,
                                       user: String,
                                       ttl: TimeInterval = defaultTTL,
-                                      mailpitHost: String? = nil) async throws -> LoginLink {
+                                      sidecarEnvironment: [String] = []) async throws -> LoginLink {
         // Verify the target user exists (non-zero exit ⇒ absent), so the link is
         // never dead-on-arrival.
         let check = try await cli.runCapturing(
             SiteRecipe.wpProxyArgs(inst, dbHost: dbHost, wpArgs: ["user", "get", user, "--field=user_login"],
-                                   mailpitHost: mailpitHost))
+                                   sidecarEnvironment: sidecarEnvironment))
         guard check.exitCode == 0 else {
             throw MagicLoginError.userNotFound(user: user, slug: inst.siteSlug)
         }
@@ -158,7 +158,7 @@ public enum MagicLoginService {
         // is a single argv element — no host shell interpolation.
         let result = try await cli.runCapturing(
             SiteRecipe.wpProxyArgs(inst, dbHost: dbHost, wpArgs: ["option", "update", optionName, json],
-                                   mailpitHost: mailpitHost))
+                                   sidecarEnvironment: sidecarEnvironment))
         guard result.exitCode == 0 else {
             throw ContainerCLIError(command: ["option", "update", optionName],
                                     exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr)
