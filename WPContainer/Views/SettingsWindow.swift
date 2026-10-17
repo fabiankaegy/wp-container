@@ -437,7 +437,7 @@ private struct SitesSettingsPane: View {
                     }
 
                     SettingRow(title: "Terminal app",
-                               explanation: "Which app the Terminal buttons and menus open. Ghostty 1.3 or later appears here when installed.") {
+                               explanation: "Which app the Terminal buttons and menus open. Ghostty 1.3+ and iTerm2 appear here when installed.") {
                         Picker("", selection: $terminalApp) {
                             ForEach(TerminalApps.installed()) { app in Text(app.name).tag(app.rawValue) }
                         }

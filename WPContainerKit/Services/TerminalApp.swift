@@ -5,6 +5,7 @@ import Foundation
 public enum TerminalApp: String, CaseIterable, Identifiable, Sendable {
     case terminal
     case ghostty
+    case iterm
 
     public var id: String { rawValue }
 
@@ -12,6 +13,7 @@ public enum TerminalApp: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .terminal: return "Terminal"
         case .ghostty:  return "Ghostty"
+        case .iterm:    return "iTerm2"
         }
     }
 
@@ -19,15 +21,18 @@ public enum TerminalApp: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .terminal: return "com.apple.Terminal"
         case .ghostty:  return "com.mitchellh.ghostty"
+        case .iterm:    return "com.googlecode.iterm2"
         }
     }
 
     /// The first version with the AppleScript commands `openScript` uses, or
-    /// nil when every version has them. Ghostty added AppleScript in 1.3.0.
+    /// nil when every version has them. Ghostty added AppleScript in 1.3.0;
+    /// iTerm2's current dictionary dates from 3.0.
     public var minimumVersion: String? {
         switch self {
         case .terminal: return nil
         case .ghostty:  return "1.3.0"
+        case .iterm:    return "3.0"
         }
     }
 
@@ -57,6 +62,14 @@ public enum TerminalApp: String, CaseIterable, Identifiable, Sendable {
                 set cfg to new surface configuration
                 set initial input of cfg to \(text) & linefeed
                 new window with configuration cfg
+            end tell
+            """
+        case .iterm:
+            return """
+            tell application id "\(bundleID)"
+                activate
+                set newWindow to (create window with default profile)
+                tell current session of newWindow to write text \(text)
             end tell
             """
         }

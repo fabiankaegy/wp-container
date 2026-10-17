@@ -21,6 +21,11 @@ final class TerminalAppTests: XCTestCase {
         XCTAssertFalse(TerminalApp.ghostty.supports(version: nil))
     }
 
+    func testITermNeedsVersion3() {
+        XCTAssertTrue(TerminalApp.iterm.supports(version: "3.5.14"))
+        XCTAssertFalse(TerminalApp.iterm.supports(version: "2.1.4"))
+    }
+
     // MARK: - Scripts
 
     func testStringLiteralRoundTripsThroughAppleScript() throws {
@@ -40,6 +45,16 @@ final class TerminalAppTests: XCTestCase {
         XCTAssertTrue(script.contains("new window with configuration cfg"))
         let ghostty = URL(fileURLWithPath: "/Applications/Ghostty.app")
         try XCTSkipUnless(FileManager.default.fileExists(atPath: ghostty.path), "Ghostty is not installed")
+        try assertCompiles(script)
+    }
+
+    func testITermScriptWritesTheCommandToANewWindow() throws {
+        let script = TerminalApp.iterm.openScript(running: command)
+        XCTAssertTrue(script.contains(#"tell application id "com.googlecode.iterm2""#))
+        XCTAssertTrue(script.contains("create window with default profile"))
+        XCTAssertTrue(script.contains("write text \(TerminalApp.appleScriptString(command))"))
+        let iterm = URL(fileURLWithPath: "/Applications/iTerm.app")
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: iterm.path), "iTerm2 is not installed")
         try assertCompiles(script)
     }
 
