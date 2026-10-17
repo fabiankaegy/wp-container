@@ -23,6 +23,12 @@ public enum SiteRecipe {
     public static let mailpitSMTPPort = 1025
     /// Mailpit's in-container web-UI/REST port, published to a localhost port.
     public static let mailpitWebPort = 8025
+    /// Redis image for the object-cache sidecar.
+    public static let redisImage = "redis:7-alpine"
+    /// Redis's in-container port; WordPress connects here via the injected IP.
+    public static let redisPort = 6379
+    /// Memory cap for the Redis object cache, evicting least-recently-used keys.
+    public static let redisMaxMemory = "256mb"
 
     /// PHP-version image options offered in the Add Site sheet.
     public static let wordPressImageOptions: [(label: String, tag: String)] = [
@@ -314,6 +320,24 @@ public enum SiteRecipe {
             "-v", "\(inst.mailpitFolder.path):/data",
             "-e", "MP_DATABASE=/data/mailpit.db",
             mailpitImage,
+        ]
+        return args
+    }
+
+    // MARK: - Redis sidecar
+    /// `container run` args for the Redis object-cache container. Ephemeral by
+    /// design: no persistence, so a restart (or a fresh env) starts with an
+    /// empty cache that can never be stale against an imported or cloned
+    /// database. Nothing is published; WordPress reaches it on the container
+    /// network.
+    public static func runRedisArgs(_ inst: any RunnableInstance) -> [String] {
+        var args = ["run", "-d", "--rm", "--name", SidecarAddons.redis.containerName(for: inst)]
+        args += resourceArgs(for: inst)
+        args += labelArgs(for: inst)
+        args += [
+            redisImage, "redis-server",
+            "--save", "", "--appendonly", "no",
+            "--maxmemory", redisMaxMemory, "--maxmemory-policy", "allkeys-lru",
         ]
         return args
     }

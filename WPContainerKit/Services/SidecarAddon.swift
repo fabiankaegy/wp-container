@@ -37,24 +37,31 @@ public struct PrependHandler: Sendable {
     /// Unique header marker that tells our file apart from a user's own.
     public let marker: String
     public let contents: String
+    /// Whether the handler loads at prepend time, before wp-config.php, rather
+    /// than at `muplugins_loaded`.
+    public let isEarly: Bool
 
-    public init(fileName: String, marker: String, contents: String) {
+    public init(fileName: String, marker: String, contents: String, isEarly: Bool = false) {
         self.fileName = fileName
         self.marker = marker
         self.contents = contents
+        self.isEarly = isEarly
     }
 
+    /// The path below `prepend.d/`.
+    var relativePath: String { isEarly ? "\(PrependService.earlyDirName)/\(fileName)" : fileName }
+
     public func isPresent(phpConfFolder: URL) -> Bool {
-        PrependService.isHandlerPresent(phpConfFolder: phpConfFolder, name: fileName, marker: marker)
+        PrependService.isHandlerPresent(phpConfFolder: phpConfFolder, name: relativePath, marker: marker)
     }
 
     public func write(phpConfFolder: URL) throws {
-        try PrependService.writeHandler(phpConfFolder: phpConfFolder, name: fileName, contents: contents)
+        try PrependService.writeHandler(phpConfFolder: phpConfFolder, name: relativePath, contents: contents)
     }
 
     /// Removes the handler only when it is ours (marker match).
     public func remove(phpConfFolder: URL) {
-        PrependService.removeHandler(phpConfFolder: phpConfFolder, name: fileName, marker: marker)
+        PrependService.removeHandler(phpConfFolder: phpConfFolder, name: relativePath, marker: marker)
     }
 }
 
@@ -120,8 +127,9 @@ public extension SidecarAddon {
 public enum SidecarAddons {
     public static let elasticsearch = ElasticsearchAddon()
     public static let mailpit = MailpitAddon()
+    public static let redis = RedisAddon()
 
-    public static let all: [any SidecarAddon] = [elasticsearch, mailpit]
+    public static let all: [any SidecarAddon] = [elasticsearch, mailpit, redis]
 
     public static func enabled(for inst: any RunnableInstance) -> [any SidecarAddon] {
         all.filter { $0.isEnabled(for: inst) }
@@ -211,4 +219,24 @@ public struct MailpitAddon: SidecarAddon {
     public func dataFolders(for inst: any RunnableInstance) -> [URL] { [inst.mailpitFolder] }
     public func endpointURL(for inst: any RunnableInstance) -> URL? { inst.mailboxURL }
     public var endpointKey: String? { "mailboxUrl" }
+}
+
+// MARK: - Redis
+
+/// Redis for a persistent object cache. The handler defines `WP_REDIS_HOST` and
+/// `WP_REDIS_PORT` before the object-cache drop-in loads; the drop-in itself
+/// comes from a plugin such as Redis Object Cache, installed in the project.
+/// The cache is ephemeral: a restart starts it empty.
+public struct RedisAddon: SidecarAddon {
+    public let id = "redis"
+    public let displayName = "Redis"
+    public let containerSuffix = "redis"
+    public var image: String { SiteRecipe.redisImage }
+    public let environment = [SidecarEnvVar("WPC_REDIS_HOST")]
+    public var handler: PrependHandler? { RedisService.handler }
+
+    public func isEnabled(for inst: any RunnableInstance) -> Bool { inst.redisEnabled }
+    public func setEnabled(_ enabled: Bool, on site: inout Site) { site.redisEnabled = enabled }
+    public func setEnabled(_ enabled: Bool, on env: inout WorktreeEnv) { env.redisEnabled = enabled }
+    public func runArgs(for inst: any RunnableInstance) -> [String]? { SiteRecipe.runRedisArgs(inst) }
 }

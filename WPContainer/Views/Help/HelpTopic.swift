@@ -41,6 +41,7 @@ extension HelpTopic {
         xdebug,
         elasticsearch,
         mailpit,
+        redis,
         databaseImport,
         wpCLI,
     ]
@@ -68,7 +69,7 @@ extension HelpTopic {
                     "Each site runs in its own containers on its own `127.0.0.1` port, with a separate MariaDB database.",
                     "Media uploads are raised from PHP's stock 2 MB to **50 MB** automatically.",
                     "No Docker Desktop — WP Container uses Apple's native `container` runtime, so it's light on CPU and battery.",
-                    "First-class WP-CLI, trusted HTTPS, Xdebug, Elasticsearch, Mailpit, and one-command database import.",
+                    "First-class WP-CLI, trusted HTTPS, Xdebug, Elasticsearch, Mailpit, Redis, and one-command database import.",
                 ]
             ),
             HelpSection(
@@ -81,7 +82,7 @@ extension HelpTopic {
             ),
             HelpSection(
                 title: "Where to next",
-                body: "Browse the topics on the left to learn about branch environments, HTTPS and custom domains, Xdebug, Elasticsearch, Mailpit, database import, and WP-CLI.",
+                body: "Browse the topics on the left to learn about branch environments, HTTPS and custom domains, Xdebug, Elasticsearch, Mailpit, Redis, database import, and WP-CLI.",
                 tip: "Everything here is local and private — sites run entirely on your Mac, and you can select and copy any text in this window."
             ),
         ]
@@ -268,6 +269,28 @@ extension HelpTopic {
                     "REST API: `GET <mailboxUrl>/api/v1/messages` returns the captured mail as JSON.",
                 ],
                 tip: "No email leaves your Mac — test password resets and receipts freely without spamming anyone."
+            ),
+        ]
+    )
+
+    // MARK: - Redis
+
+    static let redis = HelpTopic(
+        id: "redis",
+        icon: "memorychip",
+        title: "Redis",
+        summary: "Persistent object cache",
+        intro: "Redis gives a site a persistent object cache, so you can develop against the same caching layer production uses.",
+        sections: [
+            HelpSection(
+                title: "How it works",
+                body: "Enabling Redis starts a Redis container and defines `WP_REDIS_HOST` and `WP_REDIS_PORT` for the site. An object-cache drop-in reads them; WP Container doesn't install one.",
+                bullets: [
+                    "Install and activate a drop-in plugin such as **Redis Object Cache**, then run `wp redis enable`.",
+                    "Constants you define in `wp-config.php` take precedence.",
+                    "The cache is empty after every restart, so it never holds data from before an import or a clone.",
+                ],
+                tip: "Toggling Redis restarts a running site."
             ),
         ]
     )

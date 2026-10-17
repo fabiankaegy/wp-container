@@ -124,6 +124,9 @@ Sites are provisioned automatically (no install wizard) and log in with
 - **Mailpit email catching** — per-site toggle; all outgoing mail lands in a
   local mailbox (`https://<site>-mail.localhost`, plus a REST API agents can
   read). Persistent across restarts.
+- **Redis object cache** — per-site toggle (`wp-container redis on <site>`); runs a
+  Redis container and defines `WP_REDIS_HOST`/`WP_REDIS_PORT` for an object-cache
+  drop-in such as the Redis Object Cache plugin, which you install in the site.
 - **Per-site resource limits** — cap CPU/memory per site in
   Settings → Resources or `wp-container limits <slug> --cpus 2 --memory 512`
   (see [docs/RESOURCES.md](docs/RESOURCES.md)).

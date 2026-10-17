@@ -131,6 +131,34 @@ struct MailpitCommand: AsyncParsableCommand {
     }
 }
 
+// MARK: - redis
+
+struct RedisCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "redis",
+        abstract: "Enable or disable the Redis object cache for a site: redis on|off <slug>.",
+        discussion: """
+        On enable, (for a running site) restarts to launch a Redis container and \
+        defines WP_REDIS_HOST and WP_REDIS_PORT for object-cache drop-ins. Install \
+        and enable a drop-in plugin such as Redis Object Cache in the site to use \
+        it. The cache is empty after every restart.
+        """
+    )
+    @Argument(help: "on | off") var state: String
+    @Argument(help: "Site slug.") var slug: String
+    @OptionGroup var output: JSONOptions
+
+    func run() async throws {
+        guard let onOff = OnOff(rawValue: state.lowercased()) else {
+            throw CLIErrorJSON("bad_args", detail: "state must be on|off")
+        }
+        do {
+            try await toggleSidecarAndRestart(SidecarAddons.redis, enabled: onOff.enabled, slug: slug,
+                                              output: output, ctx: CLIContext())
+        } catch { throw failCommand(error, json: output.json) }
+    }
+}
+
 // MARK: - limits (issue #11)
 
 struct LimitsCommand: AsyncParsableCommand {

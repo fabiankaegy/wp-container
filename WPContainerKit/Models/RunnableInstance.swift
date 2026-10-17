@@ -84,6 +84,8 @@ public protocol RunnableInstance: Sendable {
     var mailpitEnabled: Bool { get }
     /// The localhost port the Mailpit web UI is published on (issue #10).
     var mailpitPort: Int? { get }
+    /// Whether a per-instance Redis container runs for the object cache.
+    var redisEnabled: Bool { get }
     /// Public hostnames (no wildcards) that must resolve to the HOST from
     /// inside the wp container, so WordPress loopback requests (wp-cron spawn,
     /// Site Health checks, REST self-calls) reach the host proxy exactly like a
@@ -139,6 +141,7 @@ public extension RunnableInstance {
     }
     var mailpitEnabled: Bool { false }
     var mailpitPort: Int? { nil }
+    var redisEnabled: Bool { false }
     /// Per-instance Elasticsearch data directory bind mount host path.
     var elasticsearchFolder: URL {
         wordpressFolder.deletingLastPathComponent().appendingPathComponent("elasticsearch", isDirectory: true)

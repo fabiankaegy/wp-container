@@ -30,6 +30,8 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
     public var mailpitEnabled: Bool
     /// The env's own auto-allocated Mailpit web-UI port (issue #10).
     public var mailpitPort: Int?
+    /// Inherited from the parent site: the env runs its own Redis container.
+    public var redisEnabled: Bool
     /// Inherited per-site resource caps (issue #11); nil = `container` defaults.
     public var cpuLimit: Int?
     public var memoryLimitMB: Int?
@@ -72,7 +74,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
              worktreePath, envPath, port, imageTag, createdAt, provisioned,
              xdebugEnabled, elasticsearchEnabled, cpuLimit, memoryLimitMB,
              idleStopMinutes, lastActivityAt,
-             mailpitEnabled, mailpitPort, sharedDatabase, databaseSchema
+             mailpitEnabled, mailpitPort, redisEnabled, sharedDatabase, databaseSchema
     }
 
     public init(
@@ -92,6 +94,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         elasticsearchEnabled: Bool = false,
         mailpitEnabled: Bool = false,
         mailpitPort: Int? = nil,
+        redisEnabled: Bool = false,
         cpuLimit: Int? = nil,
         memoryLimitMB: Int? = nil,
         idleStopMinutes: Int? = nil,
@@ -116,6 +119,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         self.elasticsearchEnabled = elasticsearchEnabled
         self.mailpitEnabled = mailpitEnabled
         self.mailpitPort = mailpitPort
+        self.redisEnabled = redisEnabled
         self.cpuLimit = cpuLimit
         self.memoryLimitMB = memoryLimitMB
         self.idleStopMinutes = idleStopMinutes
@@ -146,6 +150,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         // Absent in envs written before issue #10.
         self.mailpitEnabled = (try? c.decode(Bool.self, forKey: .mailpitEnabled)) ?? false
         self.mailpitPort = try? c.decodeIfPresent(Int.self, forKey: .mailpitPort)
+        self.redisEnabled = (try? c.decode(Bool.self, forKey: .redisEnabled)) ?? false
         // Absent in envs written before issue #11.
         self.cpuLimit = try? c.decodeIfPresent(Int.self, forKey: .cpuLimit)
         self.memoryLimitMB = try? c.decodeIfPresent(Int.self, forKey: .memoryLimitMB)

@@ -1,9 +1,9 @@
 import SwiftUI
 import WPContainerKit
 
-/// Settings-tab "Development" card (PLAN.md §2c + §2c-bis): Xdebug + Elasticsearch
-/// toggles (restart-to-apply), and live WordPress debug constants read/written
-/// straight to wp-config.php (per-request, no restart).
+/// Settings-tab "Development" card (PLAN.md §2c + §2c-bis): Xdebug, Elasticsearch,
+/// Mailpit and Redis toggles (restart-to-apply), and live WordPress debug
+/// constants read/written straight to wp-config.php (per-request, no restart).
 struct DevelopmentCard: View {
     @Environment(AppViewModel.self) private var vm
     let site: Site
@@ -29,6 +29,8 @@ struct DevelopmentCard: View {
                 elasticsearchRow
                 Divider().opacity(0.5)
                 mailpitRow
+                Divider().opacity(0.5)
+                redisRow
                 Divider().opacity(0.5)
                 debugSection
             }
@@ -113,6 +115,26 @@ struct DevelopmentCard: View {
             Spacer()
             Toggle("", isOn: Binding(get: { site.mailpitEnabled },
                                      set: { vm.setMailpit(site, enabled: $0) }))
+                .labelsHidden().toggleStyle(.switch)
+        }
+    }
+
+    // MARK: Redis
+
+    private var redisRow: some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Redis").font(.callout.weight(.medium))
+                Text("Object cache server. Sets WP_REDIS_HOST for a drop-in such as the Redis Object Cache plugin, which you install in the site. Empty after every restart.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if site.status.isRunning {
+                    Text("Toggling restarts the site.").font(.caption2).foregroundStyle(.tertiary)
+                }
+            }
+            Spacer()
+            Toggle("", isOn: Binding(get: { site.redisEnabled },
+                                     set: { vm.setRedis(site, enabled: $0) }))
                 .labelsHidden().toggleStyle(.switch)
         }
     }
