@@ -42,6 +42,8 @@ struct MainWindow: View {
             .frame(maxWidth: 640)
         }
         .task { await vm.runLiveMetrics() }
+        // Re-check Site Icons whenever the set of running sites changes.
+        .task(id: vm.sites.filter { $0.status.isRunning }.map(\.id)) { await vm.syncSiteIcons() }
         #if DEBUG
         .task {
             // Wait for the store to load before resolving the slug.

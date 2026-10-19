@@ -147,11 +147,12 @@ struct StatusPill: View {
     }
 }
 
-/// Rounded-square site avatar. Renders the site's favicon / Site Icon when one
-/// is found in its files (PLAN.md §2l), falling back to a colored initials
-/// gradient. The favicon loads asynchronously off-main via `FaviconImageCache`
-/// and re-checks when `reloadToken` changes (site selection / start), so an icon
-/// added while the app is open appears without a relaunch.
+/// Rounded-square site avatar. Renders the site's WordPress Site Icon (read
+/// from its database while it runs, see `SiteIcons`) or else a favicon found in
+/// its files (PLAN.md §2l), falling back to a colored initials gradient. The
+/// image loads asynchronously off-main via `FaviconImageCache` and re-checks
+/// when `reloadToken` changes (site selection / start) or a Site Icon resolves,
+/// so an icon added while the app is open appears without a relaunch.
 struct SiteAvatar: View {
     let name: String
     let slug: String
@@ -192,7 +193,7 @@ struct SiteAvatar: View {
             }
         }
         .shadow(color: .black.opacity(0.12), radius: 1, y: 1)
-        .task(id: FaviconKey(path: wordpressFolder?.path, token: reloadToken)) {
+        .task(id: FaviconKey(path: wordpressFolder?.path, token: reloadToken, icons: SiteIcons.shared.version)) {
             await loadFavicon()
         }
     }
@@ -207,5 +208,7 @@ struct SiteAvatar: View {
     private struct FaviconKey: Hashable {
         let path: String?
         let token: AnyHashable
+        /// Bumped when a Site Icon resolves from a site's database.
+        let icons: Int
     }
 }
