@@ -1,37 +1,5 @@
 {
-  "fill" : {
-    "automatic-gradient" : "extended-srgb:0.00000,0.53333,1.00000,1.00000"
-  },
-  "groups" : [
-    {
-      "layers" : [
-        {
-          "glass" : false,
-          "image-name" : "exec-6e209ba0-5509-4f6a-aecf-323c6db3e427.png",
-          "name" : "exec-6e209ba0-5509-4f6a-aecf-323c6db3e427",
-          "position" : {
-            "scale" : 0.93,
-            "translation-in-points" : [
-              -1.1368683772161603e-13,
-              -1.1368683772161603e-13
-            ]
-          }
-        }
-      ],
-      "shadow" : {
-        "kind" : "neutral",
-        "opacity" : 0.6
-      },
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.2
-      }
-    }
-  ],
-  "supported-platforms" : {
-    "circles" : [
-      "watchOS"
-    ],
-    "squares" : "shared"
-  }
+  "fill" : { "automatic-gradient" : "extended-srgb:0.21961,0.34510,0.91373,1.00000" },
+  "groups" : [ { "layers" : [ {"glass":false,"image-name":"dot.svg","name":"dot"},{"glass":false,"image-name":"bar.svg","name":"bar"},{"glass":true,"image-name":"front.svg","name":"front"},{"glass":true,"image-name":"back.svg","name":"back"} ], "shadow" : { "kind" : "neutral", "opacity" : 0.5 }, "translucency" : { "enabled" : true, "value" : 0.4 } } ],
+  "supported-platforms" : { "squares" : "shared" }
 }
