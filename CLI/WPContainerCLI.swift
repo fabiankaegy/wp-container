@@ -219,7 +219,19 @@ struct ListCommand: AsyncParsableCommand {
 // MARK: - create
 
 struct CreateCommand: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "create", abstract: "Create a new site (does not start it).")
+    static let configuration = CommandConfiguration(
+        commandName: "create",
+        abstract: "Create a new site (does not start it).",
+        discussion: """
+        `--wp-env <project-dir>` builds the site from the project's .wp-env.json \
+        (with .wp-env.override.json and env.development applied): WordPress and \
+        PHP version, multisite, and config constants. Local plugins, themes, and \
+        mappings are bind-mounted live into the site; remote plugins and themes \
+        (GitHub owner/repo#ref, zip URLs) are installed, and plugins activated. \
+        The site is started to apply them. --wp, --php-version, --php, and \
+        --multisite override the project's values.
+        """
+    )
     @Argument(help: "Site name.") var name: String
     @Option(name: .long, help: "Parent folder (default: ~/WP Container Sites).") var path: String?
     @Option(name: .long, help: "Full WordPress image tag override (e.g. wordpress:php8.3-apache).") var php: String?
@@ -230,11 +242,16 @@ struct CreateCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Sidebar group name (created if it doesn't exist).") var group: String?
     @Option(name: .long, help: "CPU cap per container (1–8; default: container default of 4).") var cpus: Int?
     @Option(name: .long, help: "Memory cap per container in MB (e.g. 512; default: container default of 1024).") var memory: Int?
+    @Option(name: .customLong("wp-env"), help: "Build the site from this project's .wp-env.json, and start it.") var wpEnv: String?
     @OptionGroup var output: JSONOptions
 
     func run() async throws {
         let ctx = CLIContext()
         do {
+            let plan = try wpEnv.map { try WPEnvPlan(project: WPEnvProject.load(directory: Self.expand($0))) }
+            let wp = self.wp ?? plan?.wordpressVersion
+            let phpVersion = self.phpVersion ?? plan?.phpVersion
+            let multisite = self.multisite ?? ((plan?.multisite ?? false) ? NetworkType.subdirectory.rawValue : nil)
             let envelope = try await ctx.load()
             let slug = Slug.unique(name, existing: Set(envelope.sites.map(\.slug)))
             // Resolve the image tag: explicit --php override wins; else map the
@@ -280,11 +297,13 @@ struct CreateCommand: AsyncParsableCommand {
             let siteNetwork = networkType
             let siteCPU = cpus
             let siteMemory = memory
+            let siteMounts = plan?.mounts ?? []
             guard let (_, created, updated) = try await ctx.persistence.allocatePort(reserve: { port, env in
                 var s = Site(name: siteName, slug: slug, path: sitePath,
                              port: port, imageTag: siteImageTag, phpVersion: sitePHPLabel,
                              cpuLimit: siteCPU, memoryLimitMB: siteMemory,
                              customDomain: siteDomain, networkType: siteNetwork)
+                s.mounts = siteMounts
                 if let groupName, !groupName.trimmingCharacters(in: .whitespaces).isEmpty {
                     if let existing = env.groups.first(where: { $0.name.caseInsensitiveCompare(groupName) == .orderedSame }) {
                         s.groupID = existing.id
@@ -303,11 +322,41 @@ struct CreateCommand: AsyncParsableCommand {
             // Write the per-site wp-cli shim at <site>/wp (§2e).
             try? WPCLIShim.writeShim(for: created, siteRoot: created.path, slug: created.slug)
             let resolvedGroupName = created.groupID.flatMap { id in updated.groups.first { $0.id == id }?.name }
-            if output.json { emitLine(CLIJSON.string(SiteJSON(from: created, group: resolvedGroupName))) }
-            else { emitLine("Created \(created.slug) at \(created.path.path) (port \(created.port))\(resolvedGroupName.map { " in group \"\($0)\"" } ?? "").") }
+            guard let plan else {
+                if output.json { emitLine(CLIJSON.string(SiteJSON(from: created, group: resolvedGroupName))) }
+                else { emitLine("Created \(created.slug) at \(created.path.path) (port \(created.port))\(resolvedGroupName.map { " in group \"\($0)\"" } ?? "").") }
+                return
+            }
+            if !output.json { emitLine("Created \(created.slug) at \(created.path.path) (port \(created.port)). Starting it to apply .wp-env.json…") }
+            try await ctx.ensureRunning(.site(created), envelope: updated)
+            guard let dbHost = try await ctx.cli.ipAddress(of: created.dbContainerName) else {
+                throw CLIErrorJSON("not_running", detail: "start \(created.slug) and re-create it")
+            }
+            let report = await WPEnvApplier.apply(plan, to: created, dbHost: dbHost, cli: ctx.cli)
+            if output.json {
+                struct CreateFromWPEnvJSON: Codable {
+                    let site: SiteJSON; let mounts: [Mount]; let applied: [String]; let failures: [String]; let warnings: [String]
+                }
+                emitLine(CLIJSON.string(CreateFromWPEnvJSON(site: SiteJSON(from: created, group: resolvedGroupName),
+                                                            mounts: created.mounts, applied: report.done,
+                                                            failures: report.failures, warnings: plan.warnings)))
+            } else {
+                for mount in created.mounts { emitLine("  Mounted \(mount.hostPath) → \(mount.containerPath)") }
+                for line in report.done { emitLine("  \(line)") }
+                for line in report.failures { emitLine("  ✗ \(line)") }
+                for line in plan.warnings { emitLine("  ! \(line)") }
+                emitLine("Ready at \(created.url.absoluteString)")
+            }
+            if !report.failures.isEmpty { throw ExitCode.failure }
+        } catch let code as ExitCode {
+            throw code
         } catch {
             throw failCommand(error, json: output.json)
         }
+    }
+
+    private static func expand(_ path: String) -> URL {
+        URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
     }
 }
 

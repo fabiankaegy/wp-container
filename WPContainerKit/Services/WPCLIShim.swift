@@ -41,8 +41,9 @@ public enum WPCLIShim {
     /// so a shared-database worktree env resolves the parent's container and its
     /// own `wpc_*` schema (issue #17); v5 mounts the `php/` overrides folder and
     /// passes the Mailpit/Elasticsearch sidecar addresses; v6 passes every
-    /// registered sidecar's env vars; v7 adds Redis.
-    public static let shimVersion = 7
+    /// registered sidecar's env vars; v7 adds Redis; v8 mounts the site's own
+    /// mounts (`Site.mounts`).
+    public static let shimVersion = 8
     private static let versionMarker = "# wpc-shim-version:"
 
     /// Bash function shared by the shim and the router: prints a running
@@ -67,17 +68,20 @@ public enum WPCLIShim {
     /// per-site values.
     ///
     /// `sidecars` and `phpConfFolder` default to the classic per-site container
-    /// names and the `php/` folder beside `wordpressFolder`.
+    /// names and the `php/` folder beside `wordpressFolder`. `mounts` are
+    /// mounted after `wordpressFolder` so they shadow it.
     public static func shimScript(slug: String, wordpressFolder: URL, cliImage: String,
                                   dbContainer: String? = nil,
                                   databaseName: String = SiteRecipe.dbName,
                                   sidecars: [SidecarRef]? = nil,
-                                  phpConfFolder: URL? = nil) -> String {
+                                  phpConfFolder: URL? = nil,
+                                  mounts: [Mount] = []) -> String {
         let phpDir = phpConfFolder ?? PrependService.phpFolder(forWordpress: wordpressFolder)
         let refs = sidecars ?? SidecarAddons.refs(slug: slug)
         let lookups = sidecarLookups(refs) { "\"$(container_ip \(shellQuote($0)))\"" }
             .joined(separator: "\n")
         let envFlags = sidecarEnvFlags(refs).map { "  \($0) \\\n" }.joined()
+        let mountFlags = mounts.map { "  -v \(shellQuote("\($0.hostPath):\($0.containerPath)")) \\\n" }.joined()
         return """
         #!/bin/bash
         \(versionMarker) \(shimVersion)
@@ -130,7 +134,7 @@ public enum WPCLIShim {
         [ -t 1 ] && TTY="-t"
         exec "$CONTAINER_BIN" run --rm -i $TTY -w "$WORKDIR" \\
           -v "$WP_DIR:/var/www/html" \\
-          ${PHP_ARGS[@]+"${PHP_ARGS[@]}"} \\
+        \(mountFlags)  ${PHP_ARGS[@]+"${PHP_ARGS[@]}"} \\
           -e "WORDPRESS_DB_HOST=$DB_IP" \\
           -e "WORDPRESS_DB_USER=\(SiteRecipe.dbUser)" \\
           -e "WORDPRESS_DB_PASSWORD=\(SiteRecipe.dbPassword)" \\
@@ -149,13 +153,14 @@ public enum WPCLIShim {
                                  dbContainer: String? = nil,
                                  databaseName: String = SiteRecipe.dbName,
                                  sidecars: [SidecarRef]? = nil,
-                                 phpConfFolder: URL? = nil) throws -> URL {
+                                 phpConfFolder: URL? = nil,
+                                 mounts: [Mount] = []) throws -> URL {
         let url = siteRoot.appendingPathComponent("wp")
         let wp = wordpressFolder ?? siteRoot.appendingPathComponent("wordpress", isDirectory: true)
         try FileManager.default.createDirectory(at: siteRoot, withIntermediateDirectories: true)
         try shimScript(slug: slug, wordpressFolder: wp, cliImage: cliImage,
                        dbContainer: dbContainer, databaseName: databaseName,
-                       sidecars: sidecars, phpConfFolder: phpConfFolder)
+                       sidecars: sidecars, phpConfFolder: phpConfFolder, mounts: mounts)
             .write(to: url, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
         return url
@@ -174,7 +179,8 @@ public enum WPCLIShim {
                       dbContainer: inst.dbContainerName,
                       databaseName: inst.databaseName,
                       sidecars: SidecarAddons.refs(for: inst),
-                      phpConfFolder: inst.phpConfFolder)
+                      phpConfFolder: inst.phpConfFolder,
+                      mounts: inst.extraMounts)
     }
 
     /// Whether the shim at `<siteRoot>/wp` is missing or older than the current
@@ -360,8 +366,10 @@ public enum WPCLIShim {
                                                   dbContainer: String? = nil,
                                                   databaseName: String = SiteRecipe.dbName,
                                                   sidecars: [SidecarRef]? = nil,
-                                                  phpConfFolder: URL? = nil) -> String {
+                                                  phpConfFolder: URL? = nil,
+                                                  mounts: [Mount] = []) -> String {
         let wp = wordpressFolder.path
+        let mountFlags = mounts.map { "-v \(shellQuote("\($0.hostPath):\($0.containerPath)")) " }.joined()
         let php = (phpConfFolder ?? PrependService.phpFolder(forWordpress: wordpressFolder)).path
         let db = dbContainer ?? "wpc-\(slug)-db"
         let refs = sidecars ?? SidecarAddons.refs(slug: slug)
@@ -371,7 +379,7 @@ public enum WPCLIShim {
         DB_IP=\(terminalIPLookup(db)); \(lookups)\
         if [ -z "$DB_IP" ]; then echo 'Site \(slug) is not running — start it first.'; \
         elif [ ! -d \(shellQuote(php)) ]; then echo 'Site \(slug) has not finished its first start yet.'; else \
-        \(containerBinary) run -it --rm -w /var/www/html -v \(shellQuote(wp)):/var/www/html \
+        \(containerBinary) run -it --rm -w /var/www/html -v \(shellQuote(wp)):/var/www/html \(mountFlags)\
         -v \(shellQuote(php)):\(SiteRecipe.phpConfContainerPath) \
         -e PHP_INI_SCAN_DIR=\(SiteRecipe.phpDefaultConfDir):\(SiteRecipe.phpConfContainerPath) \
         -e WORDPRESS_DB_HOST=$DB_IP -e WORDPRESS_DB_USER=\(SiteRecipe.dbUser) \
@@ -389,7 +397,8 @@ public enum WPCLIShim {
                                    dbContainer: inst.dbContainerName,
                                    databaseName: inst.databaseName,
                                    sidecars: SidecarAddons.refs(for: inst),
-                                   phpConfFolder: inst.phpConfFolder)
+                                   phpConfFolder: inst.phpConfFolder,
+                                   mounts: inst.extraMounts)
     }
 
     /// Command substitution printing a container's IPv4, or nothing when it

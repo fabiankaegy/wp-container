@@ -118,6 +118,7 @@ public actor WorktreeEnvService {
             cpuLimit: parent.cpuLimit,
             memoryLimitMB: parent.memoryLimitMB
         )
+        env.inheritedMounts = parent.mounts
         // Inherit the parent's sidecars at creation.
         for addon in SidecarAddons.enabled(for: parent) {
             addon.setEnabled(true, on: &env)
