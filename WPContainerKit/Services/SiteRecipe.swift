@@ -202,6 +202,20 @@ public enum SiteRecipe {
         return args
     }
 
+    /// `container exec` args that ask the wp container's own web server for `/`
+    /// and print the HTTP status (`000` when nothing answered). Needs no network
+    /// access from the host.
+    public static func wpHTTPProbeArgs(_ inst: any RunnableInstance) -> [String] {
+        ["exec", inst.wpContainerName, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+         "--max-time", "5", "http://127.0.0.1/"]
+    }
+
+    /// Whether `wpHTTPProbeArgs` output is a real HTTP status (100–599).
+    public static func isHTTPStatus(_ output: String) -> Bool {
+        guard let code = Int(output.trimmingCharacters(in: .whitespacesAndNewlines)) else { return false }
+        return (100...599).contains(code)
+    }
+
     /// mariadb ships `healthcheck.sh`; exit 0 means the server accepts connections.
     public static func databaseHealthcheckArgs(_ inst: any RunnableInstance) -> [String] {
         ["exec", inst.dbContainerName, "healthcheck.sh", "--connect", "--innodb_initialized"]
