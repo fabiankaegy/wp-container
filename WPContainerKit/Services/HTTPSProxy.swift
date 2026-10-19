@@ -446,7 +446,8 @@ public final class HTTPSProxy: @unchecked Sendable {
                                                            isMailbox: true)
             }
         }
-        for env in envelope.envs {
+        // A settled env serves nothing until it is restored (`EnvSettlement`).
+        for env in envelope.envs where !env.isSettled {
             let host = env.domainHost
             // `sites.json` can end up with two envs sharing an `envSlug` (same
             // parent + branch, created twice). They collide on this key, and since
@@ -968,9 +969,10 @@ public final class HTTPSProxy: @unchecked Sendable {
         guard let envelope = try? await persistence.load() else { return }
         guard var running = try? await runningContainerNames() else { return }
         let now = Date()
+        await persistBrowserActivity(envelope.envs)
 
         var stoppedAnEnv = false
-        for env in envelope.envs {
+        for env in envelope.envs where !env.isSettled {
             guard running.contains(env.wpContainerName) else { continue }
             // An env is only idle-STOPPABLE while we own its port, because that
             // ownership is the whole basis of the env clock being trustworthy: it
@@ -1117,6 +1119,24 @@ public final class HTTPSProxy: @unchecked Sendable {
         let candidates = [inMemory, persisted].compactMap { $0 }
         guard let reference = candidates.max() else { return 0 }
         return max(0, now.timeIntervalSince(reference)) / 60
+    }
+
+    /// How often browser traffic this proxy routed is written to an env's
+    /// persisted `lastActivityAt`. Coarse on purpose: the stamp feeds "unused for
+    /// N days" (`EnvSettlement`); the idle clock reads `lastAccess` directly.
+    private static let activityPersistInterval: TimeInterval = 600
+
+    /// Persist `lastAccess` for envs whose stored stamp is older than
+    /// `activityPersistInterval`, so a proxy restart doesn't forget that an env
+    /// was browsed and other processes see the same "last used" date.
+    private func persistBrowserActivity(_ envs: [WorktreeEnv]) async {
+        let seen = stateLock.withLock { lastAccess }
+        for env in envs {
+            guard let used = seen[env.envSlug] else { continue }
+            if let stamp = env.lastActivityAt, used.timeIntervalSince(stamp) < Self.activityPersistInterval { continue }
+            await persistence.recordActivity(instanceID: env.id, now: used,
+                                             minimumInterval: Self.activityPersistInterval)
+        }
     }
 
     private func isWaking(_ slug: String) -> Bool {

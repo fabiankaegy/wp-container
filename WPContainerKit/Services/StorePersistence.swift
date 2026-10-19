@@ -128,9 +128,7 @@ public actor StorePersistence {
             var envelope = (try? readUnlocked()) ?? StoreEnvelope()
             // Include sidecar host ports (Mailpit's web UI, issue #10) so one is
             // never handed out again as a site/env port or another sidecar's.
-            let taken = Set(envelope.sites.map(\.port))
-                .union(envelope.envs.map(\.port))
-                .union(SidecarAddons.reservedHostPorts(sites: envelope.sites, envs: envelope.envs))
+            let taken = PortAllocator.reservedPorts(sites: envelope.sites, envs: envelope.envs)
             guard let port = PortAllocator.firstFreePort(from: base, excluding: taken) else { return nil }
             let value = reserve(port, &envelope)
             envelope.version = StoreEnvelope.currentVersion
@@ -169,6 +167,55 @@ public actor StorePersistence {
             }
         }
         return (updated, envelope)
+    }
+
+    // MARK: - Settling (see `EnvSettlement`)
+
+    /// Mark an env settled at `now`, which releases its ports to the allocator
+    /// and drops it from the proxy's routes. Stopping its containers is the
+    /// caller's job. Returns the updated env, or nil when it is gone.
+    public func settleEnv(id: UUID, now: Date = Date()) throws -> WorktreeEnv? {
+        let envelope = try mutateIfChanged { envelope in
+            guard let i = envelope.envs.firstIndex(where: { $0.id == id }), !envelope.envs[i].isSettled else { return false }
+            envelope.envs[i].settledAt = now
+            return true
+        }
+        return envelope.envs.first { $0.id == id }
+    }
+
+    /// Clear an env's settled mark and give its ports back: the ones it had when
+    /// they are still free, otherwise the next free ones, all in one locked
+    /// write so a concurrent creator can't take them. Returns the updated env
+    /// and whether its main port changed (an env still on its loopback URL then
+    /// needs its URLs migrated), or nil when it is gone or no port is free.
+    public func restoreEnv(id: UUID) throws -> (env: WorktreeEnv, portChanged: Bool)? {
+        try ensureDirectory()
+        return try withLock {
+            var envelope = (try? readUnlocked()) ?? StoreEnvelope()
+            guard let i = envelope.envs.firstIndex(where: { $0.id == id }) else { return nil }
+            var env = envelope.envs[i]
+            guard env.isSettled else { return (env, false) }
+            // The env itself is settled, so none of its ports are in this set.
+            var taken = PortAllocator.reservedPorts(sites: envelope.sites, envs: envelope.envs)
+            func claim(_ previous: Int?, from base: Int) -> Int? {
+                if let previous, !taken.contains(previous), PortAllocator.isPortFree(previous) { return previous }
+                return PortAllocator.firstFreePort(from: base, excluding: taken)
+            }
+            guard let port = claim(env.port, from: PortAllocator.basePort) else { return nil }
+            taken.insert(port)
+            let portChanged = port != env.port
+            env.port = port
+            for addon in SidecarAddons.enabled(for: env) where addon.publishesHostPort {
+                guard let hostPort = claim(addon.hostPort(of: env), from: port + 1) else { return nil }
+                addon.setHostPort(hostPort, on: &env)
+                taken.insert(hostPort)
+            }
+            env.settledAt = nil
+            envelope.envs[i] = env
+            envelope.version = StoreEnvelope.currentVersion
+            try writeUnlocked(envelope)
+            return (env, portChanged)
+        }
     }
 
     // MARK: - Internals

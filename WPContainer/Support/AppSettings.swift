@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import WPContainerKit
 
 /// Central registry of app-wide preference keys (PLAN.md §2l) persisted in
 /// `UserDefaults` and surfaced by the Settings window (⌘,). Views bind to these
@@ -23,6 +24,10 @@ enum AppSettings {
     /// The terminal app the Terminal buttons open (`TerminalApp` raw value).
     /// Absent → Terminal; read through `TerminalApps.selected`.
     static let terminalAppKey = "terminalApp"
+    /// Whether settled worktree envs are purged once they've been settled for
+    /// `purgeSettledAfterDaysKey` days (`EnvSettlement`). Defaults TRUE.
+    static let autoPurgeSettledEnvsKey = "autoPurgeSettledEnvs"
+    static let purgeSettledAfterDaysKey = "purgeSettledAfterDays"
     /// Whether the one-time "install the command-line tool?" offer has been shown.
     /// Defaults FALSE (absent → not yet offered), so it fires once and never nags.
     static let didOfferCLIInstallKey = "didOfferCLIInstall"
@@ -58,6 +63,12 @@ enum AppSettings {
     static var defaultScriptDebug: Bool { UserDefaults.standard.bool(forKey: defaultScriptDebugKey) }
     static var defaultGlobalWPRouter: Bool { UserDefaults.standard.bool(forKey: defaultGlobalWPRouterKey) }
 
+    static var autoPurgeSettledEnvs: Bool { UserDefaults.standard.bool(forKey: autoPurgeSettledEnvsKey) }
+    static var purgeSettledAfterDays: Int {
+        let days = UserDefaults.standard.integer(forKey: purgeSettledAfterDaysKey)
+        return days > 0 ? days : EnvSettlement.defaultPurgeAfterDays
+    }
+
     /// One-time gate for the first-run CLI-install offer (see
     /// `AppViewModel.maybeOfferCLIInstall`). Not registered as a default — absent
     /// reads as false (not yet offered).
@@ -76,6 +87,8 @@ enum AppSettings {
             defaultWPDebugKey: true,
             defaultScriptDebugKey: true,
             defaultGlobalWPRouterKey: true,
+            autoPurgeSettledEnvsKey: true,
+            purgeSettledAfterDaysKey: EnvSettlement.defaultPurgeAfterDays,
         ])
     }
 

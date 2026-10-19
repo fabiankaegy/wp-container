@@ -62,7 +62,28 @@ struct CLIContext {
         self.worktrees = WorktreeEnvService(cli: c, git: g, lifecycle: lc)
     }
 
+    var settler: EnvSettler {
+        EnvSettler(persistence: persistence, lifecycle: lifecycle, worktrees: worktrees, cli: cli)
+    }
+
     func load() async throws -> StoreEnvelope { try await persistence.load() }
+
+    /// Restore a settled env (new port if its old one was taken, URLs migrated
+    /// when needed) and start it, printing a notice and any warnings to stderr.
+    @discardableResult
+    func restore(_ env: WorktreeEnv, envelope: StoreEnvelope) async throws -> WorktreeEnv {
+        FileHandle.standardError.write(Data("\(env.envSlug) was settled — restoring it…\n".utf8))
+        let parent = envelope.sites.first { $0.id == env.parentSiteID }
+        do {
+            let (restored, warnings) = try await settler.restore(env, parent: parent)
+            for warning in warnings {
+                FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
+            }
+            return restored
+        } catch let error as EnvSettlementError {
+            throw CLIErrorJSON("restore_failed", detail: error.description)
+        }
+    }
 
     /// Names of currently-running containers.
     func runningContainerNames() async -> Set<String> {
@@ -81,6 +102,10 @@ struct CLIContext {
     /// cli/MCP output) when it actually starts something.
     func ensureRunning(_ resolved: ResolvedTarget, envelope: StoreEnvelope, noStart: Bool = false) async throws {
         guard !noStart, await !lifecycle.isWPContainerRunning(resolved.instance) else { return }
+        if case .env(let env) = resolved, env.isSettled {
+            try await restore(env, envelope: envelope)
+            return
+        }
         let label: String
         switch resolved {
         case .site(let s): label = s.slug
@@ -346,7 +371,8 @@ struct StartCommand: AsyncParsableCommand {
                 // Env fan-out is opt-in (issue #18) — an empty envs list makes
                 // `startSiteWithEnvs` start only the parent, reusing the same
                 // claim/warning/image-prefetch plumbing.
-                let envs = withEnvs ? envelope.envs.filter { $0.parentSiteID == site.id } : []
+                // Settled envs stay parked; `start <env>` restores one.
+                let envs = withEnvs ? envelope.envs.filter { $0.parentSiteID == site.id && !$0.isSettled } : []
                 let outcome = await ctx.lifecycle.startSiteWithEnvs(site, envs: envs, pullPolicy: policy)
                 if outcome.provisioned != site.provisioned {
                     _ = try await ctx.persistence.mutate { env in
@@ -384,6 +410,12 @@ struct StartCommand: AsyncParsableCommand {
                 if await ctx.lifecycle.isWPContainerRunning(env) {
                     if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(target) already running"))) }
                     else { emitLine("\(target) is already running.") }
+                    return
+                }
+                if env.isSettled {
+                    let restored = try await ctx.restore(env, envelope: envelope)
+                    if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(target) restored at \(restored.url.absoluteString)"))) }
+                    else { emitLine("Restored \(target) at \(restored.url.absoluteString).") }
                     return
                 }
                 _ = try await ctx.lifecycle.startInstance(env, pullPolicy: policy, dbProvider: parent)
@@ -512,7 +544,8 @@ struct WorktreeCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "worktree",
         abstract: "Manage git worktree environments.",
-        subcommands: [WorktreeCreate.self, WorktreeList.self, WorktreeDelete.self, WorktreeFixURLs.self]
+        subcommands: [WorktreeCreate.self, WorktreeList.self, WorktreeSettle.self, WorktreeRestore.self,
+                      WorktreeDelete.self, WorktreeFixURLs.self]
     )
 }
 
@@ -605,8 +638,69 @@ struct WorktreeList: AsyncParsableCommand {
             if output.json { emitLine(CLIJSON.string(envs.map(EnvJSON.init))) }
             else {
                 if envs.isEmpty { emitLine("No environments.") }
-                for e in envs { emitLine("\(e.status.token)  \(e.envSlug)  \(e.branch)  \(e.url.absoluteString)") }
+                for e in envs {
+                    let state = e.isSettled ? "settled" : e.status.token
+                    let days = EnvSettlement.daysUnused(e)
+                    let unused = days == 0 ? "used today" : "unused \(days)d"
+                    let hint = EnvSettlement.isStale(e) ? "  (consider: worktree settle \(e.envSlug))" : ""
+                    emitLine("\(state)  \(e.envSlug)  \(e.branch)  \(e.url.absoluteString)  \(unused)\(hint)")
+                }
             }
+        } catch {
+            throw failCommand(error, json: output.json)
+        }
+    }
+}
+
+struct WorktreeSettle: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "settle",
+        abstract: "Park an env: stop it and release its port, keeping its checkout, files and database.",
+        discussion: """
+        A settled environment drops out of the proxy and the app's sidebar, and \
+        its port can be handed to a new environment. `worktree restore`, \
+        `start`, or any command that needs it running (`wp`, `run`, `login`) \
+        brings it back, on a new port if its old one was taken. The app purges \
+        environments that stay settled past the window set in Settings \
+        (30 days by default); a checkout with uncommitted changes is kept.
+        """
+    )
+    @Argument(help: "Env slug.") var envSlug: String
+    @OptionGroup var output: JSONOptions
+
+    func run() async throws {
+        let ctx = CLIContext()
+        do {
+            let envelope = try await ctx.load()
+            guard let env = envelope.envs.first(where: { $0.envSlug == envSlug }) else { throw CLIErrorJSON("env_not_found", detail: envSlug) }
+            let parent = envelope.sites.first { $0.id == env.parentSiteID }
+            do { try await ctx.settler.settle(env, parent: parent) }
+            catch let error as EnvSettlementError { throw CLIErrorJSON("settle_failed", detail: error.description) }
+            if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(envSlug) settled"))) }
+            else { emitLine("Settled \(envSlug). Restore it with: wp-container worktree restore \(envSlug)") }
+        } catch {
+            throw failCommand(error, json: output.json)
+        }
+    }
+}
+
+struct WorktreeRestore: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "restore",
+        abstract: "Bring a settled env back: re-acquire a port and start it."
+    )
+    @Argument(help: "Env slug.") var envSlug: String
+    @OptionGroup var output: JSONOptions
+
+    func run() async throws {
+        let ctx = CLIContext()
+        do {
+            let envelope = try await ctx.load()
+            guard let env = envelope.envs.first(where: { $0.envSlug == envSlug }) else { throw CLIErrorJSON("env_not_found", detail: envSlug) }
+            guard env.isSettled else { throw CLIErrorJSON("not_settled", detail: "\(envSlug) is not settled") }
+            let restored = try await ctx.restore(env, envelope: envelope)
+            if output.json { emitLine(CLIJSON.string(WorktreeDescriptor(from: restored))) }
+            else { emitLine("Restored \(envSlug) at \(restored.url.absoluteString).") }
         } catch {
             throw failCommand(error, json: output.json)
         }
@@ -681,28 +775,9 @@ struct WorktreeFixURLs: AsyncParsableCommand {
                 throw CLIErrorJSON("not_running", detail: "start \(envSlug) first")
             }
 
-            let migrator = EnvURLMigrator(cli: ctx.cli)
-            let target = EnvURLMigration.targetAuthority(for: env)
-            // The env follows its parent's CURRENT scheme; an env without a
-            // parent record keeps whatever it was migrated onto before.
-            let https = parent?.httpsEnabled ?? env.httpsEnabled
-            var discovery = await migrator.discoverOrigins(instance: env, dbHost: dbHost,
-                                                           wordpressFolder: env.wordpressFolder)
-            // The parent's URL is a candidate even when nothing in the database
-            // still spells it: a half-repaired env can carry the parent's domain
-            // in serialized content long after its option rows were fixed. The
-            // env's own loopback-port URL likewise — it is where envs created
-            // before env domains live, and what this moves them off of.
-            if let parent { discovery.candidates.append(parent.url.absoluteString) }
-            discovery.candidates.append(env.localURL.absoluteString)
-            let origins = EnvURLMigration.staleOrigins(candidates: discovery.candidates, target: target,
-                                                       networkDomain: discovery.networkDomain)
-            let multisite = EnvURLMigration.isMultisite(networkType: parent?.networkType ?? .none,
-                                                        constants: discovery.constants)
-            let report = try await migrator.migrate(
-                instance: env, dbHost: dbHost, wordpressFolder: env.wordpressFolder,
-                origins: origins, targetAuthority: target, https: https,
-                multisite: multisite, dryRun: dryRun)
+            let repair = try await ctx.worktrees.fixURLs(env: env, parent: parent, dbHost: dbHost, dryRun: dryRun)
+            let report = repair.report
+            let https = repair.https
 
             // Flip the record onto its domain so every surface advertises it.
             var migrated = env
@@ -717,7 +792,7 @@ struct WorktreeFixURLs: AsyncParsableCommand {
                 }
             }
 
-            let warnings = discovery.warnings + report.warnings
+            let warnings = repair.warnings
             if output.json {
                 emitLine(CLIJSON.string(FixURLsJSON(envSlug: env.envSlug, url: migrated.url.absoluteString,
                                                     report: report, warnings: warnings)))

@@ -62,6 +62,12 @@ Sites are provisioned automatically (no install wizard) and log in with
   # → {"url": "http://my-blog-wt-feature-x.localhost",
   #    "localUrl": "http://127.0.0.1:8882", "path": …, "worktreePath": …}
   ```
+  Envs unused for 7+ days are flagged for **settling**: a settled env stops,
+  leaves the sidebar and gives its ports back, but keeps its checkout, files
+  and database (`wp-container worktree settle|restore <env>`, or the Settle
+  buttons in the app). Settled envs are deleted after 30 days unless that's
+  turned off in Settings → Sites; a checkout with uncommitted changes is
+  left on disk.
 - **`wp-container` CLI** — everything the app does, scriptable, with `--json`
   everywhere: `list`, `create` (`--wp/--php/--multisite/--domain/--group`),
   `start`, `stop`, `delete`, `worktree …`, `wp …` (wp-cli proxy), `xdebug`,

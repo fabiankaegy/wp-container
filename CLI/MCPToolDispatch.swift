@@ -439,7 +439,7 @@ enum MCPToolDispatch {
         let site = try await resolveSite(slug, ctx: ctx)
         // Env fan-out is opt-in (issue #18) — defaults to starting only the site.
         let withEnvs = args["with_envs"]?.boolValue ?? false
-        let envs = withEnvs ? try await ctx.load().envs.filter { $0.parentSiteID == site.id } : []
+        let envs = withEnvs ? try await ctx.load().envs.filter { $0.parentSiteID == site.id && !$0.isSettled } : []
         let noPull = args["no_pull"]?.boolValue ?? false
         let refreshImages = args["refresh_images"]?.boolValue ?? false
         guard !(noPull && refreshImages) else {
@@ -593,7 +593,11 @@ enum MCPToolDispatch {
              // Auto-stop-when-idle (issue #16), so an agent can see whether an env
              // may be parked under it and opt in/out via `set_idle_stop`.
              "idleStopMinutes": e.idleStopMinutes as Any? ?? NSNull(),
-             "effectiveIdleStopMinutes": e.effectiveIdleStopMinutes]
+             "effectiveIdleStopMinutes": e.effectiveIdleStopMinutes,
+             // Settled envs are parked with their port released; any tool that
+             // needs one running restores it.
+             "settled": e.isSettled,
+             "lastUsedAt": ISO8601DateFormatter().string(from: e.lastUsedAt)]
         }
         return MCPResult.json(["envs": envs])
     }

@@ -77,6 +77,11 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
     /// it describes what is in the env's database, which doesn't change when
     /// the parent toggles HTTPS later.
     public var httpsEnabled: Bool
+    /// When the env was settled: stopped and parked with its data kept, its
+    /// ports released for reuse, and its routes dropped from the proxy. nil
+    /// while active. Restoring clears it and re-acquires a port. See
+    /// `EnvSettlement` for the suggestion and auto-purge windows.
+    public var settledAt: Date?
 
     /// Runtime-derived; NOT persisted.
     public var status: SiteStatus = .stopped
@@ -87,7 +92,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
              xdebugEnabled, elasticsearchEnabled, cpuLimit, memoryLimitMB,
              idleStopMinutes, lastActivityAt,
              mailpitEnabled, mailpitPort, redisEnabled, sharedDatabase, databaseSchema,
-             usesDomainURL, httpsEnabled
+             usesDomainURL, httpsEnabled, settledAt
     }
 
     public init(
@@ -116,6 +121,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         databaseSchema: String? = nil,
         usesDomainURL: Bool = false,
         httpsEnabled: Bool = false,
+        settledAt: Date? = nil,
         status: SiteStatus = .stopped
     ) {
         self.id = id
@@ -144,6 +150,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         self.sharedDatabase = sharedDatabase && databaseSchema != nil
         self.usesDomainURL = usesDomainURL
         self.httpsEnabled = httpsEnabled
+        self.settledAt = settledAt
         self.status = status
     }
 
@@ -186,6 +193,20 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         // holds `127.0.0.1:<port>`, so they must keep advertising it.
         self.usesDomainURL = (try? c.decode(Bool.self, forKey: .usesDomainURL)) ?? false
         self.httpsEnabled = (try? c.decode(Bool.self, forKey: .httpsEnabled)) ?? false
+        // Absent in envs written before settling: they are active.
+        self.settledAt = try? c.decodeIfPresent(Date.self, forKey: .settledAt)
+    }
+
+    // MARK: - Settling
+
+    public var isSettled: Bool { settledAt != nil }
+
+    /// The last time the env was used: its latest activity stamp (wp-cli, MCP,
+    /// magic login, explicit starts, and browser traffic the proxy saw), or its
+    /// creation when it has none.
+    public var lastUsedAt: Date {
+        guard let lastActivityAt, lastActivityAt > createdAt else { return createdAt }
+        return lastActivityAt
     }
 
     public var wordpressFolder: URL { envPath.appendingPathComponent("wordpress", isDirectory: true) }

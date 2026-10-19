@@ -194,6 +194,10 @@ struct EnvDetailView: View {
                 InfoRow(label: "Local port") {
                     Text(String(env.port)).monospaced()
                 }
+                InfoRow(label: "Last used") {
+                    Text(EnvUsageText.lastUsed(env))
+                        .foregroundStyle(EnvSettlement.isStale(env) ? .orange : .secondary)
+                }
                 InfoRow(label: "Branch") {
                     Text(env.branch).monospaced().textSelection(.enabled)
                 }
@@ -234,6 +238,18 @@ struct EnvDetailView: View {
     private var dangerZone: some View {
         SectionCard(title: "Danger Zone", systemImage: "exclamationmark.triangle") {
             VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Settle this environment").font(.callout.weight(.medium))
+                        Text("Stops it and frees its port. Its checkout, files and database are kept until you restore it from the site’s Branches card.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    Button("Settle") { vm.settleEnvs([env]) }
+                        .buttonStyle(.bordered)
+                }
+                Divider().opacity(0.5)
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Delete this environment").font(.callout.weight(.medium))

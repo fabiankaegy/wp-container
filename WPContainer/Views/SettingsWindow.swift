@@ -375,6 +375,8 @@ private struct SitesSettingsPane: View {
     @AppStorage(AppSettings.defaultWPDebugKey) private var defaultWPDebug = true
     @AppStorage(AppSettings.defaultScriptDebugKey) private var defaultScriptDebug = true
     @AppStorage(AppSettings.defaultGlobalWPRouterKey) private var defaultGlobalWPRouter = true
+    @AppStorage(AppSettings.autoPurgeSettledEnvsKey) private var autoPurgeSettledEnvs = true
+    @AppStorage(AppSettings.purgeSettledAfterDaysKey) private var purgeSettledAfterDays = EnvSettlement.defaultPurgeAfterDays
 
     @State private var choosingFolder = false
 
@@ -467,6 +469,23 @@ private struct SitesSettingsPane: View {
                         Label("This WordPress × PHP combination may not be published on Docker Hub.",
                               systemImage: "exclamationmark.triangle")
                             .font(.caption).foregroundStyle(.orange)
+                    }
+                }
+            }
+
+            SectionCard(title: "Branch Environments", systemImage: "arrow.triangle.branch") {
+                VStack(alignment: .leading, spacing: 12) {
+                    SettingRow(title: "Delete settled environments",
+                               explanation: "Settling stops an environment and frees its port but keeps its data. Settled environments are deleted after this long. A worktree checkout with uncommitted changes stays on disk, and branches are never deleted.") {
+                        Toggle("", isOn: $autoPurgeSettledEnvs).labelsHidden().toggleStyle(.switch)
+                    }
+                    SettingRow(title: "Delete after",
+                               explanation: "How long an environment stays settled before it's deleted.") {
+                        Picker("", selection: $purgeSettledAfterDays) {
+                            ForEach(EnvSettlement.purgeAfterDayChoices, id: \.self) { Text("\($0) days").tag($0) }
+                        }
+                        .labelsHidden().fixedSize()
+                        .disabled(!autoPurgeSettledEnvs)
                     }
                 }
             }
