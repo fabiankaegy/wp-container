@@ -8,6 +8,7 @@ struct GalleryView: View {
     @Environment(AppViewModel.self) private var vm
     let item: LibraryItem
     @State private var search = ""
+    @FocusState private var searchFocused: Bool
 
     private let columns = [GridItem(.adaptive(minimum: 230, maximum: 340), spacing: 20, alignment: .top)]
 
@@ -45,9 +46,14 @@ struct GalleryView: View {
                 .background { Color.clear.contentShape(Rectangle()).onTapGesture { vm.selection = nil } }
             }
         }
-        .searchable(text: $search, placement: .toolbarPrincipal, prompt: "Search Sites")
+        // A fixed-width field beside the other actions rather than `.searchable`:
+        // the system placements either drift over the inspector or claim so much
+        // width that a narrow window pushes every action into the overflow menu.
         .toolbar {
             ToolbarSpacer(.flexible)
+            ToolbarItem {
+                ToolbarSearchField(text: $search, prompt: "Search Sites", focused: $searchFocused)
+            }
             ToolbarItem {
                 @Bindable var vm = vm
                 Picker("View", selection: $vm.libraryStyle) {
@@ -67,6 +73,7 @@ struct GalleryView: View {
     }
 
     private struct GallerySection { let title: String?; let sites: [Site] }
+
 
     private var sections: [GallerySection] {
         let q = search.trimmingCharacters(in: .whitespaces).lowercased()
@@ -329,5 +336,38 @@ private struct StripChipStyle: ButtonStyle {
             .foregroundStyle(tint == .secondary ? Color.secondary : tint)
             .frame(maxWidth: 150, alignment: .leading)
             .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// A compact search field for the toolbar: magnifier, text, clear button.
+/// ⌘F focuses it and Escape clears it.
+struct ToolbarSearchField: View {
+    @Binding var text: String
+    let prompt: String
+    var focused: FocusState<Bool>.Binding
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField(prompt, text: $text)
+                .textFieldStyle(.plain)
+                .focused(focused)
+                .onKeyPress(.escape) { text = ""; focused.wrappedValue = false; return .handled }
+            if !text.isEmpty {
+                Button { text = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary) }
+                    .buttonStyle(.plain)
+                    .help("Clear Search")
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(width: 180)
+        .background {
+            // Invisible ⌘F target, so the shortcut works without a menu item.
+            Button("Find") { focused.wrappedValue = true }
+                .keyboardShortcut("f", modifiers: .command)
+                .hidden()
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(prompt)
     }
 }
