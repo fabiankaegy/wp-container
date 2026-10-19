@@ -29,7 +29,9 @@ public enum SiteIconQuery {
     /// to `$table_prefix`, which covers both `'wp_'` and the official image's
     /// `getenv_docker('WORDPRESS_TABLE_PREFIX', 'wp_')`. Defaults to `wp_`.
     public static func tablePrefix(fromWPConfig config: String) -> String {
-        guard let line = config.split(separator: "\n").first(where: { $0.contains("$table_prefix") && $0.contains("=") }),
+        // Split on any line ending: in Swift "\r\n" is ONE character, so a
+        // CRLF wp-config.php never splits on "\n" alone.
+        guard let line = config.split(whereSeparator: \.isNewline).first(where: { $0.contains("$table_prefix") && $0.contains("=") }),
               let assignment = line.split(separator: "=", maxSplits: 1).last else { return "wp_" }
         let literals = assignment.matches(of: #/['"]([A-Za-z0-9_]*)['"]/#).map { String($0.output.1) }
         return literals.last.flatMap { $0.isEmpty ? nil : $0 } ?? "wp_"

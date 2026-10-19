@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import OSLog
 import WPContainerKit
 
 /// Each running site's WordPress Site Icon (the `site_icon` option), resolved
@@ -22,14 +23,18 @@ final class SiteIcons {
         for site in running where !resolved.contains(site.id) {
             resolved.insert(site.id)
             var file: URL?
-            if let relative = await SiteIconQuery.attachmentPath(for: site, cli: cli) {
+            let relative = await SiteIconQuery.attachmentPath(for: site, cli: cli)
+            if let relative {
                 file = SiteIconQuery.localFile(for: site, relativePath: relative)
                 if file == nil { file = await Self.download(relative, from: site) }
             }
+            Self.log.notice("\(site.slug, privacy: .public): site_icon \(relative ?? "none", privacy: .public) → \(file?.path ?? "no file", privacy: .public)")
             await FaviconImageCache.shared.setPreferred(file, wordpressFolder: site.wordpressFolder)
             version += 1
         }
     }
+
+    private static let log = Logger(subsystem: "com.fabiankaegy.wpcontainer", category: "SiteIcons")
 
     private static let folder: URL = {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -46,9 +51,14 @@ final class SiteIcons {
         if FileManager.default.fileExists(atPath: cached.path) { return cached }
         let url = site.url.appendingPathComponent("wp-content/uploads").appendingPathComponent(relative)
         let request = URLRequest(url: url, timeoutInterval: 15)
-        guard let (data, response) = try? await URLSession.shared.data(for: request, delegate: LocalTrust(host: url.host())),
-              let http = response as? HTTPURLResponse, http.statusCode == 200,
-              http.mimeType?.hasPrefix("image/") == true, data.count < 2_000_000 else { return nil }
+        let data: Data, response: URLResponse
+        do { (data, response) = try await URLSession.shared.data(for: request, delegate: LocalTrust(host: url.host())) }
+        catch { log.error("\(url.absoluteString, privacy: .public): \(error.localizedDescription, privacy: .public)"); return nil }
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              http.mimeType?.hasPrefix("image/") == true, data.count < 2_000_000 else {
+            log.error("\(url.absoluteString, privacy: .public): unusable response \((response as? HTTPURLResponse)?.statusCode ?? 0)")
+            return nil
+        }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         return (try? data.write(to: cached, options: .atomic)) == nil ? nil : cached
     }

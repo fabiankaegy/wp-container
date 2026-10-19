@@ -9,6 +9,11 @@ final class SiteIconQueryTests: XCTestCase {
         XCTAssertEqual(SiteIconQuery.tablePrefix(fromWPConfig: config), "wp_")
     }
 
+    func testPrefixFromCRLFConfig() {
+        let config = "<?php\r\ndefine( 'ABSPATH', __DIR__ );\r\n$table_prefix = getenv_docker('WORDPRESS_TABLE_PREFIX', 'wp_');\r\ndefine( 'WP_DEBUG', false );\r\n"
+        XCTAssertEqual(SiteIconQuery.tablePrefix(fromWPConfig: config), "wp_")
+    }
+
     func testPrefixFromPlainAssignment() {
         XCTAssertEqual(SiteIconQuery.tablePrefix(fromWPConfig: "$table_prefix  = \"nw7_\";"), "nw7_")
     }
