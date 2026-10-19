@@ -96,6 +96,13 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
              url: url, faviconFolder: faviconFolder)
     }
 
+    /// Settled environments were purged after the auto-purge window.
+    func notifyEnvsPurged(branches: [String], keptCheckouts: Int) {
+        let kept = keptCheckouts == 0 ? "" : " Kept \(keptCheckouts) checkout\(keptCheckouts == 1 ? "" : "s") with uncommitted changes."
+        post(title: "Purged \(branches.count) settled environment\(branches.count == 1 ? "" : "s")",
+             body: branches.joined(separator: ", ") + "." + kept, url: nil, faviconFolder: nil)
+    }
+
     /// (4) WordPress core update finished.
     func notifyCoreUpdated(name: String) {
         post(title: "WordPress updated", body: "Core update finished for “\(name)”.", url: nil, faviconFolder: nil)

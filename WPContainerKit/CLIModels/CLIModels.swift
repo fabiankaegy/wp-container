@@ -73,6 +73,10 @@ public struct EnvJSON: Codable, Sendable {
     /// Last recorded deliberate use — wp-cli, an MCP tool call, magic-login or an
     /// explicit start — from any process. null when never observed.
     public let lastActivityAt: Date?
+    /// `lastActivityAt`, or the creation date when there is none.
+    public let lastUsedAt: Date
+    /// When the env was settled (parked with its port released); null while active.
+    public let settledAt: Date?
 
     public init(from env: WorktreeEnv) {
         self.id = env.id.uuidString
@@ -89,6 +93,8 @@ public struct EnvJSON: Codable, Sendable {
         self.idleStopMinutes = env.idleStopMinutes
         self.effectiveIdleStopMinutes = env.effectiveIdleStopMinutes
         self.lastActivityAt = env.lastActivityAt
+        self.lastUsedAt = env.lastUsedAt
+        self.settledAt = env.settledAt
     }
 }
 

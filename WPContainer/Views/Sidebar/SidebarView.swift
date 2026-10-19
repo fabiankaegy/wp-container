@@ -96,7 +96,8 @@ struct SidebarView: View {
     /// branch glyph instead of an avatar, and are selectable like sites.
     @ViewBuilder
     private func siteBlock(_ site: Site) -> some View {
-        let envs = vm.store.envs(forSite: site.id)
+        // Settled envs leave the sidebar; the site's Branches card lists them.
+        let envs = vm.store.envs(forSite: site.id).filter { !$0.isSettled }
         SidebarSiteRow(site: site, groups: groups,
                        envCount: envs.count,
                        isExpanded: !envCollapsed.contains(site.id),
@@ -425,7 +426,7 @@ struct SidebarEnvRow: View {
                     .font(.callout.weight(.medium))
                     .foregroundStyle(Theme.onFrame)
                     .lineLimit(1)
-                Text("localhost:\(String(env.port))")
+                Text(EnvSettlement.isStale(env) ? EnvUsageText.lastUsed(env) : "localhost:\(String(env.port))")
                     .font(.caption2)
                     .foregroundStyle(Theme.onFrameSecondary)
                     .lineLimit(1)
@@ -483,6 +484,7 @@ struct SidebarEnvRow: View {
 
         Divider()
 
+        Button("Settle", systemImage: "archivebox") { vm.settleEnvs([env]) }
         Button("Delete Environment…", systemImage: "trash", role: .destructive) { confirmingDelete = true }
     }
 

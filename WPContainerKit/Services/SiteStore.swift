@@ -46,8 +46,7 @@ public final class SiteStore {
     // MARK: - Derived sets
 
     public var takenPorts: Set<Int> {
-        Set(sites.map(\.port)).union(envs.map(\.port))
-            .union(SidecarAddons.reservedHostPorts(sites: sites, envs: envs))
+        PortAllocator.reservedPorts(sites: sites, envs: envs)
     }
     public var existingSlugs: Set<String> {
         Set(sites.map(\.slug))

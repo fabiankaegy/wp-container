@@ -17,6 +17,15 @@ public enum PortAllocator {
         return nil
     }
 
+    /// Ports these instances hold: every site's, every active env's, and the
+    /// host ports of their sidecars. A settled env holds none, so its ports can
+    /// be handed out again.
+    public static func reservedPorts(sites: [Site], envs: [WorktreeEnv]) -> Set<Int> {
+        let active = envs.filter { !$0.isSettled }
+        return Set(sites.map(\.port)).union(active.map(\.port))
+            .union(SidecarAddons.reservedHostPorts(sites: sites, envs: active))
+    }
+
     /// Bind-test a TCP port on 127.0.0.1.
     public static func isPortFree(_ port: Int) -> Bool {
         let fd = socket(AF_INET, SOCK_STREAM, 0)

@@ -107,6 +107,15 @@ public actor GitService {
         try await git(args, cwd: repo)
     }
 
+    /// Whether the checkout at `path` has uncommitted changes, untracked files
+    /// included. A missing checkout has none. Any other git failure reads as
+    /// dirty, so a caller deciding whether removal is safe errs toward keeping it.
+    public func hasUncommittedChanges(at path: URL) async -> Bool {
+        guard FileManager.default.fileExists(atPath: path.path) else { return false }
+        guard let status = try? await git(["-C", path.path, "status", "--porcelain"], cwd: path) else { return true }
+        return !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     private func relativePath(of url: URL, from base: URL) -> String {
         let baseComps = base.standardizedFileURL.pathComponents
         let urlComps = url.standardizedFileURL.pathComponents

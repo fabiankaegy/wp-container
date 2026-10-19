@@ -26,6 +26,7 @@ public final class AppViewModel {
     @ObservationIgnored let git: GitService
     @ObservationIgnored let lifecycle: SiteLifecycle
     @ObservationIgnored let worktrees: WorktreeEnvService
+    @ObservationIgnored let settler: EnvSettler
     @ObservationIgnored let systemCheck: SystemCheck
     @ObservationIgnored let ca: CertificateAuthority
     @ObservationIgnored let httpsIntegration: HTTPSIntegration
@@ -88,6 +89,7 @@ public final class AppViewModel {
     public var versionMatrix: WordPressVersionMatrix = WordPressImageCatalog.fallbackMatrix
 
     @ObservationIgnored private var reconcileTask: Task<Void, Never>?
+    @ObservationIgnored private var purgeTask: Task<Void, Never>?
     @ObservationIgnored private var statusTask: Task<Void, Never>?
     @ObservationIgnored private var started = false
 
@@ -98,7 +100,9 @@ public final class AppViewModel {
         self.cli = cli
         self.git = git
         self.lifecycle = lifecycle
-        self.worktrees = WorktreeEnvService(cli: cli, git: git, lifecycle: lifecycle)
+        let worktrees = WorktreeEnvService(cli: cli, git: git, lifecycle: lifecycle)
+        self.worktrees = worktrees
+        self.settler = EnvSettler(persistence: StorePersistence(), lifecycle: lifecycle, worktrees: worktrees, cli: cli)
         self.systemCheck = SystemCheck(cli: cli)
         let ca = CertificateAuthority()
         self.ca = ca
@@ -130,6 +134,7 @@ public final class AppViewModel {
         await refreshCATrusted()
         observeStatusEvents()
         startReconcileLoop()
+        startPurgeLoop()
         installIdleStopHook()
         // Adopt an already-running headless proxy, if any.
         proxyPort = ProxyControl.current()?.port
@@ -790,6 +795,7 @@ public final class AppViewModel {
 
     public func stopLoops() {
         reconcileTask?.cancel(); reconcileTask = nil
+        purgeTask?.cancel(); purgeTask = nil
         statusTask?.cancel(); statusTask = nil
     }
 
@@ -1064,7 +1070,8 @@ public final class AppViewModel {
             // idle sweep can't park it before they've done anything with it. Wakes
             // deliberately don't stamp — that would let the sweep feed itself.
             await store.recordActivity(id: site.id)
-            let envs = includeEnvs ? store.envs(forSite: site.id) : []
+            // Settled envs stay parked; starting one restores it.
+            let envs = includeEnvs ? store.envs(forSite: site.id).filter { !$0.isSettled } : []
             // An HTTPS/custom-domain site is unreachable without the reverse
             // proxy — ensure it's listening whenever such a site starts (covers
             // proxy crashed/killed/never-started cases, §2f fix). So is every
@@ -1221,6 +1228,7 @@ public final class AppViewModel {
     }
 
     public func startEnv(_ env: WorktreeEnv) {
+        guard !env.isSettled else { return restoreEnv(env) }
         Task {
             // An env's URL is SERVED BY THE PROXY (issue #16 follow-through): its
             // container publishes no host port, so without the proxy (on 443/80
@@ -1270,6 +1278,64 @@ public final class AppViewModel {
             try? await ca.removeLeafCoverage([env.domainHost])
         }
     }
+
+    // MARK: - Settling (see `EnvSettlement`)
+
+    /// Settle envs: stop each, release its ports and keep its data. Sequential,
+    /// so a batch doesn't race to retire the parent's shared DB container.
+    public func settleEnvs(_ envs: [WorktreeEnv]) {
+        Task {
+            for env in envs where !env.isSettled {
+                do { try await settler.settle(env, parent: store.site(id: env.parentSiteID)) }
+                catch { lastError = SiteLifecycleErrorText(error) }
+                if selection == env.id { selection = env.parentSiteID }
+            }
+            await store.reload()
+        }
+    }
+
+    /// Bring a settled env back on a port and start it. A legacy env that lands
+    /// on a new port gets its URLs migrated onto its domain.
+    public func restoreEnv(_ env: WorktreeEnv) {
+        Task {
+            await ensureProxyRunning()
+            do {
+                let (_, warnings) = try await settler.restore(env, parent: store.site(id: env.parentSiteID))
+                if !warnings.isEmpty { lastError = warnings.joined(separator: "\n") }
+            } catch {
+                lastError = SiteLifecycleErrorText(error)
+            }
+            await store.reload()
+        }
+    }
+
+    /// Purge settled envs on launch and hourly after.
+    private func startPurgeLoop() {
+        guard purgeTask == nil else { return }
+        purgeTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.purgeSettledEnvs()
+                try? await Task.sleep(for: .seconds(3600))
+            }
+        }
+    }
+
+    /// Delete envs that stayed settled past the window in Settings. A checkout
+    /// with uncommitted changes stays on disk; the env itself goes either way,
+    /// and the branch is always kept.
+    private func purgeSettledEnvs() async {
+        guard AppSettings.autoPurgeSettledEnvs else { return }
+        let days = AppSettings.purgeSettledAfterDays
+        let due = store.envs.filter { EnvSettlement.isDueForPurge($0, afterDays: days) }
+        guard !due.isEmpty else { return }
+        var kept = 0
+        for env in due {
+            let dirty = await git.hasUncommittedChanges(at: env.worktreePath)
+            if dirty { kept += 1 }
+            deleteEnv(env, keepWorktree: dirty)
+        }
+        notifications.notifyEnvsPurged(branches: due.map(\.branch), keptCheckouts: kept)
+    }
 }
 
 /// Best-effort human-readable text for surfaced errors.
@@ -1278,5 +1344,6 @@ private func SiteLifecycleErrorText(_ error: Error) -> String {
     if let e = error as? LifecycleError { return e.description }
     if let e = error as? GitError { return e.description }
     if let e = error as? WorktreeError { return e.description }
+    if let e = error as? EnvSettlementError { return e.description }
     return "\(error)"
 }

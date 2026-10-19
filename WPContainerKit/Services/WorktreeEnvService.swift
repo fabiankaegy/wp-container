@@ -133,9 +133,7 @@ public actor WorktreeEnvService {
     public static func reservedDescriptor(parent: Site, repoRelPath: String, branch: String,
                                           port: Int, into envelope: inout StoreEnvelope) -> WorktreeEnv {
         var env = descriptor(parent: parent, repoRelPath: repoRelPath, branch: branch, port: port)
-        var taken = Set(envelope.sites.map(\.port)).union(envelope.envs.map(\.port))
-            .union(SidecarAddons.reservedHostPorts(sites: envelope.sites, envs: envelope.envs))
-            .union([port])
+        var taken = PortAllocator.reservedPorts(sites: envelope.sites, envs: envelope.envs).union([port])
         for addon in SidecarAddons.enabled(for: env) where addon.publishesHostPort {
             guard let hostPort = PortAllocator.firstFreePort(from: port + 1, excluding: taken) else { continue }
             addon.setHostPort(hostPort, on: &env)
@@ -456,6 +454,49 @@ public actor WorktreeEnvService {
         env.httpsEnabled = parent.httpsEnabled
         env.usesDomainURL = true
         return report.warnings
+    }
+
+    /// What `fixURLs` did: the migration report, every warning it raised, and
+    /// the scheme the env was moved onto.
+    public struct URLRepair: Sendable {
+        public let report: URLMigrationReport
+        public let warnings: [String]
+        public let https: Bool
+    }
+
+    /// Move every origin the env's database actually holds onto its domain
+    /// (`worktree fix-urls`, and a restore that changed a loopback-URL env's
+    /// port). Discovers home/siteurl on every (sub)site, the multisite domain
+    /// columns and DOMAIN_CURRENT_SITE, plus the parent's URL and the env's own
+    /// `127.0.0.1:<port>`, and any `extraCandidates` (a restored env's previous
+    /// port). The env must be running. The caller persists `usesDomainURL = true`
+    /// and the returned scheme unless `dryRun`.
+    public func fixURLs(env: WorktreeEnv, parent: Site?, dbHost: String, dryRun: Bool,
+                        extraCandidates: [String] = []) async throws -> URLRepair {
+        let migrator = EnvURLMigrator(cli: cli)
+        let target = EnvURLMigration.targetAuthority(for: env)
+        // The env follows its parent's CURRENT scheme; an env without a parent
+        // record keeps whatever it was migrated onto before.
+        let https = parent?.httpsEnabled ?? env.httpsEnabled
+        var discovery = await migrator.discoverOrigins(instance: env, dbHost: dbHost,
+                                                       wordpressFolder: env.wordpressFolder)
+        // The parent's URL is a candidate even when nothing in the database
+        // still spells it: a half-repaired env can carry the parent's domain in
+        // serialized content long after its option rows were fixed. The env's
+        // own loopback-port URL likewise — it is where envs created before env
+        // domains live, and what this moves them off of.
+        if let parent { discovery.candidates.append(parent.url.absoluteString) }
+        discovery.candidates.append(env.localURL.absoluteString)
+        discovery.candidates += extraCandidates
+        let origins = EnvURLMigration.staleOrigins(candidates: discovery.candidates, target: target,
+                                                   networkDomain: discovery.networkDomain)
+        let multisite = EnvURLMigration.isMultisite(networkType: parent?.networkType ?? .none,
+                                                    constants: discovery.constants)
+        let report = try await migrator.migrate(
+            instance: env, dbHost: dbHost, wordpressFolder: env.wordpressFolder,
+            origins: origins, targetAuthority: target, https: https,
+            multisite: multisite, dryRun: dryRun)
+        return URLRepair(report: report, warnings: discovery.warnings + report.warnings, https: https)
     }
 
     // MARK: - Live DB clone (parent running)
