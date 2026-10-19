@@ -601,6 +601,62 @@ public enum SiteRecipe {
         return args
     }
 
+    /// The host directory behind a container path inside one of the instance's
+    /// bind mounts, or nil. The inverse of `containerPath(forHostPath:in:)`;
+    /// extra mounts win because they shadow part of `wordpress/`.
+    public static func hostPath(forContainerPath containerPath: String, in inst: any RunnableInstance) -> URL? {
+        let base = Mount(hostPath: inst.wordpressFolder.path, containerPath: wordpressContainerPath)
+        for mount in inst.extraMounts + [base] {
+            if containerPath == mount.containerPath { return URL(fileURLWithPath: mount.hostPath, isDirectory: true) }
+            if containerPath.hasPrefix(mount.containerPath + "/") {
+                let rest = String(containerPath.dropFirst(mount.containerPath.count + 1))
+                return URL(fileURLWithPath: mount.hostPath, isDirectory: true).appendingPathComponent(rest, isDirectory: true)
+            }
+        }
+        return nil
+    }
+
+    // MARK: - PHPUnit (`wp-container test`)
+
+    /// `CREATE DATABASE IF NOT EXISTS <schema>` + grant to the `wordpress` user,
+    /// run inside the instance's (running) database container.
+    public static func createTestDatabaseArgs(_ inst: any RunnableInstance, schema: String) -> [String] {
+        ["exec", inst.dbContainerName, "mariadb", "-uroot", "-p\(dbRootPassword)", "-e", """
+        CREATE DATABASE IF NOT EXISTS `\(schema)`; \
+        GRANT ALL PRIVILEGES ON `\(schema)`.* TO '\(dbUser)'@'%'; \
+        FLUSH PRIVILEGES;
+        """]
+    }
+
+    /// One-shot `container run` args that run PHPUnit in `workdir` on the
+    /// instance's own WordPress image, against the test schema. The managed
+    /// `php/` handlers are left out, so tests run on stock PHP; the test
+    /// library is mounted at `TestSuite.libraryContainerPath`. `timeLimit`
+    /// stops PHPUnit after that many seconds (see `timeLimited`).
+    public static func runTestsArgs(_ inst: any RunnableInstance, dbHost: String, library: URL, schema: String,
+                                    workdir: String, phpunitArgs: [String], polyfillsPath: String? = nil,
+                                    interactive: Bool = false, tty: Bool = false,
+                                    sidecarEnvironment: [String] = [], timeLimit: Int? = nil) -> [String] {
+        var args = wpCLIBaseArgs(inst, dbHost: dbHost)
+        args += [
+            "-v", "\(library.path):\(TestSuite.libraryContainerPath)",
+            "-e", "WP_TESTS_DIR=\(TestSuite.libraryContainerPath)",
+            "-e", "WP_PHPUNIT__TESTS_CONFIG=\(TestSuite.libraryContainerPath)/\(TestSuite.configFileName)",
+            "-e", "\(TestSuite.databaseEnvKey)=\(schema)",
+            // Later `-e` wins: nothing in the run can reach the site's own schema.
+            "-e", "WORDPRESS_DB_NAME=\(schema)",
+        ]
+        if let polyfillsPath { args += ["-e", "WP_TESTS_PHPUNIT_POLYFILLS_PATH=\(polyfillsPath)"] }
+        for assignment in sidecarEnvironment {
+            args += ["-e", assignment]
+        }
+        args += processArgs(workdir: workdir, env: [], interactive: interactive, tty: tty)
+        args.append(inst.imageTag)
+        let phpunit = ["vendor/bin/phpunit"] + phpunitArgs
+        args += timeLimit.map { timeLimited(phpunit, seconds: $0) } ?? phpunit
+        return args
+    }
+
     /// Exit status of `timeout` (coreutils and BusyBox) when the limit is hit.
     public static let timeoutExitCode: Int32 = 124
 

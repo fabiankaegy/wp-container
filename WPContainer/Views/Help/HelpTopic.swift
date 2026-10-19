@@ -346,7 +346,8 @@ extension HelpTopic {
                 bullets: [
                     "`wp-container list` — show every site and branch environment with status, URL, and port.",
                     "`wp-container worktree create` — create a branch environment (auto-provisioned by default).",
-                    "`wp-container run <site> -- <command>` — run any command in the site's container (`php`, `vendor/bin/phpunit`); add `--image composer:2` for tools the WordPress image lacks.",
+                    "`wp-container run <site> -- <command>` — run any command in the site's container (`php`, `wp`); add `--image composer:2` for tools the WordPress image lacks.",
+                    "`wp-container test <site> -- <phpunit args>` — run a plugin or theme's PHPUnit tests against a separate test database, with the WordPress test library set up for you (`WP_TESTS_DIR`).",
                 ]
             ),
         ]

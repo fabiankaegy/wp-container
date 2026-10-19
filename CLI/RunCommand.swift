@@ -83,7 +83,7 @@ struct RunCommand: AsyncParsableCommand {
 
 /// Replace this process with `executable`, so the command owns the terminal,
 /// receives signals directly, and its exit status becomes this command's.
-private func replaceProcess(executable: String, args: [String]) throws -> Never {
+func replaceProcess(executable: String, args: [String]) throws -> Never {
     let argv = ([executable] + args).map { strdup($0) } + [nil]
     execv(executable, argv)
     throw CLIErrorJSON("exec_failed", detail: String(cString: strerror(errno)))

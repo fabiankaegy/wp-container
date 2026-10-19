@@ -17,7 +17,7 @@ public enum AgentToolsService {
     /// Canonical MCP tool names (single source of truth shared with the server
     /// and the doc so they never drift).
     public static let mcpToolNames: [String] = [
-        "wp_cli", "run_command", "read_error_log", "read_access_log", "wp_debug_toggle",
+        "wp_cli", "run_command", "run_tests", "read_error_log", "read_access_log", "wp_debug_toggle",
         "read_wp_config", "edit_wp_config", "get_site_info", "site_health_check",
         "site_start", "site_stop", "site_restart", "site_status", "list_sites",
         "worktree_create", "worktree_list", "worktree_delete",
@@ -212,12 +212,21 @@ public enum AgentToolsService {
 
         ## Running other commands
 
-        Run PHP, tests, and build tools inside the site's container; the working directory
+        Run PHP and build tools inside the site's container; the working directory
         follows your current folder:
 
         ```bash
-        wp-container run \(site.slug) -- vendor/bin/phpunit
         wp-container run \(site.slug) --image composer:2 -- composer install
+        ```
+
+        ## Running PHPUnit tests
+
+        `wp-container test` runs the project's `vendor/bin/phpunit` (WP_UnitTestCase)
+        against a separate test database, with the WordPress test library as
+        `WP_TESTS_DIR`. Run it from the project folder, or pass `--path`:
+
+        ```bash
+        wp-container test \(site.slug) -- --filter test_example
         ```
 
         ## Branch environments (git worktrees)

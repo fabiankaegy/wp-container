@@ -23,6 +23,14 @@ enum MCPTools {
                 "args": strArray("wp-cli arguments, e.g. [\"plugin\",\"list\"] (no leading 'wp')."),
                 "command": str("Alternative to args: a single command string, e.g. \"plugin list\"."),
              ])),
+        Tool(name: "run_tests",
+             description: "Run a plugin or theme's PHPUnit tests (vendor/bin/phpunit, WP_UnitTestCase) against a site or environment, like `wp-env run tests-cli phpunit`. Uses a dedicated test schema (the site's data is never touched) and the WordPress test library for the site's WordPress version (WP_TESTS_DIR). The project directory follows the server's current directory when it is inside the instance's files, else pass `path`. Install dev dependencies first with run_command (image composer:2, command [\"composer\",\"install\"]). Auto-starts the instance. Returns {stdout, stderr, exitCode, timedOut, summary {passed, tests, assertions, failures, errors, skipped, …}, workdir, schema}.",
+             inputSchema: obj([
+                "path": str("Project directory in the container: absolute, or relative to /var/www/html (e.g. wp-content/plugins/my-plugin)."),
+                "args": strArray("PHPUnit arguments, e.g. [\"--filter\",\"test_checkout\"]."),
+                "timeout": int("Seconds before PHPUnit is stopped (default 1800)."),
+                "slug": str("Site or environment slug (defaults to the scoped site)."),
+             ])),
         Tool(name: "run_command",
              description: "Run a command inside a site or environment's WordPress container (php, vendor/bin/phpunit, wp), or in a one-shot container of `image` with the same mounts and environment (composer:2, node:20). The working directory follows the server's current directory when it is inside the instance's files, else /var/www/html. Auto-starts the instance. Returns {stdout, stderr, exitCode, timedOut, workdir}.",
              inputSchema: obj([

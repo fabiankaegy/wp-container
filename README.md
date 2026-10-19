@@ -98,9 +98,9 @@ Sites are provisioned automatically (no install wizard) and log in with
 - **MCP agent tools** — `wp-container agent-tools enable <site> [--root …]` writes
   `.mcp.json` (+ Cursor/VS Code configs) and a marked `AGENTS.md` block into a
   chosen root (site folder, or your `wp-content` repo root for IDE discovery);
-  the bundled MCP stdio server (`wp-container mcp --site <slug>`) exposes 24 tools
+  the bundled MCP stdio server (`wp-container mcp --site <slug>`) exposes 26 tools
   in the spirit of [10up/localwp-agent-tools](https://github.com/10up/localwp-agent-tools):
-  `wp_cli`, `run_command`, log readers, `wp-config` editing, site info/health, start/stop/status,
+  `wp_cli`, `run_command`, `run_tests`, log readers, `wp-config` editing, site info/health, start/stop/status,
   `list_sites`, `worktree_*`, `xdebug_toggle` / `elasticsearch_toggle`, plus
   `login_link` / `create_user`.
 - **Agent-friendly login** — `wp-container login <site>` prints a one-time magic
@@ -121,10 +121,16 @@ Sites are provisioned automatically (no install wizard) and log in with
   button; and the MCP `wp_cli` tool.
 - **Run any command in a site** — `wp-container run <site|env> -- <command>` runs
   in the live WordPress container with its database, Mailpit, Elasticsearch, and
-  PHP environment (`php`, `vendor/bin/phpunit`); `--image composer:2` or
+  PHP environment (`php`, `wp`); `--image composer:2` or
   `--image node:20` runs a one-shot container with the same mounts for tools the
   WordPress image lacks. The working directory follows your current folder, and
   the MCP `run_command` tool exposes the same to agents.
+- **PHPUnit integration tests, wp-env style** — `wp-container test <site|env> --
+  <phpunit args>` runs a plugin or theme's `vendor/bin/phpunit` against a
+  dedicated test schema (the site's data is never touched), with the WordPress
+  test library for the site's version downloaded once and exposed as
+  `WP_TESTS_DIR`. Run it from the project folder or pass `--path`; the MCP
+  `run_tests` tool returns pass/fail counts to agents.
 - **Dev-ready by default** — every site gets `WP_DEVELOPMENT_MODE=all` /
   `WP_ENVIRONMENT_TYPE=local`, with live `WP_DEBUG`-family switches in
   Settings → Development.
