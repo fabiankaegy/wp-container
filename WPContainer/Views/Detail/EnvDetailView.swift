@@ -122,11 +122,11 @@ struct EnvDetailView: View {
 
     private var actionBar: some View {
         HStack(spacing: 8) {
-            actionButton("Open", "safari") { SystemActions.openInBrowser(env.localURL) }
+            actionButton("Open", "safari") { SystemActions.openInBrowser(env.url) }
                 .disabled(!env.status.isRunning)
             actionButton("WP Admin", "person.badge.key") { SystemActions.openInBrowser(env.adminURL) }
                 .disabled(!env.status.isRunning)
-            actionButton("Copy URL", "link") { SystemActions.copyToClipboard(env.localURL.absoluteString) }
+            actionButton("Copy URL", "link") { SystemActions.copyToClipboard(env.url.absoluteString) }
             actionButton("Finder", "folder") { SystemActions.revealInFinder(env.envPath) }
             // Envs open the worktree checkout — that's the branch you edit.
             OpenInButton(folder: env.worktreePath)
@@ -149,8 +149,8 @@ struct EnvDetailView: View {
             VStack(alignment: .leading, spacing: 10) {
                 InfoRow(label: "URL") {
                     HStack(spacing: 6) {
-                        Link(env.localURL.absoluteString, destination: env.localURL)
-                        CopyButton(value: env.localURL.absoluteString)
+                        Link(env.url.absoluteString, destination: env.url)
+                        CopyButton(value: env.url.absoluteString)
                     }
                 }
                 // This URL is the reverse proxy's to serve: an environment's
@@ -181,6 +181,15 @@ struct EnvDetailView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 case .owned, .unknown:
                     EmptyView()
+                }
+                // An env on its domain still answers on its loopback port too.
+                if env.url != env.localURL {
+                    InfoRow(label: "Local URL") {
+                        HStack(spacing: 6) {
+                            Text(env.localURL.absoluteString).foregroundStyle(.secondary).textSelection(.enabled)
+                            CopyButton(value: env.localURL.absoluteString, help: "Copy local URL")
+                        }
+                    }
                 }
                 InfoRow(label: "Local port") {
                     Text(String(env.port)).monospaced()

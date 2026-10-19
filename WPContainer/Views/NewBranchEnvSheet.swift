@@ -161,9 +161,9 @@ struct NewBranchEnvSheet: View {
             Text("Branch \(env.branch) of \(env.repoRelPath)")
                 .font(.callout).foregroundStyle(.secondary)
             HStack(spacing: 8) {
-                Button(env.localURL.absoluteString) { SystemActions.openInBrowser(env.localURL) }
+                Button(env.url.absoluteString) { SystemActions.openInBrowser(env.url) }
                     .buttonStyle(.link)
-                CopyButton(value: env.localURL.absoluteString)
+                CopyButton(value: env.url.absoluteString)
             }
             .padding(.top, 4)
         }

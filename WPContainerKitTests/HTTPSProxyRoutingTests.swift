@@ -60,6 +60,30 @@ final class HTTPSProxyRoutingTests: XCTestCase {
         XCTAssertEqual(route?.slug, "my-site-wt-authors")
     }
 
+    // MARK: - Env domains
+
+    func testLongEnvSlugRoutesAndIsCoveredUnderItsDNSSafeHost() {
+        let slug = "my-site-wt-" + String(repeating: "very-long-branch-", count: 5)
+        let long = env(slug: slug, port: 8906)
+        let envelope = StoreEnvelope(sites: [], envs: [long])
+
+        XCTAssertNotEqual(long.domainHost, "\(slug).localhost")
+        XCTAssertEqual(HTTPSProxy.routes(from: envelope)[long.domainHost]?.port, 8906)
+        XCTAssertEqual(HTTPSProxy.sanHosts(from: envelope), [long.domainHost])
+    }
+
+    func testSubdomainMultisiteEnvGetsAWildcardSAN() {
+        let parent = Site(id: parentID, name: "My Site", slug: "my-site",
+                          path: URL(fileURLWithPath: "/tmp/my-site"), port: 8880,
+                          imageTag: "wordpress:6.8", networkType: .subdomain)
+        let envelope = StoreEnvelope(sites: [parent], envs: [env(slug: "my-site-wt-authors", port: 8906)])
+
+        let sans = Set(HTTPSProxy.sanHosts(from: envelope))
+
+        XCTAssertTrue(sans.contains("my-site-wt-authors.localhost"))
+        XCTAssertTrue(sans.contains("*.my-site-wt-authors.localhost"))
+    }
+
     // MARK: - Local Network Privacy page
 
     func testLocalNetworkDeniedPageLinksToTheSettingsPaneAndSelfRefreshes() {

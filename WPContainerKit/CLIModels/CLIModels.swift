@@ -56,7 +56,10 @@ public struct EnvJSON: Codable, Sendable {
     public let branch: String
     public let repoRelPath: String
     public let status: String
+    /// The env's advertised URL — its domain once migrated (`WorktreeEnv.url`).
     public let url: String
+    /// `http://127.0.0.1:<port>`, which the proxy also serves.
+    public let localUrl: String
     public let port: Int
     public let path: String
     public let worktreePath: String
@@ -78,7 +81,8 @@ public struct EnvJSON: Codable, Sendable {
         self.branch = env.branch
         self.repoRelPath = env.repoRelPath
         self.status = env.status.token
-        self.url = env.localURL.absoluteString
+        self.url = env.url.absoluteString
+        self.localUrl = env.localURL.absoluteString
         self.port = env.port
         self.path = env.envPath.path
         self.worktreePath = env.worktreePath.path
@@ -100,7 +104,10 @@ public struct ListJSON: Codable, Sendable {
 
 /// Descriptor emitted by `wp-container worktree create --json` (PLAN.md §2b.6).
 public struct WorktreeDescriptor: Codable, Sendable {
+    /// The env's advertised URL — its domain once migrated (`WorktreeEnv.url`).
     public let url: String
+    /// `http://127.0.0.1:<port>`, which the proxy also serves.
+    public let localUrl: String
     public let port: Int
     public let path: String
     public let worktreePath: String
@@ -120,7 +127,8 @@ public struct WorktreeDescriptor: Codable, Sendable {
     public let effectiveIdleStopMinutes: Int
 
     public init(from env: WorktreeEnv) {
-        self.url = env.localURL.absoluteString
+        self.url = env.url.absoluteString
+        self.localUrl = env.localURL.absoluteString
         self.port = env.port
         self.path = env.envPath.path
         self.worktreePath = env.worktreePath.path

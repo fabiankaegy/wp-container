@@ -193,7 +193,7 @@ struct ListCommand: AsyncParsableCommand {
                     emitLine("\(s.status.token.padding(toLength: 8, withPad: " ", startingAt: 0))  \(s.slug)  \(s.url.absoluteString)")
                 }
                 for e in envelope.envs {
-                    emitLine("\(e.status.token.padding(toLength: 8, withPad: " ", startingAt: 0))  \(e.envSlug) [env]  \(e.localURL.absoluteString)")
+                    emitLine("\(e.status.token.padding(toLength: 8, withPad: " ", startingAt: 0))  \(e.envSlug) [env]  \(e.url.absoluteString)")
                 }
             }
         } catch {
@@ -492,7 +492,7 @@ struct DeleteCommand: AsyncParsableCommand {
                 // Drop this site's (and its envs') hostnames from the trusted
                 // leaf's SAN set now that they're gone — otherwise sans.json
                 // only ever grows (never wired up anywhere previously).
-                let staleHosts = site.proxyHosts + childEnvs.map { "\($0.envSlug).localhost" }
+                let staleHosts = site.proxyHosts + childEnvs.map { $0.domainHost }
                 try? await CertificateAuthority().removeLeafCoverage(staleHosts)
             case .env(let env):
                 let parent = envelope.sites.first { $0.id == env.parentSiteID }
@@ -508,7 +508,7 @@ struct DeleteCommand: AsyncParsableCommand {
                     }
                 }
                 if let parent { await ctx.lifecycle.stopSharedDatabaseIfUnused(parent: parent) }
-                try? await CertificateAuthority().removeLeafCoverage(["\(env.envSlug).localhost"])
+                try? await CertificateAuthority().removeLeafCoverage([env.domainHost])
             }
             if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(target) deleted"))) }
             else { emitLine("Deleted \(target).") }
@@ -584,7 +584,7 @@ struct WorktreeCreate: AsyncParsableCommand {
                     FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
                 }
                 if output.json { emitLine(CLIJSON.string(WorktreeDescriptor(from: env))) }
-                else { emitLine("Created env \(env.envSlug) at \(env.localURL.absoluteString) (worktree: \(env.worktreePath.path)).") }
+                else { emitLine("Created env \(env.envSlug) at \(env.url.absoluteString) (worktree: \(env.worktreePath.path)).") }
             } catch {
                 // Creation rolled back its containers/folders; also release the
                 // reserved store record (and with it, the port).
@@ -617,7 +617,7 @@ struct WorktreeList: AsyncParsableCommand {
             if output.json { emitLine(CLIJSON.string(envs.map(EnvJSON.init))) }
             else {
                 if envs.isEmpty { emitLine("No environments.") }
-                for e in envs { emitLine("\(e.status.token)  \(e.envSlug)  \(e.branch)  \(e.localURL.absoluteString)") }
+                for e in envs { emitLine("\(e.status.token)  \(e.envSlug)  \(e.branch)  \(e.url.absoluteString)") }
             }
         } catch {
             throw failCommand(error, json: output.json)
@@ -640,7 +640,7 @@ struct WorktreeDelete: AsyncParsableCommand {
             let parent = envelope.sites.first { $0.id == env.parentSiteID }
             await ctx.worktrees.delete(env, parent: parent, keepBranch: keepBranch, keepWorktree: keepWorktree)
             _ = try await ctx.persistence.mutate { store in store.envs.removeAll { $0.id == env.id } }
-            try? await CertificateAuthority().removeLeafCoverage(["\(env.envSlug).localhost"])
+            try? await CertificateAuthority().removeLeafCoverage([env.domainHost])
             if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(envSlug) deleted"))) }
             else { emitLine("Deleted env \(envSlug).") }
         } catch {
@@ -652,17 +652,21 @@ struct WorktreeDelete: AsyncParsableCommand {
 struct WorktreeFixURLs: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "fix-urls",
-        abstract: "Repair a worktree env's URLs so every one of them points at its own port.",
+        abstract: "Repair a worktree env's URLs so every one of them points at its own domain.",
         discussion: """
         Detects the origins the environment's database ACTUALLY contains — \
         home/siteurl on every (sub)site, wp_blogs.domain, wp_site.domain, \
-        DOMAIN_CURRENT_SITE — plus its parent site's URL, and migrates each of \
-        them onto http://127.0.0.1:<port> with a full `wp search-replace \
+        DOMAIN_CURRENT_SITE — plus its parent site's URL and its own \
+        http://127.0.0.1:<port>, and migrates each of them onto the \
+        environment's domain, http(s)://<envSlug>.localhost (https when the \
+        parent site uses HTTPS), with a full `wp search-replace \
         --all-tables` in every form a URL is written in (https://, http://, \
         protocol-relative //host, and the bare host that multisite domain \
         columns hold). Finishes by rewriting DOMAIN_CURRENT_SITE and any \
         hardcoded WP_HOME/WP_SITEURL in the environment's wp-config.php, which \
-        override the database options entirely.
+        override the database options entirely. The environment is then \
+        advertised at its domain everywhere (an environment created before \
+        environment domains keeps its 127.0.0.1 URL until this is run).
 
         Use --dry-run to see the counts without writing anything.
 
@@ -690,27 +694,47 @@ struct WorktreeFixURLs: AsyncParsableCommand {
             }
 
             let migrator = EnvURLMigrator(cli: ctx.cli)
-            let target = EnvURLMigration.targetAuthority(port: env.port)
+            let target = EnvURLMigration.targetAuthority(for: env)
+            // The env follows its parent's CURRENT scheme; an env without a
+            // parent record keeps whatever it was migrated onto before.
+            let https = parent?.httpsEnabled ?? env.httpsEnabled
             var discovery = await migrator.discoverOrigins(instance: env, dbHost: dbHost,
                                                            wordpressFolder: env.wordpressFolder)
             // The parent's URL is a candidate even when nothing in the database
             // still spells it: a half-repaired env can carry the parent's domain
-            // in serialized content long after its option rows were fixed.
+            // in serialized content long after its option rows were fixed. The
+            // env's own loopback-port URL likewise — it is where envs created
+            // before env domains live, and what this moves them off of.
             if let parent { discovery.candidates.append(parent.url.absoluteString) }
+            discovery.candidates.append(env.localURL.absoluteString)
             let origins = EnvURLMigration.staleOrigins(candidates: discovery.candidates, target: target,
                                                        networkDomain: discovery.networkDomain)
             let multisite = EnvURLMigration.isMultisite(networkType: parent?.networkType ?? .none,
                                                         constants: discovery.constants)
             let report = try await migrator.migrate(
                 instance: env, dbHost: dbHost, wordpressFolder: env.wordpressFolder,
-                origins: origins, targetAuthority: target, multisite: multisite, dryRun: dryRun)
+                origins: origins, targetAuthority: target, https: https,
+                multisite: multisite, dryRun: dryRun)
+
+            // Flip the record onto its domain so every surface advertises it.
+            var migrated = env
+            migrated.httpsEnabled = https
+            migrated.usesDomainURL = true
+            if !dryRun {
+                let id = env.id
+                _ = try await ctx.persistence.mutate { store in
+                    guard let i = store.envs.firstIndex(where: { $0.id == id }) else { return }
+                    store.envs[i].httpsEnabled = https
+                    store.envs[i].usesDomainURL = true
+                }
+            }
 
             let warnings = discovery.warnings + report.warnings
             if output.json {
-                emitLine(CLIJSON.string(FixURLsJSON(envSlug: env.envSlug, url: env.localURL.absoluteString,
+                emitLine(CLIJSON.string(FixURLsJSON(envSlug: env.envSlug, url: migrated.url.absoluteString,
                                                     report: report, warnings: warnings)))
             } else {
-                emitLine("\(dryRun ? "Would migrate" : "Migrated") \(env.envSlug) to \(env.localURL.absoluteString).")
+                emitLine("\(dryRun ? "Would migrate" : "Migrated") \(env.envSlug) to \(migrated.url.absoluteString).")
                 if report.origins.isEmpty {
                     emitLine("  No stale origins found.")
                 }

@@ -44,7 +44,7 @@ struct LoginCommand: AsyncParsableCommand {
             let publicURL: URL
             switch resolved {
             case .site(let s): publicURL = s.url
-            case .env(let e): publicURL = e.localURL
+            case .env(let e): publicURL = e.url
             }
             var mailHost: String? = nil
             if inst.mailpitEnabled { mailHost = (try? await ctx.cli.ipAddress(of: inst.mailContainerName)) ?? nil }

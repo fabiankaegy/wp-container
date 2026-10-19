@@ -457,25 +457,13 @@ public enum SiteRecipe {
         return args
     }
 
-    /// `wp option update home/siteurl` + cache flush — used after cloning a site
-    /// into a worktree env so URLs point at the env's port.
-    public static func wpUpdateURLsArgs(_ inst: any RunnableInstance, dbHost: String) -> [String] {
-        var args = wpCLIBaseArgs(inst, dbHost: dbHost)
-        let url = "http://127.0.0.1:\(inst.port)"
-        // sh -c inside the wp-cli container chains the three commands; the host
-        // side is still a plain argument array (no host shell interpolation).
-        args += [
-            cliImage(for: inst),
-            "sh", "-c",
-            "wp option update home '\(url)' && wp option update siteurl '\(url)' && wp cache flush",
-        ]
-        return args
-    }
-
     /// Set `home`/`siteurl` to an arbitrary URL + flush cache — used when
-    /// toggling HTTPS on/off for a site (PLAN.md §2f).
+    /// toggling HTTPS on/off for a site (PLAN.md §2f) and to finish a worktree
+    /// env's URL migration (`EnvURLMigrator`).
     public static func wpSetURLsArgs(_ inst: any RunnableInstance, dbHost: String, url: String) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
+        // sh -c inside the wp-cli container chains the three commands; the host
+        // side is still a plain argument array (no host shell interpolation).
         args += [
             cliImage(for: inst),
             "sh", "-c",
