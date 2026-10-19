@@ -1011,6 +1011,12 @@ public actor SiteLifecycle {
     /// successful connect means the final server is listening) and costs ~0ms
     /// per probe vs ~300ms for a `container exec`. Container IPs are
     /// host-reachable on Apple `container` (same fact the ES health poll used).
+    ///
+    /// The TCP probe needs Local Network permission for the process's
+    /// responsible app: from a terminal or agent session without it, macOS
+    /// blocks the connection. Each attempt that fails falls back to
+    /// `healthcheck.sh` inside the database container, which needs no network
+    /// access from the host.
     /// Poll: 200ms initial, ×2 backoff capped at 1s.
     public func waitForDatabaseReady(_ inst: any RunnableInstance, dbHost: String,
                                      timeout: Duration = .seconds(90)) async throws {
@@ -1019,6 +1025,7 @@ public actor SiteLifecycle {
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
             if await Self.tcpProbe(host: dbHost, port: 3306, timeout: .seconds(2)) { return }
+            if let check = try? await cli.runCapturing(SiteRecipe.databaseHealthcheckArgs(inst)), check.succeeded { return }
             try await Task.sleep(for: delay)
             delay = min(delay * 2, .seconds(1))
         }
@@ -1143,6 +1150,14 @@ public actor SiteLifecycle {
                 }
             } catch {
                 observed = "kept failing with: \(error.localizedDescription)"
+            }
+            // A container-IP probe needs Local Network permission, which a
+            // terminal or agent session may lack. Ask the web server from inside
+            // its own container instead: any HTTP status proves it is answering.
+            if !inst.publishesPort,
+               let inside = try? await cli.runCapturing(SiteRecipe.wpHTTPProbeArgs(inst)),
+               inside.succeeded, SiteRecipe.isHTTPStatus(inside.stdout) {
+                return
             }
             if failingSince == nil { failingSince = ContinuousClock.now }
             // ~20s of unbroken failure against a container IP: re-ask who that
