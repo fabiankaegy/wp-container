@@ -41,8 +41,8 @@ public enum WPCLIShim {
     /// so a shared-database worktree env resolves the parent's container and its
     /// own `wpc_*` schema (issue #17); v5 mounts the `php/` overrides folder and
     /// passes the Mailpit/Elasticsearch sidecar addresses; v6 passes every
-    /// registered sidecar's env vars.
-    public static let shimVersion = 6
+    /// registered sidecar's env vars; v7 adds Redis.
+    public static let shimVersion = 7
     private static let versionMarker = "# wpc-shim-version:"
 
     /// Bash function shared by the shim and the router: prints a running

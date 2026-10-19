@@ -389,6 +389,7 @@ public actor DatabaseImportService {
             currentPhase = .finishing
             progress(.finishing)
             try await cli.run(SiteRecipe.wpCacheFlushArgs(site, dbHost: dbHost))
+            await RedisService.flush(site, cli: cli)
 
             return DBImportSummary(
                 sourceURL: migration.source,

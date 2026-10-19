@@ -359,6 +359,7 @@ public struct EnvURLMigrator: Sendable {
         }
         let url = "\(EnvURLMigration.scheme(https: https))://\(targetAuthority)"
         try await cli.run(SiteRecipe.wpSetURLsArgs(instance, dbHost: dbHost, url: url))
+        await RedisService.flush(instance, cli: cli)
         return report
     }
 

@@ -38,6 +38,7 @@ enum MCPToolDispatch {
             case "xdebug_toggle":     return try await xdebugToggle(args, ctx: ctx, slug: scopedSlug)
             case "elasticsearch_toggle": return try await sidecarToggle(args, ctx: ctx, slug: scopedSlug, addon: SidecarAddons.elasticsearch)
             case "mailpit_toggle":    return try await sidecarToggle(args, ctx: ctx, slug: scopedSlug, addon: SidecarAddons.mailpit)
+            case "redis_toggle":      return try await sidecarToggle(args, ctx: ctx, slug: scopedSlug, addon: SidecarAddons.redis)
             case "db_import":         return try await dbImport(args, ctx: ctx, slug: scopedSlug)
             case "set_idle_stop":     return try await setIdleStop(args, ctx: ctx, slug: scopedSlug)
             default:
@@ -312,6 +313,7 @@ enum MCPToolDispatch {
             "provisioned": site.provisioned,
             "mailpitEnabled": site.mailpitEnabled,
             "mailboxUrl": site.mailboxURL?.absoluteString as Any? ?? NSNull(),
+            "redisEnabled": site.redisEnabled,
             // Auto-stop-when-idle (issue #16). `idleStopMinutes` is the persisted
             // setting (null = follow the default), `effectiveIdleStopMinutes` the
             // timeout actually in force with the default resolved — 0 means the
@@ -633,7 +635,7 @@ enum MCPToolDispatch {
         return MCPResult.json(["ok": true, "addon": "xdebug", "enabled": enabled, "restarted": restarted])
     }
 
-    /// `elasticsearch_toggle`, `mailpit_toggle`: returns `{ok, addon, enabled,
+    /// `elasticsearch_toggle`, `mailpit_toggle`, `redis_toggle`: returns `{ok, addon, enabled,
     /// restarted}`, plus the addon's endpoint under its `endpointKey`.
     private static func sidecarToggle(_ args: [String: Value], ctx: CLIContext, slug: String,
                                       addon: any SidecarAddon) async throws -> CallTool.Result {

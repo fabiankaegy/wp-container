@@ -19,6 +19,7 @@ final class QuietContainerRunTests: XCTestCase {
             "runWordPress": SiteRecipe.runWordPressArgs(site, dbHost: "10.0.0.2"),
             "runElasticsearch": SiteRecipe.runElasticsearchArgs(site),
             "runMailpit": SiteRecipe.runMailpitArgs(site, webPort: 8025),
+            "runRedis": SiteRecipe.runRedisArgs(site),
             "wpProxy": SiteRecipe.wpProxyArgs(site, dbHost: "10.0.0.2", wpArgs: ["option", "get", "home"]),
             "wpCoreInstall": SiteRecipe.wpCoreInstallArgs(site, dbHost: "10.0.0.2"),
         ]

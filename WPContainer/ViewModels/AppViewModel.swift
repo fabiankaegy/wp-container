@@ -201,6 +201,9 @@ public final class AppViewModel {
     /// seconds; the primary mailbox URL is the proxy-independent localhost port.
     public func setMailpit(_ site: Site, enabled: Bool) { setSidecar(SidecarAddons.mailpit, site, enabled: enabled) }
 
+    /// Enable/disable the per-site Redis object-cache container.
+    public func setRedis(_ site: Site, enabled: Bool) { setSidecar(SidecarAddons.redis, site, enabled: enabled) }
+
     /// Turn a sidecar on or off (syncing its PHP handler and reserving its host
     /// port on first enable), then restart a running site so the container
     /// recipe takes effect.

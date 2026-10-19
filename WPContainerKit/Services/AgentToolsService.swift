@@ -21,7 +21,7 @@ public enum AgentToolsService {
         "read_wp_config", "edit_wp_config", "get_site_info", "site_health_check",
         "site_start", "site_stop", "site_restart", "site_status", "list_sites",
         "worktree_create", "worktree_list", "worktree_delete",
-        "xdebug_toggle", "elasticsearch_toggle", "mailpit_toggle",
+        "xdebug_toggle", "elasticsearch_toggle", "mailpit_toggle", "redis_toggle",
         "login_link", "create_user", "db_import", "set_idle_stop",
     ]
 
