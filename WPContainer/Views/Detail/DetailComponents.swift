@@ -63,6 +63,50 @@ struct InfoRow<Value: View>: View {
     }
 }
 
+/// One setting in a card, inspector section or the Settings window: the title
+/// and its control share the first line, and the description runs full width
+/// underneath. Keeping the description out of the column beside the control
+/// stops it wrapping into a tall, narrow block in the inspector. `footer` holds
+/// extras such as a link or a "restarts the site" note.
+struct SettingRow<Control: View, Footer: View>: View {
+    let title: LocalizedStringKey
+    var detail: Text?
+    @ViewBuilder var control: () -> Control
+    @ViewBuilder var footer: () -> Footer
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 12) {
+                // The title wins the width: a short label wrapping beside a
+                // fixed-size control looks broken.
+                Text(title).font(.callout.weight(.medium)).layoutPriority(1)
+                Spacer(minLength: 8)
+                control()
+            }
+            if let detail {
+                detail
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            footer()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+extension SettingRow where Footer == EmptyView {
+    init(title: LocalizedStringKey, detail: Text? = nil, @ViewBuilder control: @escaping () -> Control) {
+        self.init(title: title, detail: detail, control: control, footer: { EmptyView() })
+    }
+}
+
+/// The small note under a setting that restarts a running site when changed.
+struct RestartNote: View {
+    var body: some View {
+        Text("Changing this restarts the site.").font(.caption2).foregroundStyle(.tertiary)
+    }
+}
+
 /// How `SectionCard` renders: a standalone rounded card, or a compact,
 /// foldable section stacked in the inspector column.
 enum SectionCardStyle { case card, inspector }

@@ -144,7 +144,7 @@ struct AddSiteSheet: View {
                 }
             }
             Section("Custom domain (optional)") {
-                TextField("mysite.local", text: $customDomain).textFieldStyle(.roundedBorder).autocorrectionDisabled()
+                TextField("Domain", text: $customDomain, prompt: Text("mysite.test")).textFieldStyle(.roundedBorder).autocorrectionDisabled()
             }
             Section("Add-ons") {
                 Toggle("Xdebug (step debugging on 9003)", isOn: $xdebug)

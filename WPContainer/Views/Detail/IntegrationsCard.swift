@@ -43,19 +43,12 @@ struct IntegrationsCard: View {
     // MARK: HTTPS
 
     private var httpsRow: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Trusted HTTPS").font(.callout.weight(.medium))
-                // Honest status (§2f fix): "Serving …" only when the proxy is
-                // actually listening; otherwise say so instead of implying the
-                // https URL works.
-                Text(httpsSubtitle)
-                    .font(.caption)
-                    .foregroundStyle(site.httpsEnabled && vm.proxyPort == nil ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
-                    .textSelection(.enabled)
-            }
-            Spacer()
-            if site.httpsEnabled && vm.proxyPort == nil {
+        // Honest status (§2f fix): "Serving …" only when the proxy is actually
+        // listening; otherwise say so instead of implying the https URL works.
+        SettingRow(title: "Trusted HTTPS",
+                   detail: Text(httpsSubtitle)
+                       .foregroundStyle(proxyDown ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))) {
+            if proxyDown {
                 Button("Start Proxy") { Task { await vm.ensureProxyRunning() } }
                     .controlSize(.small)
             }
@@ -63,64 +56,61 @@ struct IntegrationsCard: View {
                                      set: { vm.setHTTPS(site, enabled: $0) }))
                 .labelsHidden().toggleStyle(.switch)
         }
+        .textSelection(.enabled)
         .task(id: site.id) { vm.refreshProxyLiveness() }
     }
+
+    private var proxyDown: Bool { site.httpsEnabled && vm.proxyPort == nil }
 
     private var httpsSubtitle: String {
         guard site.httpsEnabled else { return "Serve this site over https://\(site.primaryHost)" }
         return vm.proxyPort != nil
             ? "Serving \(site.url.absoluteString)"
-            : "Enabled, but the HTTPS proxy is not running — \(site.url.absoluteString) won't load."
+            : "\(site.url.absoluteString) won’t load until the proxy is running."
     }
 
     private var caTrustRow: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 12) {
                 Label(vm.caTrusted ? "Certificate authority trusted" : "Certificate authority not trusted",
                       systemImage: vm.caTrusted ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(vm.caTrusted ? .green : .orange)
-                Text(vm.caTrusted
-                     ? "Browsers trust local HTTPS for every site."
-                     : "Trust the WP Container CA (no admin password — Touch ID supported).")
-                    .font(.caption).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                if vm.caTrusted {
+                    Button("Check Again") { Task { await vm.refreshCATrusted() } }
+                        .buttonStyle(.bordered).controlSize(.small)
+                } else {
+                    Button("Trust CA…") { vm.trustCA() }
+                        .buttonStyle(.borderedProminent).controlSize(.small)
+                }
             }
-            Spacer()
-            if vm.caTrusted {
-                Button("Recheck") { Task { await vm.refreshCATrusted() } }
-                    .buttonStyle(.bordered).controlSize(.small)
-            } else {
-                Button("Trust CA…") { vm.trustCA() }
-                    .buttonStyle(.borderedProminent).controlSize(.small)
-            }
+            Text(vm.caTrusted
+                 ? "Browsers trust local HTTPS for every site."
+                 : "Trust it so browsers accept local HTTPS. No admin password needed.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     // MARK: Agent tools
 
     private var agentToolsRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("AI Agent Tools").font(.callout.weight(.medium))
-                    Text(agentToolsOn && site.agentToolsRoot != nil
-                         ? "Written to \(site.agentToolsRoot!)"
-                         : "Write MCP configs + AGENTS.md and the wp shim for coding agents.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .lineLimit(2).truncationMode(.middle)
-                }
-                Spacer()
-                Toggle("", isOn: Binding(
-                    get: { agentToolsOn },
-                    set: { newValue in
-                        if newValue { vm.enableAgentTools(site) } else { vm.disableAgentTools(site) }
-                    }))
-                    .labelsHidden().toggleStyle(.switch)
-            }
+        SettingRow(title: "AI Agent Tools",
+                   detail: agentToolsOn && site.agentToolsRoot != nil
+                       ? Text("Written to \(site.agentToolsRoot!)")
+                       : Text("Writes MCP configs, AGENTS.md and a `wp` shim for coding agents.")) {
+            Toggle("", isOn: Binding(
+                get: { agentToolsOn },
+                set: { newValue in
+                    if newValue { vm.enableAgentTools(site) } else { vm.disableAgentTools(site) }
+                }))
+                .labelsHidden().toggleStyle(.switch)
+        } footer: {
             if agentToolsOn {
-                Button("Change location…") { choosingRoot = true }
+                Button("Change Location…") { choosingRoot = true }
                     .buttonStyle(.link).controlSize(.small)
-                    .help("Place the files at your wp-content repo root so IDEs opened there discover the MCP server.")
+                    .help("Put the files at your repository root so editors opened there find the MCP server.")
             }
         }
     }
@@ -128,17 +118,12 @@ struct IntegrationsCard: View {
     // MARK: Global wp
 
     private var globalWPRow: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Global `wp` command").font(.callout.weight(.medium))
-                Text("Type plain `wp` anywhere inside a site's files to run containerized wp-cli (defers to Homebrew wp elsewhere). Edits ~/.zshrc PATH.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer()
+        SettingRow(title: "Global `wp` command",
+                   detail: Text("Run plain `wp` inside any site folder to use its wp-cli. Adds a line to ~/.zshrc.")) {
             Toggle("", isOn: Binding(get: { vm.globalWPInstalled },
                                      set: { vm.setGlobalWP(enabled: $0) }))
                 .labelsHidden().toggleStyle(.switch)
         }
+        .help("Outside a site folder, `wp` falls back to your Homebrew wp-cli.")
     }
 }
