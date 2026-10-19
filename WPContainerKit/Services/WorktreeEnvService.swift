@@ -472,5 +472,6 @@ public actor WorktreeEnvService {
         defer { try? FileManager.default.removeItem(at: dumpFile) }
         try await cli.run(SiteRecipe.wpProxyArgs(env, dbHost: envDBHost,
                                                  wpArgs: ["db", "import", "/var/www/html/.wpc-clone.sql"]))
+        await RedisService.flush(env, cli: cli)
     }
 }

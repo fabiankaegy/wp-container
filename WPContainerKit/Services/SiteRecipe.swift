@@ -334,7 +334,7 @@ public enum SiteRecipe {
     /// database. Nothing is published; WordPress reaches it on the container
     /// network.
     public static func runRedisArgs(_ inst: any RunnableInstance) -> [String] {
-        var args = ["run", "-d", "--rm", "--name", SidecarAddons.redis.containerName(for: inst)]
+        var args = ["run", "--progress", "none", "-d", "--rm", "--name", SidecarAddons.redis.containerName(for: inst)]
         args += resourceArgs(for: inst)
         args += labelArgs(for: inst)
         args += [
@@ -343,6 +343,11 @@ public enum SiteRecipe {
             "--maxmemory", redisMaxMemory, "--maxmemory-policy", "allkeys-lru",
         ]
         return args
+    }
+
+    /// `container exec` args that empty the instance's Redis object cache.
+    public static func redisFlushArgs(_ inst: any RunnableInstance) -> [String] {
+        ["exec", SidecarAddons.redis.containerName(for: inst), "redis-cli", "FLUSHALL"]
     }
 
     // MARK: - Loopback hosts (in-guest /etc/hosts → host gateway)

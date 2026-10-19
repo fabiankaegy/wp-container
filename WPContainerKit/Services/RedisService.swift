@@ -48,6 +48,15 @@ public enum RedisService {
     );
     """
 
+    /// Empties `inst`'s Redis cache after one-shot wp-cli changed its database
+    /// in bulk (import, URL migration, clone). Those runs don't get
+    /// `WPC_REDIS_HOST`, so the drop-in can't invalidate what they change.
+    /// Best effort: a disabled or stopped Redis has nothing to flush.
+    public static func flush(_ inst: any RunnableInstance, cli: ContainerCLI) async {
+        guard inst.redisEnabled else { return }
+        _ = try? await cli.runCapturing(SiteRecipe.redisFlushArgs(inst))
+    }
+
     /// The handler as the Redis sidecar addon registers it.
     public static let handler = PrependHandler(fileName: handlerFileName, marker: marker,
                                                contents: handlerContents, isEarly: true)

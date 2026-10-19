@@ -30,6 +30,11 @@ final class RedisAddonTests: XCTestCase {
                         "--maxmemory", SiteRecipe.redisMaxMemory, "--maxmemory-policy", "allkeys-lru"])
     }
 
+    func testFlushEmptiesTheInstanceCache() {
+        XCTAssertEqual(SiteRecipe.redisFlushArgs(makeSite()),
+                       ["exec", "wpc-example-redis", "redis-cli", "FLUSHALL"])
+    }
+
     func testRedisPublishesAndMountsNothing() {
         let args = SiteRecipe.runRedisArgs(makeSite())
         XCTAssertFalse(args.contains("-p"))
