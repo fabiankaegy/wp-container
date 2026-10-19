@@ -18,8 +18,14 @@ enum SystemActions {
     /// Open the chosen terminal app at the given directory. When `pathPrepend`
     /// is set, the new shell has that dir first on PATH (so a site's `./wp` shim
     /// answers to a plain `wp` in that shell — a lightweight local alternative
-    /// to the global router).
+    /// to the global router). Plain Terminal with no PATH change opens through
+    /// NSWorkspace, which needs no Automation permission.
     static func openTerminal(at directory: URL, pathPrepend: URL? = nil) {
+        if pathPrepend == nil, TerminalApps.selected == .terminal {
+            let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
+            NSWorkspace.shared.open([directory], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration())
+            return
+        }
         var cmd = "cd \(shellQuote(directory.path)); "
         if let pathPrepend {
             cmd += "export PATH=\(shellQuote(pathPrepend.path)):\"$PATH\"; "
