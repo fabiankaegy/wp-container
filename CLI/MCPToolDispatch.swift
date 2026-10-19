@@ -18,6 +18,7 @@ enum MCPToolDispatch {
             switch params.name {
             case "wp_cli":            return try await wpCLI(args, ctx: ctx, slug: scopedSlug)
             case "run_command":       return try await runCommand(args, ctx: ctx, slug: scopedSlug)
+            case "run_tests":         return try await runTests(args, ctx: ctx, slug: scopedSlug)
             case "read_error_log":    return try await readErrorLog(args, ctx: ctx, slug: scopedSlug)
             case "read_access_log":   return try await readAccessLog(args, ctx: ctx, slug: scopedSlug)
             case "wp_debug_toggle":   return try await wpDebugToggle(args, ctx: ctx, slug: scopedSlug)
@@ -220,6 +221,55 @@ enum MCPToolDispatch {
             "timedOut": result.exitCode == SiteRecipe.timeoutExitCode,
             "workdir": workdir,
         ], isError: result.exitCode != 0)
+    }
+
+    // MARK: - run_tests
+
+    /// Default `run_tests` time limit, in seconds.
+    private static let runTestsTimeout = 1800
+
+    private static func runTests(_ args: [String: Value], ctx: CLIContext, slug: String) async throws -> CallTool.Result {
+        let target = args["slug"]?.stringValue ?? slug
+        let envelope = try await ctx.load()
+        guard let resolved = resolveTarget(target, in: envelope) else {
+            throw ToolError("not_found", "No site or environment with slug \(target).")
+        }
+        let inst = resolved.instance
+        try await ctx.ensureRunning(resolved, envelope: envelope)
+        let host = try await dbHost(for: inst, ctx: ctx)
+
+        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let workdir = SiteRecipe.runWorkdir(requested: args["path"]?.stringValue, hostCWD: cwd, in: inst)
+        let polyfills: String?
+        do {
+            polyfills = try TestSuite.checkProject(workdir: workdir, in: inst, slug: target)
+        } catch let error as TestSuiteError {
+            throw ToolError("phpunit_missing", error.description)
+        }
+        let (library, schema) = try await TestSuite.prepare(inst, cli: ctx.cli)
+        let sidecarEnvironment = await SidecarAddons.environment(for: inst, cli: ctx.cli)
+        let timeout = max(1, args["timeout"]?.intValue ?? runTestsTimeout)
+        let phpunitArgs = args["args"]?.arrayValue?.compactMap { $0.stringValue } ?? []
+        let result = try await ctx.cli.runCapturing(SiteRecipe.runTestsArgs(
+            inst, dbHost: host, library: library, schema: schema, workdir: workdir, phpunitArgs: phpunitArgs,
+            polyfillsPath: polyfills, sidecarEnvironment: sidecarEnvironment, timeLimit: timeout))
+
+        var payload: [String: Any] = [
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "exitCode": Int(result.exitCode),
+            "timedOut": result.exitCode == SiteRecipe.timeoutExitCode,
+            "workdir": workdir,
+            "schema": schema,
+        ]
+        if let summary = TestSuite.summary(fromOutput: result.stdout) {
+            payload["summary"] = [
+                "passed": summary.passed, "tests": summary.tests, "assertions": summary.assertions,
+                "failures": summary.failures, "errors": summary.errors, "skipped": summary.skipped,
+                "incomplete": summary.incomplete, "risky": summary.risky, "warnings": summary.warnings,
+            ]
+        }
+        return MCPResult.json(payload, isError: result.exitCode != 0)
     }
 
     // MARK: - Logs

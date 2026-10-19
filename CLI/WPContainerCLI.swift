@@ -19,6 +19,7 @@ struct WPContainerCLI: AsyncParsableCommand {
             WorktreeCommand.self,
             WPCommand.self,
             RunCommand.self,
+            TestCommand.self,
             LoginCommand.self,
             MCPCommand.self,
             AgentToolsCommand.self,
