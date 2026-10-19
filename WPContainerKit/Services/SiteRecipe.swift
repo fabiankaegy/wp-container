@@ -570,10 +570,8 @@ public enum SiteRecipe {
                                     command: [String], workdir: String, env: [String] = [],
                                     interactive: Bool = false, tty: Bool = false,
                                     mailpitHost: String? = nil, elasticsearchURL: String? = nil) -> [String] {
+        // The base args already mount a worktree env's checkout over `wordpress/`.
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
-        for mount in inst.extraMounts {
-            args += ["-v", "\(mount.hostPath):\(mount.containerPath)"]
-        }
         if FileManager.default.fileExists(atPath: inst.phpConfFolder.path) {
             args += ["-v", "\(inst.phpConfFolder.path):\(phpConfContainerPath)",
                      "-e", "PHP_INI_SCAN_DIR=\(phpDefaultConfDir):\(phpConfContainerPath)"]

@@ -65,9 +65,10 @@ final class RunCommandTests: XCTestCase {
         let args = SiteRecipe.runImageArgs(env, image: "composer:2", dbHost: "10.0.0.2", command: ["composer", "install"],
                                            workdir: "/var/www/html", env: ["FOO=bar"],
                                            mailpitHost: "10.0.0.3", elasticsearchURL: "http://10.0.0.4:9200")
-        XCTAssertEqual(Array(args.prefix(2)), ["run", "--rm"])
+        XCTAssertEqual(Array(args.prefix(4)), ["run", "--progress", "none", "--rm"])
         XCTAssertTrue(containsPair(args, "-v", "\(env.wordpressFolder.path):/var/www/html"))
-        XCTAssertTrue(containsPair(args, "-v", "\(env.worktreePath.path):/var/www/html/wp-content/plugins/demo"))
+        let checkoutMount = "\(env.worktreePath.path):/var/www/html/wp-content/plugins/demo"
+        XCTAssertEqual(args.filter { $0 == checkoutMount }.count, 1, "the checkout is mounted exactly once")
         XCTAssertTrue(containsPair(args, "-e", "WORDPRESS_DB_HOST=10.0.0.2"))
         XCTAssertTrue(containsPair(args, "-e", "WPC_MAILPIT_HOST=10.0.0.3"))
         XCTAssertTrue(containsPair(args, "-e", "EP_HOST=http://10.0.0.4:9200"))
