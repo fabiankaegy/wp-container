@@ -2,9 +2,9 @@ import Foundation
 import WPContainerKit
 
 /// The lists the sidebar offers: every site, the running ones, every branch
-/// environment across sites, or one group.
+/// environment across sites, archived sites, or one group.
 enum LibraryItem: Hashable {
-    case allSites, running, branches
+    case allSites, running, branches, archived
     case group(UUID)
 }
 

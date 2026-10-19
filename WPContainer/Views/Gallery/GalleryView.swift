@@ -78,8 +78,11 @@ struct GalleryView: View {
     private var sections: [GallerySection] {
         let q = search.trimmingCharacters(in: .whitespaces).lowercased()
         let matches: (Site) -> Bool = { q.isEmpty || $0.name.lowercased().contains(q) || $0.displayHost.lowercased().contains(q) }
-        let sites = vm.sites.filter(matches)
+        // Archived sites only appear in their own list.
+        let sites = vm.sites.filter { matches($0) && $0.isArchived == (item == .archived) }
         switch item {
+        case .archived:
+            return [GallerySection(title: nil, sites: sites)]
         case .running:
             return [GallerySection(title: nil, sites: sites.filter { $0.status.isRunning || $0.status.isTransitional })]
         case .group(let id):
@@ -96,6 +99,7 @@ struct GalleryView: View {
         switch item {
         case .allSites, .branches: return "All Sites"
         case .running: return "Running"
+        case .archived: return "Archived"
         case .group(let id): return vm.store.group(id: id)?.name ?? "Group"
         }
     }
@@ -109,6 +113,9 @@ struct GalleryView: View {
     private var emptyState: some View {
         if !search.isEmpty {
             ContentUnavailableView.search(text: search)
+        } else if item == .archived {
+            ContentUnavailableView("No Archived Sites", systemImage: "archivebox",
+                                   description: Text("Archive a site you aren’t using to stop it and tuck it away. Its files and database are kept, and you can bring it back anytime."))
         } else if item == .running {
             ContentUnavailableView("Nothing Running", systemImage: "play.slash",
                                    description: Text("Start a site and it shows up here."))
@@ -155,7 +162,7 @@ struct SiteCard: View {
                 }
             }
             .padding(.horizontal, 2)
-            BranchStrip(site: site)
+            if !site.isArchived { BranchStrip(site: site) }
         }
         .contentShape(Rectangle())
         // Keyboard focus selects the card, so the accent selection ring is the
@@ -201,7 +208,8 @@ struct SiteCard: View {
                 if hovering || isSelected { hoverActions.padding(8) }
             }
             .overlay(alignment: .bottomTrailing) {
-                if site.status == .stopped { chip(Text("Asleep")).padding(8) }
+                if site.isArchived { chip(Label("Archived", systemImage: "archivebox")).padding(8) }
+                else if site.status == .stopped { chip(Text("Asleep")).padding(8) }
             }
     }
 
@@ -213,12 +221,16 @@ struct SiteCard: View {
             } else if site.status.isRunning {
                 roundButton("stop.fill", "Stop") { vm.stopSite(site) }
                 roundButton("safari", "Open in Browser") { SystemActions.openInBrowser(site.url) }
+            } else if site.isArchived {
+                roundButton("arrow.uturn.backward", "Unarchive") { vm.unarchiveSite(site) }
             } else {
                 roundButton("play.fill", "Start") { vm.startSite(site) }
             }
-            roundButton("arrow.triangle.branch", "New Branch Environment…") {
-                vm.selection = site.id
-                vm.presentingNewEnv = true
+            if !site.isArchived {
+                roundButton("arrow.triangle.branch", "New Branch Environment…") {
+                    vm.selection = site.id
+                    vm.presentingNewEnv = true
+                }
             }
         }
     }
@@ -274,6 +286,11 @@ struct SiteCard: View {
         }
         .disabled(!site.status.isRunning)
         Divider()
+        if site.isArchived {
+            Button("Unarchive", systemImage: "arrow.uturn.backward") { vm.unarchiveSite(site) }
+        } else {
+            Button("Archive", systemImage: "archivebox") { vm.archiveSite(site) }
+        }
         Button("Delete Site…", systemImage: "trash", role: .destructive) { confirmingDelete = true }
     }
 }

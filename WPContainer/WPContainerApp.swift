@@ -149,6 +149,12 @@ private struct AppCommands: Commands {
                 .disabled(!(vm.selectedSite?.status.isRunning ?? false))
             Button("Reveal in Finder") { if let s = vm.selectedSite { SystemActions.revealInFinder(s.path) } }
             Divider()
+            if vm.selectedSite?.isArchived == true {
+                Button("Unarchive") { if let s = vm.selectedSite { vm.unarchiveSite(s) } }
+            } else {
+                Button("Archive") { if let s = vm.selectedSite { vm.archiveSite(s) } }
+                    .disabled(vm.selectedSite == nil)
+            }
             Button("Open Site Screen") { if let id = vm.selection { vm.openScreen(id) } }
                 .keyboardShortcut(.downArrow, modifiers: .command)
                 .disabled(vm.selection == nil || vm.screen?.id == vm.selection)

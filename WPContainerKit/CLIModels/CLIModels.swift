@@ -32,6 +32,8 @@ public struct SiteJSON: Codable, Sendable {
     public let group: String?
     /// Mailbox (Mailpit web UI) URL when enabled, else nil (issue #10).
     public let mailboxUrl: String?
+    /// Whether the site is archived (stopped, hidden in the app, unrouted).
+    public let archived: Bool
 
     public init(from site: Site, group: String? = nil) {
         self.id = site.id.uuidString
@@ -45,6 +47,7 @@ public struct SiteJSON: Codable, Sendable {
         self.provisioned = site.provisioned
         self.group = group
         self.mailboxUrl = site.mailboxURL?.absoluteString
+        self.archived = site.isArchived
     }
 }
 

@@ -23,7 +23,7 @@ struct MenuBarContent: View {
                 localNetworkWarning
                 Divider()
             }
-            if vm.sites.isEmpty {
+            if vm.activeSites.isEmpty {
                 emptyState
             } else if rowCount <= 9 {
                 // Plain VStack so the popover window sizes to the content.
@@ -48,9 +48,9 @@ struct MenuBarContent: View {
 
     /// Row-ish units used to decide between intrinsic sizing and scrolling.
     private var rowCount: Int {
-        var count = vm.sites.count + runningEnvs.count
+        var count = vm.activeSites.count + runningEnvs.count
         count += vm.store.sortedGroups.filter { group in
-            vm.sites.contains { $0.groupID == group.id }
+            vm.activeSites.contains { $0.groupID == group.id }
         }.count
         return count
     }
@@ -61,12 +61,12 @@ struct MenuBarContent: View {
     private var list: some View {
         VStack(alignment: .leading, spacing: 1) {
             // Ungrouped sites first.
-            ForEach(vm.sites.filter { $0.groupID == nil }) { site in
+            ForEach(vm.activeSites.filter { $0.groupID == nil }) { site in
                 siteBlock(site)
             }
             // Grouped sites, in sidebar order, with tiny headers.
             ForEach(vm.store.sortedGroups) { group in
-                let sites = vm.sites.filter { $0.groupID == group.id }
+                let sites = vm.activeSites.filter { $0.groupID == group.id }
                 if !sites.isEmpty {
                     sectionHeader(group.name)
                     ForEach(sites) { site in
@@ -91,8 +91,8 @@ struct MenuBarContent: View {
         HStack(spacing: 6) {
             Text("WP Container").font(.headline)
             Spacer()
-            let running = vm.sites.filter { $0.status.isRunning }.count
-            Text("\(running)/\(vm.sites.count) running")
+            let running = vm.activeSites.filter { $0.status.isRunning }.count
+            Text("\(running)/\(vm.activeSites.count) running")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(.horizontal, 12).padding(.vertical, 8)

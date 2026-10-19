@@ -94,12 +94,15 @@ struct InspectorHeader<Icon: View, Subtitle: View, Actions: View>: View {
     }
 }
 
-/// A "Settled" capsule matching `StatusPill`, for parked branch environments.
+/// A gray capsule matching `StatusPill`, for parked things: a settled branch
+/// environment ("Settled") or an archived site ("Archived").
 struct SettledPill: View {
+    var label = "Settled"
+
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: "archivebox").font(.caption2.weight(.semibold))
-            Text("Settled").font(.caption.weight(.semibold))
+            Text(label).font(.caption.weight(.semibold))
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)

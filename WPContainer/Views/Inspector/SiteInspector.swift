@@ -13,7 +13,7 @@ struct SiteInspector: View {
             header
             if site.status.isRunning { LiveSection(id: site.id) }
             // The site's own Overview already shows its branches.
-            if vm.screen?.id != site.id { BranchesSummary(site: site) }
+            if vm.screen?.id != site.id, !site.isArchived { BranchesSummary(site: site) }
             OverviewCard(site: site)
             if site.networkType.isMultisite { SubsitesCard(site: site) }
             DevelopmentCard(site: site)
@@ -33,7 +33,7 @@ struct SiteInspector: View {
             SiteAvatar(name: site.name, slug: site.slug, size: 44,
                        wordpressFolder: site.wordpressFolder, reloadToken: site.status)
         } subtitle: {
-            StatusPill(status: site.status)
+            if site.isArchived { SettledPill(label: "Archived") } else { StatusPill(status: site.status) }
             Text(site.displayHost)
         } actions: {
             SiteRunButton(site: site)
@@ -61,7 +61,10 @@ struct SiteRunButton: View {
     let site: Site
 
     var body: some View {
-        if site.status.isTransitional {
+        if site.isArchived, !site.status.isRunning, !site.status.isTransitional {
+            Button("Unarchive", systemImage: "arrow.uturn.backward") { vm.unarchiveSite(site) }
+                .buttonStyle(.borderedProminent)
+        } else if site.status.isTransitional {
             Button {} label: {
                 HStack(spacing: 5) { ProgressView().controlSize(.mini); Text(site.status.label) }
             }
@@ -170,7 +173,19 @@ private struct SiteDangerZone: View {
     var body: some View {
         SectionCard(title: "Danger Zone", systemImage: "exclamationmark.triangle") {
             VStack(alignment: .leading, spacing: 8) {
-                Text("Stops and removes the site's containers.")
+                if site.isArchived {
+                    Text("Archived. It stays stopped and out of your library until you bring it back; starting it does too.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Unarchive Site") { vm.unarchiveSite(site) }
+                } else {
+                    Text("Archiving stops the site, settles its branch environments and hides it from your library. Files and databases are kept.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Archive Site") { vm.archiveSite(site) }
+                }
+                Divider()
+                Text("Deleting stops and removes the site's containers.")
                     .font(.caption).foregroundStyle(.secondary)
                 Toggle("Also move the site folder to the Trash", isOn: $trashFolder)
                     .toggleStyle(.checkbox)

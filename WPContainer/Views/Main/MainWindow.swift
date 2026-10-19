@@ -70,12 +70,16 @@ struct MainWindow: View {
     }
 
     #if DEBUG
-    /// Debug-only: `-uiScreen <slug> [-uiTab branches] [-uiStyle list]` opens a
+    /// Debug-only: `-uiScreen <slug> [-uiTab branches] [-uiStyle list] [-uiLibrary branches|archived]` opens a
     /// screen at launch, so layout can be checked from screenshots alone.
     private func openLaunchScreen() {
         let defaults = UserDefaults.standard
         if let style = defaults.string(forKey: "uiStyle").flatMap(LibraryStyle.init(rawValue:)) { vm.libraryStyle = style }
-        if defaults.string(forKey: "uiLibrary") == "branches" { vm.showLibrary(.branches) }
+        switch defaults.string(forKey: "uiLibrary") {
+        case "branches": vm.showLibrary(.branches)
+        case "archived": vm.showLibrary(.archived)
+        default: break
+        }
         guard let slug = defaults.string(forKey: "uiScreen") else { return }
         let id = vm.sites.first { $0.slug == slug }?.id ?? vm.envs.first { $0.envSlug == slug }?.id
         if let id { vm.openScreen(id, tab: defaults.string(forKey: "uiTab") == "branches" ? .branches : .overview) }
@@ -90,7 +94,7 @@ struct MainWindow: View {
         } else if vm.library == .branches {
             BranchTable(site: nil)
                 .navigationTitle("Branches")
-                .navigationSubtitle("\(vm.envs.count) environments across \(Set(vm.envs.map(\.parentSiteID)).count) sites")
+                .navigationSubtitle("\(vm.activeEnvs.count) environments across \(Set(vm.activeEnvs.map(\.parentSiteID)).count) sites")
         } else {
             GalleryView(item: vm.library)
                 .id(vm.library)

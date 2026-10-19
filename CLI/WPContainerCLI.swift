@@ -100,6 +100,16 @@ struct CLIContext {
     /// Reuses `SiteLifecycle.startSite`/`startInstance` — never reimplements
     /// start. Prints a one-line notice to stderr (stdout is reserved for wp-
     /// cli/MCP output) when it actually starts something.
+    /// Starting an archived site brings it back: clear the archive mark so the
+    /// app lists it again and the proxy routes it.
+    func unarchiveIfNeeded(_ site: Site) async throws {
+        guard site.isArchived else { return }
+        _ = try await persistence.mutate { store in
+            if let i = store.sites.firstIndex(where: { $0.id == site.id }) { store.sites[i].archivedAt = nil }
+        }
+        FileHandle.standardError.write(Data("\(site.slug) was archived — unarchiving it.\n".utf8))
+    }
+
     func ensureRunning(_ resolved: ResolvedTarget, envelope: StoreEnvelope, noStart: Bool = false) async throws {
         guard !noStart, await !lifecycle.isWPContainerRunning(resolved.instance) else { return }
         if case .env(let env) = resolved, env.isSettled {
@@ -114,6 +124,7 @@ struct CLIContext {
         FileHandle.standardError.write(Data("\(label) was stopped — starting it first…\n".utf8))
         switch resolved {
         case .site(let site):
+            try await unarchiveIfNeeded(site)
             let provisioned = try await lifecycle.startSite(site)
             if provisioned != site.provisioned {
                 _ = try await persistence.mutate { store in
@@ -353,6 +364,7 @@ struct StartCommand: AsyncParsableCommand {
             guard let resolved = resolveTarget(target, in: envelope) else { throw CLIErrorJSON("not_found", detail: target) }
             switch resolved {
             case .site(let site):
+                try await ctx.unarchiveIfNeeded(site)
                 // An explicit start is the clearest possible activity signal, so
                 // the idle sweep can't park what somebody just asked for (issue
                 // #16). Wake-triggered starts deliberately do NOT stamp — that

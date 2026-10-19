@@ -141,6 +141,13 @@ public final class AppViewModel {
 
     public var sites: [Site] { store.sites }
     public var envs: [WorktreeEnv] { store.envs }
+    /// Sites that aren't archived: what the library, menu bar and counts show.
+    public var activeSites: [Site] { store.sites.filter { !$0.isArchived } }
+    /// Envs whose site isn't archived.
+    public var activeEnvs: [WorktreeEnv] {
+        let archived = Set(store.sites.filter(\.isArchived).map(\.id))
+        return store.envs.filter { !archived.contains($0.parentSiteID) }
+    }
 
     // MARK: - Lifecycle of the view model
 
@@ -1093,6 +1100,11 @@ public final class AppViewModel {
             // idle sweep can't park it before they've done anything with it. Wakes
             // deliberately don't stamp — that would let the sweep feed itself.
             await store.recordActivity(id: site.id)
+            // Starting an archived site unarchives it, so it is listed and routed again.
+            if site.isArchived {
+                await store.setArchived(nil, siteID: site.id)
+                await refreshProxyRouting()
+            }
             // Settled envs stay parked; starting one restores it.
             let envs = includeEnvs ? store.envs(forSite: site.id).filter { !$0.isSettled } : []
             // An HTTPS/custom-domain site is unreachable without the reverse
@@ -1299,6 +1311,35 @@ public final class AppViewModel {
             }
             if selection == env.id { selection = env.parentSiteID }
             try? await ca.removeLeafCoverage([env.domainHost])
+        }
+    }
+
+    // MARK: - Archiving
+
+    /// Archive a site: stop it and its branch environments, settle the active
+    /// ones (freeing their ports), then hide it from the library and drop it
+    /// from the proxy's routes so nothing wakes it. Files and databases stay.
+    public func archiveSite(_ site: Site) {
+        Task {
+            let envs = store.envs(forSite: site.id)
+            await lifecycle.stopSiteWithEnvs(site, envs: envs)
+            for env in envs where !env.isSettled {
+                do { try await settler.settle(env, parent: site) }
+                catch { lastError = SiteLifecycleErrorText(error) }
+            }
+            await store.setArchived(Date(), siteID: site.id)
+            await store.reload()
+            await refreshProxyRouting()
+        }
+    }
+
+    /// Bring an archived site back into the library and the proxy's routes. Its
+    /// branch environments stay settled until restored one by one.
+    public func unarchiveSite(_ site: Site) {
+        Task {
+            await store.setArchived(nil, siteID: site.id)
+            await store.reload()
+            await refreshProxyRouting()
         }
     }
 

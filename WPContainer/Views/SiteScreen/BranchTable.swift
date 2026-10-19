@@ -30,7 +30,7 @@ struct BranchTable: View {
     @State private var sortOrder = [KeyPathComparator(\BranchRow.lastUsed, order: .reverse)]
     @State private var confirmingDelete: [WorktreeEnv] = []
 
-    private var scope: [WorktreeEnv] { site.map { vm.store.envs(forSite: $0.id) } ?? vm.envs }
+    private var scope: [WorktreeEnv] { site.map { vm.store.envs(forSite: $0.id) } ?? vm.activeEnvs }
 
     var body: some View {
         @Bindable var vm = vm

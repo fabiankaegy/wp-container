@@ -88,8 +88,15 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     /// is guaranteed up; entries are cleared once their DROP actually succeeds.
     public var pendingSchemaDrops: [String] = []
 
+    /// When the site was archived: stopped, its branch environments settled,
+    /// hidden from the default library and left out of the proxy's routes, with
+    /// every file and database kept. nil while active.
+    public var archivedAt: Date?
+
     /// Runtime-derived; NOT persisted.
     public var status: SiteStatus = .stopped
+
+    public var isArchived: Bool { archivedAt != nil }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, slug, path, port, imageTag, phpVersion, createdAt, provisioned, groupID, httpsEnabled
@@ -101,6 +108,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         case redisEnabled
         case lastImportSourceURL
         case pendingSchemaDrops
+        case archivedAt
     }
 
     public init(
@@ -130,6 +138,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         agentToolsDoc: String? = nil,
         lastImportSourceURL: String? = nil,
         pendingSchemaDrops: [String] = [],
+        archivedAt: Date? = nil,
         status: SiteStatus = .stopped
     ) {
         self.id = id
@@ -158,6 +167,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.agentToolsDoc = agentToolsDoc
         self.lastImportSourceURL = lastImportSourceURL
         self.pendingSchemaDrops = pendingSchemaDrops
+        self.archivedAt = archivedAt
         self.status = status
     }
 
@@ -204,6 +214,8 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         // the blast radius because every drop re-checks.
         self.pendingSchemaDrops = ((try? c.decodeIfPresent([String].self, forKey: .pendingSchemaDrops)) ?? [])
             ?? []
+        // Absent in stores written before archiving existed: an active site.
+        self.archivedAt = try? c.decodeIfPresent(Date.self, forKey: .archivedAt)
     }
 
     // MARK: Derived paths

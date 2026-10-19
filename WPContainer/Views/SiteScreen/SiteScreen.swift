@@ -75,8 +75,14 @@ struct SiteScreen: View {
                 VStack(alignment: .leading, spacing: 20) {
                     header(site: site, env: env)
                         .padding(.top, hasSnapshot(id, fallback: env == nil ? nil : site.id) ? -48 : 0)
-                    if env == nil { BranchesPanel(site: site) }
-                    if status.isRunning {
+                    if env == nil, site.isArchived {
+                        ArchivedBanner(site: site)
+                    } else if env == nil {
+                        BranchesPanel(site: site)
+                    }
+                    if site.isArchived && env == nil {
+                        EmptyView()
+                    } else if status.isRunning {
                         LiveTiles(id: id)
                     } else {
                         Label(env?.isSettled == true
@@ -129,7 +135,7 @@ struct SiteScreen: View {
                         Text("Branch of")
                         Button(site.name) { vm.openScreen(site.id) }.buttonStyle(.link)
                     } else {
-                        StatusPill(status: site.status)
+                        if site.isArchived { SettledPill(label: "Archived") } else { StatusPill(status: site.status) }
                         Text(site.displayHost)
                         let envs = vm.store.envs(forSite: site.id)
                         if !envs.isEmpty {
@@ -235,6 +241,28 @@ private struct LiveTiles: View {
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(.separator.opacity(0.6), lineWidth: 0.5))
         .animation(.easeOut(duration: 0.3), value: value)
+    }
+}
+
+/// Shown instead of branches and live stats on an archived site's Overview.
+private struct ArchivedBanner: View {
+    @Environment(AppViewModel.self) private var vm
+    let site: Site
+
+    var body: some View {
+        HStack(spacing: 12) {
+            SectionIcon(systemName: "archivebox", color: .gray, size: 32)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("This site is archived").font(.headline)
+                Text("It stays stopped and out of your library, and nothing wakes it. Its files and database are kept.")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 12)
+            Button("Unarchive") { vm.unarchiveSite(site) }
+                .buttonStyle(.borderedProminent)
+        }
+        .card()
     }
 }
 

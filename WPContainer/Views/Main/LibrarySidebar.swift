@@ -18,16 +18,20 @@ struct LibrarySidebar: View {
     var body: some View {
         List(selection: selection) {
             Section("Library") {
-                row(.allSites, "All Sites", "square.grid.2x2", .blue, count: vm.sites.count)
-                row(.running, "Running", "play.fill", .green, count: vm.sites.filter { $0.status.isRunning }.count)
-                row(.branches, "Branches", "arrow.triangle.branch", .purple, count: vm.envs.count,
-                    stale: vm.envs.filter { EnvSettlement.isStale($0) }.count)
+                row(.allSites, "All Sites", "square.grid.2x2", .blue, count: vm.activeSites.count)
+                row(.running, "Running", "play.fill", .green, count: vm.activeSites.filter { $0.status.isRunning }.count)
+                row(.branches, "Branches", "arrow.triangle.branch", .purple, count: vm.activeEnvs.count,
+                    stale: vm.activeEnvs.filter { EnvSettlement.isStale($0) }.count)
+                let archived = vm.sites.filter(\.isArchived).count
+                if archived > 0 {
+                    row(.archived, "Archived", "archivebox.fill", .gray, count: archived)
+                }
             }
             runningBranches
             Section("Groups") {
                 ForEach(Array(vm.store.sortedGroups.enumerated()), id: \.element.id) { index, group in
                     row(.group(group.id), group.name, "folder.fill", Self.groupColors[index % Self.groupColors.count],
-                        count: vm.sites.filter { $0.groupID == group.id }.count)
+                        count: vm.activeSites.filter { $0.groupID == group.id }.count)
                         .dropDestination(for: String.self) { items, _ in move(items, to: group.id) }
                         .contextMenu {
                             Button("Rename Group…") { renameText = group.name; renamingGroup = group }
