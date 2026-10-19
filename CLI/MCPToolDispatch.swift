@@ -663,10 +663,10 @@ enum MCPToolDispatch {
 
     // MARK: - db_import (PLAN.md §2m)
 
-    /// Imports a `.sql`/`.sql.gz` dump into a site's database. Sites only (not
-    /// worktree environments) in v1. Auto-starts a stopped site (the kit never
-    /// starts containers itself) and persists the detected/overridden source
-    /// URL into `lastImportSourceURL` afterward (the kit doesn't write it).
+    /// Imports a `.sql`/`.sql.gz` dump into a site's or worktree env's database.
+    /// Auto-starts a stopped target (the kit never starts containers itself) and
+    /// persists a site's detected/overridden source URL into
+    /// `lastImportSourceURL` afterward (the kit doesn't write it).
     /// No streaming progress over MCP — the progress callback is a no-op and
     /// only the final summary (or a structured phaseFailed error) is returned.
     private static func dbImport(_ args: [String: Value], ctx: CLIContext, slug: String) async throws -> CallTool.Result {
@@ -675,11 +675,14 @@ enum MCPToolDispatch {
         }
         let targetSlug = args["site"]?.stringValue ?? slug
         let envelope = try await ctx.load()
-        guard let site = envelope.sites.first(where: { $0.slug == targetSlug }) else {
-            if envelope.envs.contains(where: { $0.envSlug == targetSlug }) {
-                throw ToolError("unsupported_target", "db_import targets sites only (not worktree environments) in this version.")
-            }
-            throw ToolError("site_not_found", "No site with slug \(targetSlug).")
+        guard let resolved = resolveTarget(targetSlug, in: envelope) else {
+            throw ToolError("site_not_found", "No site or environment with slug \(targetSlug).")
+        }
+        let inst = resolved.instance
+        let publicURL: URL
+        switch resolved {
+        case .site(let s): publicURL = s.url
+        case .env(let e): publicURL = e.url
         }
 
         let mediaArg = args["media"]?.stringValue ?? "remote"
@@ -707,29 +710,22 @@ enum MCPToolDispatch {
 
         // Auto-start (mirrors the CLI surface): the kit throws .siteNotRunning
         // rather than starting containers itself.
-        let running = await ctx.runningContainerNames()
-        if !running.contains(site.wpContainerName) {
-            let provisioned = try await ctx.lifecycle.startSite(site)
-            if provisioned != site.provisioned {
-                _ = try await ctx.persistence.mutate { env in
-                    if let i = env.sites.firstIndex(where: { $0.id == site.id }) { env.sites[i].provisioned = provisioned }
-                }
-            }
-        }
+        try await ctx.ensureRunning(resolved, envelope: envelope)
 
         let dumpURL = URL(fileURLWithPath: (file as NSString).expandingTildeInPath)
         let importer = DatabaseImportService(cli: ctx.cli, lifecycle: ctx.lifecycle)
         do {
-            let summary = try await importer.importDatabase(into: site, dump: dumpURL, options: options) { _ in
+            let summary = try await importer.importDatabase(into: inst, publicURL: publicURL, dump: dumpURL,
+                                                            options: options) { _ in
                 // No streaming progress over MCP — final result only.
             }
-            if let detectedSource = summary.sourceURL {
+            if case .site(let site) = resolved, let detectedSource = summary.sourceURL {
                 _ = try? await ctx.persistence.mutate { env in
                     if let i = env.sites.firstIndex(where: { $0.id == site.id }) { env.sites[i].lastImportSourceURL = detectedSource }
                 }
             }
             return MCPResult.json([
-                "site": site.slug,
+                "site": targetSlug,
                 "sourceURL": summary.sourceURL as Any? ?? NSNull(),
                 "localURL": summary.localURL,
                 "backupPath": summary.backupPath,

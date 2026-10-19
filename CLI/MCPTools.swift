@@ -128,9 +128,9 @@ enum MCPTools {
                 "slug": str("Site or environment slug (defaults to the scoped site)."),
              ])),
         Tool(name: "db_import",
-             description: "Import a .sql/.sql.gz dump into a site's database: safety backup (one command away from undone) → import → URL migration (source detected from the dump's `home` option, or source_url) → optional scrub of personal data (users/comments/admin email) → media handling (remote proxy handler, folder copy, or skip) → optional local admin/password login. Auto-starts the site if it isn't running. On failure the pre-import backup is automatically re-imported (rollback) before the error is returned. Sites only (not worktree environments) in this version. No streaming progress — returns the final summary.",
+             description: "Import a .sql/.sql.gz dump into a site's or worktree environment's database: safety backup (one command away from undone) → import → URL migration (source detected from the dump's `home` option, or source_url) → optional scrub of personal data (users/comments/admin email) → media handling (remote proxy handler, folder copy, or skip) → optional local admin/password login. Works on a site or a worktree environment: an environment's import replaces only its own database and migrates URLs to the environment's URL (a dump that switches databases with USE/CREATE DATABASE is refused for an environment sharing its parent's server). Auto-starts the target if it isn't running. On failure the pre-import backup is automatically re-imported (rollback) before the error is returned. No streaming progress — returns the final summary.",
              inputSchema: obj([
-                "site": str("Site slug (defaults to the scoped site)."),
+                "site": str("Site or worktree environment slug (defaults to the scoped site)."),
                 "file": str("Absolute path to a .sql or .sql.gz dump file."),
                 "scrub": bool("Scrub personal data after import (default true)."),
                 "allowed_emails": strArray("Email addresses to preserve as-is when scrubbing."),

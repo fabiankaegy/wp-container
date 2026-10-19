@@ -318,6 +318,15 @@ extension HelpTopic {
                 body: "Before importing, WP Container takes a backup of the current database. If the import fails, it automatically re-imports that backup — so a failed import leaves your existing database untouched.",
                 tip: "The pre-import backup means an import is always one step from undone."
             ),
+            HelpSection(
+                title: "Importing into a branch environment",
+                body: "A branch environment starts with a copy of its site's database. To test a branch against different data, import a dump into the environment itself: `wp-container db import <env-slug> dump.sql`.",
+                bullets: [
+                    "Only the environment's own database is replaced; the site and other environments are untouched.",
+                    "URLs are migrated to the environment's URL.",
+                    "A dump that switches databases (`USE`, `CREATE DATABASE`, as `mysqldump --databases` writes) is refused for an environment that shares its site's database server. Export with `wp db export` instead.",
+                ]
+            ),
         ]
     )
 

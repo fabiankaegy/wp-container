@@ -17,6 +17,9 @@ public enum DatabaseImportError: Error, Sendable, CustomStringConvertible, Local
     /// and none could be detected).
     case sourceURLRequired
     case mediaFolderNotFound(String)
+    /// The dump selects, creates or drops a database (`statement` is the first
+    /// such line), refused for an env that shares its parent's database server.
+    case dumpSwitchesDatabase(statement: String)
     /// A phase at/after `.importing` failed. Rollback (re-importing the
     /// pre-import backup) was attempted; `rolledBack` says whether it
     /// succeeded. The original failure is preserved in `short`/`full`.
@@ -42,6 +45,9 @@ public enum DatabaseImportError: Error, Sendable, CustomStringConvertible, Local
             return "Remote media requires a known source URL — none was detected in the dump and none was provided as an override."
         case .mediaFolderNotFound(let p):
             return "No folder found at \(p) to copy media from."
+        case .dumpSwitchesDatabase(let statement):
+            return "The dump switches databases (\(statement)), which could write into the parent site's database. "
+                + "Export it without --databases (e.g. `wp db export` or `mysqldump <db>`) and import again."
         case .phaseFailed(let phase, let short, _, let rolledBack):
             let rb = rolledBack
                 ? "the pre-import database was restored."
@@ -293,7 +299,24 @@ public actor DatabaseImportService {
         options: DBImportOptions,
         progress: @escaping @Sendable (DBImportPhase) -> Void
     ) async throws -> DBImportSummary {
+        try await importDatabase(into: site, publicURL: site.url, dump: dump, options: options, progress: progress)
+    }
+
+    /// The pipeline for a site or a worktree env. URLs are migrated to
+    /// `publicURL` (the env's advertised URL), the backup lands in the
+    /// instance's own `.backups/`, and every wp-cli step targets the instance's
+    /// own schema. For an env that shares its parent's database server, a dump
+    /// that switches databases (`USE`, `CREATE`/`DROP DATABASE`) is refused,
+    /// since it could write into the parent's or a sibling's schema.
+    public func importDatabase(
+        into inst: any RunnableInstance,
+        publicURL: URL,
+        dump: URL,
+        options: DBImportOptions,
+        progress: @escaping @Sendable (DBImportPhase) -> Void
+    ) async throws -> DBImportSummary {
         progress(.preflight)
+        let root = inst.wordpressFolder.deletingLastPathComponent()
 
         let ext = dump.pathExtension.lowercased()
         guard ["sql", "gz"].contains(ext) else {
@@ -305,17 +328,17 @@ public actor DatabaseImportService {
 
         // Site must already be running — never auto-started here (§2m brief:
         // surfaces decide whether to start-and-retry).
-        guard let dbHost = try await cli.ipAddress(of: site.dbContainerName), !dbHost.isEmpty else {
+        guard let dbHost = try await cli.ipAddress(of: inst.dbContainerName), !dbHost.isEmpty else {
             throw DatabaseImportError.siteNotRunning
         }
-        try await lifecycle.waitForDatabaseReady(site, dbHost: dbHost)
+        try await lifecycle.waitForDatabaseReady(inst, dbHost: dbHost)
 
         let dumpSizeBytes = ((try? FileManager.default.attributesOfItem(atPath: dump.path))?[.size] as? NSNumber)?.int64Value ?? 0
-        try Self.checkDiskSpace(dumpBytes: dumpSizeBytes, isGzip: ext == "gz", site: site)
+        try Self.checkDiskSpace(dumpBytes: dumpSizeBytes, isGzip: ext == "gz", root: root)
 
         // Stage the dump INSIDE the wordpress/ mount so the one-shot wp-cli
         // container can see it. `.wpc-import/` is always removed on exit.
-        let stagingDir = site.wordpressFolder.appendingPathComponent(".wpc-import", isDirectory: true)
+        let stagingDir = inst.wordpressFolder.appendingPathComponent(".wpc-import", isDirectory: true)
         try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: stagingDir) }
 
@@ -329,6 +352,10 @@ public actor DatabaseImportService {
             try FileManager.default.copyItem(at: dump, to: stagedDump)
         }
         let containerDumpPath = "/var/www/html/.wpc-import/dump.sql"
+
+        if !inst.ownsDatabaseContainer, let statement = Self.databaseSwitch(inDumpFile: stagedDump) {
+            throw DatabaseImportError.dumpSwitchesDatabase(statement: statement)
+        }
 
         // Remote media needs a KNOWN source URL. Best-effort pre-scan the
         // staged dump so this fails fast here rather than at phase 6 — the
@@ -345,12 +372,12 @@ public actor DatabaseImportService {
         // multi-GB export must never be buffered through a Swift String),
         // then moved out of the transient staging dir onto the host.
         progress(.backup)
-        let backupsDir = site.path.appendingPathComponent(".backups", isDirectory: true)
+        let backupsDir = root.appendingPathComponent(".backups", isDirectory: true)
         try FileManager.default.createDirectory(at: backupsDir, withIntermediateDirectories: true)
         let backupURL = backupsDir.appendingPathComponent("pre-import-\(Self.timestamp()).sql")
         let backupStagedURL = stagingDir.appendingPathComponent("backup.sql")
         try await cli.run(SiteRecipe.wpDBExportToFileArgs(
-            site, dbHost: dbHost, containerPath: "/var/www/html/.wpc-import/backup.sql"))
+            inst, dbHost: dbHost, containerPath: "/var/www/html/.wpc-import/backup.sql"))
         if FileManager.default.fileExists(atPath: backupURL.path) {
             try FileManager.default.removeItem(at: backupURL)
         }
@@ -361,11 +388,11 @@ public actor DatabaseImportService {
         var currentPhase: DBImportPhase = .importing
         do {
             progress(.importing)
-            try await cli.run(SiteRecipe.wpDBImportArgs(site, dbHost: dbHost, containerPath: containerDumpPath))
+            try await importSQL(inst, dbHost: dbHost, containerPath: containerDumpPath)
 
             currentPhase = .urlMigration
             progress(.urlMigration)
-            let migration = try await migrateURLs(site: site, dbHost: dbHost, override: options.sourceURLOverride)
+            let migration = try await migrateURLs(inst: inst, publicURL: publicURL, dbHost: dbHost, override: options.sourceURLOverride)
 
             var usersScrubbed = 0
             var usersPreserved = 0
@@ -373,23 +400,23 @@ public actor DatabaseImportService {
             if options.scrub {
                 currentPhase = .scrubbing
                 progress(.scrubbing)
-                (usersScrubbed, usersPreserved, commentsRemoved) = try await scrub(site: site, dbHost: dbHost, options: options)
+                (usersScrubbed, usersPreserved, commentsRemoved) = try await scrub(inst: inst, dbHost: dbHost, options: options)
             }
 
             currentPhase = .media
             progress(.media)
-            let mediaMode = try await handleMedia(site: site, media: options.media, sourceURL: migration.source)
+            let mediaMode = try await handleMedia(inst: inst, media: options.media, sourceURL: migration.source)
 
             if options.createAdmin {
                 currentPhase = .admin
                 progress(.admin)
-                try await ensureAdmin(site: site, dbHost: dbHost)
+                try await ensureAdmin(inst: inst, dbHost: dbHost)
             }
 
             currentPhase = .finishing
             progress(.finishing)
-            try await cli.run(SiteRecipe.wpCacheFlushArgs(site, dbHost: dbHost))
-            await RedisService.flush(site, cli: cli)
+            try await cli.run(SiteRecipe.wpCacheFlushArgs(inst, dbHost: dbHost))
+            await RedisService.flush(inst, cli: cli)
 
             return DBImportSummary(
                 sourceURL: migration.source,
@@ -406,7 +433,7 @@ public actor DatabaseImportService {
             )
         } catch {
             progress(.rollingBack)
-            let rolledBack = await attemptRollback(site: site, dbHost: dbHost, backupURL: backupURL)
+            let rolledBack = await attemptRollback(inst: inst, dbHost: dbHost, backupURL: backupURL)
             throw DatabaseImportError.phaseFailed(
                 phase: currentPhase,
                 short: DatabaseImportError.firstLine(of: error),
@@ -418,12 +445,12 @@ public actor DatabaseImportService {
 
     // MARK: - URL migration
 
-    private func migrateURLs(site: Site, dbHost: String, override: String?)
+    private func migrateURLs(inst: any RunnableInstance, publicURL: URL, dbHost: String, override: String?)
         async throws -> (source: String?, local: String, replacements: Int?) {
-        let localURL = site.url.absoluteString
+        let localURL = publicURL.absoluteString
         var source = override
         if source == nil {
-            let raw = try await cli.run(SiteRecipe.wpOptionGetArgs(site, dbHost: dbHost, option: "home"))
+            let raw = try await cli.run(SiteRecipe.wpOptionGetArgs(inst, dbHost: dbHost, option: "home"))
             let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             source = trimmed.isEmpty ? nil : trimmed
         }
@@ -431,7 +458,7 @@ public actor DatabaseImportService {
             return (source, localURL, nil)
         }
 
-        let primaryOutput = try await cli.run(SiteRecipe.wpSearchReplaceArgs(site, dbHost: dbHost, source: sourceURL, target: localURL))
+        let primaryOutput = try await cli.run(SiteRecipe.wpSearchReplaceArgs(inst, dbHost: dbHost, source: sourceURL, target: localURL))
         var total = 0
         var anyParsed = false
         if let count = EnvURLMigration.parseReplacementCount(primaryOutput) {
@@ -447,7 +474,7 @@ public actor DatabaseImportService {
             let srcRelative = "//\(srcHost)" + (srcPort.map { ":\($0)" } ?? "")
             let tgtRelative = "//\(tgtHost)" + (tgtPort.map { ":\($0)" } ?? "")
             if srcRelative != tgtRelative {
-                if let out = try? await cli.run(SiteRecipe.wpSearchReplaceArgs(site, dbHost: dbHost, source: srcRelative, target: tgtRelative)),
+                if let out = try? await cli.run(SiteRecipe.wpSearchReplaceArgs(inst, dbHost: dbHost, source: srcRelative, target: tgtRelative)),
                    let count = EnvURLMigration.parseReplacementCount(out) {
                     total += count
                     anyParsed = true
@@ -456,7 +483,7 @@ public actor DatabaseImportService {
             let srcBareHost = String(srcRelative.dropFirst(2))
             let tgtBareHost = String(tgtRelative.dropFirst(2))
             if srcBareHost != tgtBareHost, srcBareHost != sourceURL {
-                if let out = try? await cli.run(SiteRecipe.wpSearchReplaceArgs(site, dbHost: dbHost, source: srcBareHost, target: tgtBareHost)),
+                if let out = try? await cli.run(SiteRecipe.wpSearchReplaceArgs(inst, dbHost: dbHost, source: srcBareHost, target: tgtBareHost)),
                    let count = EnvURLMigration.parseReplacementCount(out) {
                     total += count
                     anyParsed = true
@@ -467,59 +494,59 @@ public actor DatabaseImportService {
         // Belt-and-braces (mirrors `SiteRecipe.wpSetURLsArgs`, used for HTTPS
         // toggling): make sure home/siteurl land on the local URL regardless of
         // whether search-replace's row-scan touched the `options` table oddly.
-        try await cli.run(SiteRecipe.wpSetURLsArgs(site, dbHost: dbHost, url: localURL))
+        try await cli.run(SiteRecipe.wpSetURLsArgs(inst, dbHost: dbHost, url: localURL))
 
         return (sourceURL, localURL, anyParsed ? total : nil)
     }
 
     // MARK: - Scrub
 
-    private func scrub(site: Site, dbHost: String, options: DBImportOptions)
+    private func scrub(inst: any RunnableInstance, dbHost: String, options: DBImportOptions)
         async throws -> (scrubbed: Int, preserved: Int, commentsRemoved: Int) {
         try DBScrubSQL.validate(allowedEmails: options.allowedEmails, allowedDomains: options.allowedDomains)
 
         var tablePrefix = "wp_"
-        if let parsed = try? WPConfigService.read(wordpressFolder: site.wordpressFolder),
+        if let parsed = try? WPConfigService.read(wordpressFolder: inst.wordpressFolder),
            let prefix = parsed.tablePrefix, !prefix.isEmpty {
             tablePrefix = prefix
         }
 
         // Counts captured BEFORE any mutation.
-        let totalUsers = try await queryScalarInt(site: site, dbHost: dbHost,
+        let totalUsers = try await queryScalarInt(inst: inst, dbHost: dbHost,
                                                   sql: DBScrubSQL.countAllUsersSQL(tablePrefix: tablePrefix))
-        let toScrub = try await queryScalarInt(site: site, dbHost: dbHost, sql: DBScrubSQL.countUsersToScrubSQL(
+        let toScrub = try await queryScalarInt(inst: inst, dbHost: dbHost, sql: DBScrubSQL.countUsersToScrubSQL(
             tablePrefix: tablePrefix, allowedEmails: options.allowedEmails,
             allowedDomains: options.allowedDomains, adminEmail: SiteRecipe.adminEmail))
-        let commentsRemoved = try await queryScalarInt(site: site, dbHost: dbHost,
+        let commentsRemoved = try await queryScalarInt(inst: inst, dbHost: dbHost,
                                                        sql: DBScrubSQL.countCommentsSQL(tablePrefix: tablePrefix))
 
         for sql in DBScrubSQL.scrubStatements(tablePrefix: tablePrefix, allowedEmails: options.allowedEmails,
                                               allowedDomains: options.allowedDomains, adminEmail: SiteRecipe.adminEmail) {
-            try await cli.run(SiteRecipe.wpDBQueryArgs(site, dbHost: dbHost, sql: sql))
+            try await cli.run(SiteRecipe.wpDBQueryArgs(inst, dbHost: dbHost, sql: sql))
         }
 
         return (toScrub, max(totalUsers - toScrub, 0), commentsRemoved)
     }
 
-    private func queryScalarInt(site: Site, dbHost: String, sql: String) async throws -> Int {
-        let out = try await cli.run(SiteRecipe.wpDBQueryArgs(site, dbHost: dbHost, sql: sql, skipColumnNames: true))
+    private func queryScalarInt(inst: any RunnableInstance, dbHost: String, sql: String) async throws -> Int {
+        let out = try await cli.run(SiteRecipe.wpDBQueryArgs(inst, dbHost: dbHost, sql: sql, skipColumnNames: true))
         return Int(out.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
     }
 
     // MARK: - Media
 
-    private func handleMedia(site: Site, media: DBImportMediaOption, sourceURL: String?) async throws -> String {
+    private func handleMedia(inst: any RunnableInstance, media: DBImportMediaOption, sourceURL: String?) async throws -> String {
         switch media {
         case .remote:
             guard let sourceURL else { throw DatabaseImportError.sourceURLRequired }
-            try RemoteMediaService.writeHandler(phpConfFolder: site.phpConfFolder, sourceBaseURL: sourceURL)
+            try RemoteMediaService.writeHandler(phpConfFolder: inst.phpConfFolder, sourceBaseURL: sourceURL)
             return "remote"
         case .copy(let from):
             var isDir: ObjCBool = false
             guard FileManager.default.fileExists(atPath: from.path, isDirectory: &isDir), isDir.boolValue else {
                 throw DatabaseImportError.mediaFolderNotFound(from.path)
             }
-            try Self.copyMediaContents(from: from, to: site.wordpressFolder.appendingPathComponent("wp-content/uploads", isDirectory: true))
+            try Self.copyMediaContents(from: from, to: inst.wordpressFolder.appendingPathComponent("wp-content/uploads", isDirectory: true))
             return "copy"
         case .skip:
             return "skip"
@@ -544,21 +571,50 @@ public actor DatabaseImportService {
 
     // MARK: - Local admin
 
-    private func ensureAdmin(site: Site, dbHost: String) async throws {
-        let existing = try await cli.runCapturing(SiteRecipe.wpUserGetArgs(site, dbHost: dbHost, user: SiteRecipe.adminUser))
+    private func ensureAdmin(inst: any RunnableInstance, dbHost: String) async throws {
+        let existing = try await cli.runCapturing(SiteRecipe.wpUserGetArgs(inst, dbHost: dbHost, user: SiteRecipe.adminUser))
         if existing.succeeded {
-            try await cli.run(SiteRecipe.wpUserUpdateAdminPasswordArgs(site, dbHost: dbHost))
-            try await cli.run(SiteRecipe.wpUserSetRoleAdminArgs(site, dbHost: dbHost))
+            try await cli.run(SiteRecipe.wpUserUpdateAdminPasswordArgs(inst, dbHost: dbHost))
+            try await cli.run(SiteRecipe.wpUserSetRoleAdminArgs(inst, dbHost: dbHost))
         } else {
-            try await cli.run(SiteRecipe.wpUserCreateAdminArgs(site, dbHost: dbHost))
+            try await cli.run(SiteRecipe.wpUserCreateAdminArgs(inst, dbHost: dbHost))
         }
+    }
+
+    // MARK: - SQL import
+
+    /// `wp db import` of a staged file. wp-cli exits 0 even when a statement
+    /// fails (the client keeps going), so a MySQL `ERROR nnnn` line in its
+    /// output is treated as a failed import too.
+    private func importSQL(_ inst: any RunnableInstance, dbHost: String, containerPath: String) async throws {
+        let args = SiteRecipe.wpDBImportArgs(inst, dbHost: dbHost, containerPath: containerPath)
+        let result = try await cli.runCapturing(args)
+        if let line = Self.sqlError(in: result.stdout + "\n" + result.stderr) {
+            throw SQLImportError(message: line)
+        }
+        guard result.succeeded else {
+            throw ContainerCLIError(command: args, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr)
+        }
+    }
+
+    /// A statement in the dump failed; `message` is the MySQL client's error line.
+    struct SQLImportError: Error, CustomStringConvertible {
+        let message: String
+        var description: String { message }
+    }
+
+    /// The first MySQL client error line (`ERROR 1146 (42S02) at line 2 …`), if any.
+    static func sqlError(in output: String) -> String? {
+        output.split(whereSeparator: \.isNewline)
+            .first { $0.firstMatch(of: /^ERROR \d+ \([0-9A-Z]{5}\)/) != nil }
+            .map(String.init)
     }
 
     // MARK: - Rollback
 
     /// Re-import the pre-import backup. Returns whether it succeeded; never throws.
-    private func attemptRollback(site: Site, dbHost: String, backupURL: URL) async -> Bool {
-        let stagingDir = site.wordpressFolder.appendingPathComponent(".wpc-import", isDirectory: true)
+    private func attemptRollback(inst: any RunnableInstance, dbHost: String, backupURL: URL) async -> Bool {
+        let stagingDir = inst.wordpressFolder.appendingPathComponent(".wpc-import", isDirectory: true)
         let rollbackFile = stagingDir.appendingPathComponent("rollback.sql")
         do {
             try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
@@ -567,8 +623,7 @@ public actor DatabaseImportService {
             }
             try FileManager.default.copyItem(at: backupURL, to: rollbackFile)
             defer { try? FileManager.default.removeItem(at: rollbackFile) }
-            try await cli.run(SiteRecipe.wpDBImportArgs(
-                site, dbHost: dbHost, containerPath: "/var/www/html/.wpc-import/rollback.sql"))
+            try await importSQL(inst, dbHost: dbHost, containerPath: "/var/www/html/.wpc-import/rollback.sql")
             return true
         } catch {
             return false
@@ -591,10 +646,10 @@ public actor DatabaseImportService {
     /// several times the compressed file's size. Not exact — dumps >2GB are a
     /// known non-goal (§2m) — just enough to fail fast before burning minutes
     /// on an import that was never going to fit.
-    private static func checkDiskSpace(dumpBytes: Int64, isGzip: Bool, site: Site) throws {
+    private static func checkDiskSpace(dumpBytes: Int64, isGzip: Bool, root: URL) throws {
         guard dumpBytes > 0 else { return }
         let estimatedNeed = isGzip ? dumpBytes * 8 : dumpBytes * 3
-        guard let available = try? site.path.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        guard let available = try? root.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
             .volumeAvailableCapacityForImportantUsage else {
             return
         }
@@ -630,6 +685,58 @@ public actor DatabaseImportService {
             tail = String(chunkText.suffix(256))
         }
         return nil
+    }
+
+    /// The first statement in a STAGED dump that selects, creates or drops a
+    /// database (`USE`, `CREATE DATABASE`/`SCHEMA`, `DROP DATABASE`/`SCHEMA`,
+    /// as `mysqldump --databases` writes), trimmed to its opening words; nil
+    /// when there is none. Scans the whole file, reading only the start of each
+    /// line, so a multi-GB dump is never held in memory.
+    static func databaseSwitch(inDumpFile url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        let prefixLength = 40
+        var lineStart: [UInt8] = []
+        var collecting = true
+        var found: String?
+
+        func check(_ bytes: [UInt8]) -> String? {
+            let text = String(decoding: bytes, as: UTF8.self).trimmingCharacters(in: .whitespaces)
+            let upper = text.uppercased()
+            let switches = ["USE ", "USE`", "CREATE DATABASE", "CREATE SCHEMA", "DROP DATABASE", "DROP SCHEMA"]
+            return switches.contains { upper.hasPrefix($0) } ? text : nil
+        }
+
+        while found == nil, let chunk = try? handle.read(upToCount: 4 * 1024 * 1024), !chunk.isEmpty {
+            chunk.withUnsafeBytes { raw in
+                guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+                var i = 0
+                while i < raw.count, found == nil {
+                    if collecting {
+                        let byte = base[i]
+                        i += 1
+                        if byte == 0x0A {
+                            found = check(lineStart)
+                            lineStart.removeAll(keepingCapacity: true)
+                            continue
+                        }
+                        lineStart.append(byte)
+                        if lineStart.count == prefixLength {
+                            found = check(lineStart)
+                            collecting = false
+                        }
+                    } else {
+                        // Skip the rest of a long line (an INSERT can run to megabytes).
+                        guard let newline = memchr(base + i, 0x0A, raw.count - i) else { i = raw.count; break }
+                        i = UnsafeRawPointer(newline) - UnsafeRawPointer(base) + 1
+                        lineStart.removeAll(keepingCapacity: true)
+                        collecting = true
+                    }
+                }
+            }
+        }
+        if found == nil, collecting, !lineStart.isEmpty { found = check(lineStart) }
+        return found
     }
 
     /// Decompress a `.gz` dump directly to `destination` via `/usr/bin/gzip

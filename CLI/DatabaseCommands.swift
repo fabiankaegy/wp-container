@@ -23,19 +23,25 @@ enum MediaOptionArg: String, ExpressibleByArgument, CaseIterable {
 struct DBImportCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "import",
-        abstract: "Import a .sql/.sql.gz dump into a site's database.",
+        abstract: "Import a .sql/.sql.gz dump into a site's or worktree env's database.",
         discussion: """
-        Pipeline (PLAN.md §2m): preflight → safety backup (<site>/.backups/pre-import-\
-        <timestamp>.sql) → import → URL migration (source detected from the dump's `home` \
-        option, or --source-url) → scrub of personal data (default ON) → media handling \
-        → local admin/password login (default ON) → finish. If the site isn't running it \
-        is started first (pass --no-start to fail instead). On any failure from the import \
-        step onward, the pre-import backup is automatically re-imported (rollback) before \
-        the error is reported. Sites only (not worktree environments) in this version.
+        Pipeline (PLAN.md §2m): preflight → safety backup (.backups/pre-import-\
+        <timestamp>.sql beside the target's wordpress/) → import → URL migration (source \
+        detected from the dump's `home` option, or --source-url) → scrub of personal data \
+        (default ON) → media handling → local admin/password login (default ON) → finish. \
+        If the target isn't running it is started first (pass --no-start to fail instead). \
+        On any failure from the import step onward, the pre-import backup is automatically \
+        re-imported (rollback) before the error is reported.
+
+        A worktree env's import replaces only the env's own database (its schema on the \
+        parent's server, or its own database container) and migrates URLs to the env's \
+        URL; the parent site and other envs are untouched. For an env sharing its \
+        parent's server, a dump that switches databases (`USE`, `CREATE DATABASE`, as \
+        `mysqldump --databases` writes) is refused.
         """
     )
 
-    @Argument(help: "Site slug.") var site: String
+    @Argument(help: "Site slug or env slug.") var site: String
     @Argument(help: "Path to a .sql or .sql.gz dump file.") var dumpPath: String
 
     @Flag(name: .customLong("scrub"), inversion: .prefixedNo,
@@ -78,14 +84,16 @@ struct DBImportCommand: AsyncParsableCommand {
             guard let resolved = resolveTarget(site, in: envelope) else {
                 throw CLIErrorJSON("not_found", detail: site)
             }
-            guard case .site(let siteRecord) = resolved else {
-                throw CLIErrorJSON("unsupported_target",
-                                    detail: "db import supports sites only (not worktree environments) in this version.")
+            let inst = resolved.instance
+            let publicURL: URL
+            switch resolved {
+            case .site(let s): publicURL = s.url
+            case .env(let e): publicURL = e.url
             }
-            // A long-running import against an idle-stop-enabled site must not
+            // A long-running import against an idle-stop-enabled target must not
             // get swept mid-import — count it as activity up front (issue #16),
             // mirroring `wp`/`login`/the MCP dispatcher's stamp-before-work.
-            await ctx.persistence.recordActivity(instanceID: siteRecord.id)
+            await ctx.persistence.recordActivity(instanceID: inst.instanceID)
 
             let mediaOption: DBImportMediaOption
             switch media {
@@ -112,13 +120,14 @@ struct DBImportCommand: AsyncParsableCommand {
 
             let importer = DatabaseImportService(cli: ctx.cli, lifecycle: ctx.lifecycle)
             let dumpURL = Self.expandPath(dumpPath)
-            let summary = try await importer.importDatabase(into: siteRecord, dump: dumpURL, options: options) { phase in
+            let summary = try await importer.importDatabase(into: inst, publicURL: publicURL, dump: dumpURL,
+                                                            options: options) { phase in
                 guard !jsonMode else { return }
                 emitLine("→ \(Self.progressLine(for: phase))")
             }
 
-            // Persist the detected/overridden source URL — the kit does not write it.
-            if let detectedSource = summary.sourceURL {
+            // Persist a site's detected/overridden source URL — the kit does not write it.
+            if case .site(let siteRecord) = resolved, let detectedSource = summary.sourceURL {
                 _ = try? await ctx.persistence.mutate { env in
                     if let i = env.sites.firstIndex(where: { $0.id == siteRecord.id }) {
                         env.sites[i].lastImportSourceURL = detectedSource
@@ -127,9 +136,9 @@ struct DBImportCommand: AsyncParsableCommand {
             }
 
             if jsonMode {
-                emitLine(CLIJSON.string(DBImportResultJSON(from: summary, site: siteRecord.slug)))
+                emitLine(CLIJSON.string(DBImportResultJSON(from: summary, site: site)))
             } else {
-                emitLine(Self.summaryText(summary, site: siteRecord.slug))
+                emitLine(Self.summaryText(summary, site: site))
             }
         } catch let dbError as DatabaseImportError {
             Self.reportImportError(dbError, json: jsonMode)
