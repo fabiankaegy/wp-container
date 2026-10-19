@@ -208,17 +208,14 @@ public enum SiteRecipe {
     ///   derived image, §2c).
     /// - `xdebugClientHost`: when non-nil, pass `-e XDEBUG_CLIENT_HOST=<gateway>`
     ///   so Xdebug's `client_host` ini substitution resolves to the host (§2c).
-    /// - `elasticsearchURL`: when non-nil, pass `ELASTICSEARCH_URL` + `EP_HOST`
-    ///   for ElasticPress (§2c).
-    /// - `mailpitHost`: when non-nil, inject `WPC_MAILPIT_HOST=<mail-ip>` so the
-    ///   `wpc-mailpit` mu-plugin routes PHPMailer to Mailpit's SMTP (issue #10).
-    ///   The IP is re-inspected each start (container IPs churn); env-var
-    ///   indirection keeps the mu-plugin file static.
+    /// - `sidecarEnvironment`: `KEY=value` assignments for the running sidecars
+    ///   (`SidecarAddon.assignments(ip:)`), such as `EP_HOST` and
+    ///   `WPC_MAILPIT_HOST`. The IPs are re-inspected each start (container IPs
+    ///   churn); env-var indirection keeps the PHP handlers static.
     public static func runWordPressArgs(_ inst: any RunnableInstance, dbHost: String,
                                         imageOverride: String? = nil,
                                         xdebugClientHost: String? = nil,
-                                        elasticsearchURL: String? = nil,
-                                        mailpitHost: String? = nil) -> [String] {
+                                        sidecarEnvironment: [String] = []) -> [String] {
         var args = ["run", "--progress", "none", "-d", "--rm", "--name", inst.wpContainerName]
         args += resourceArgs(for: inst)
         args += labelArgs(for: inst)
@@ -255,12 +252,8 @@ public enum SiteRecipe {
         if let xdebugClientHost {
             args += ["-e", "XDEBUG_CLIENT_HOST=\(xdebugClientHost)"]
         }
-        if let elasticsearchURL {
-            args += ["-e", "ELASTICSEARCH_URL=\(elasticsearchURL)",
-                     "-e", "EP_HOST=\(elasticsearchURL)"]
-        }
-        if let mailpitHost {
-            args += ["-e", "WPC_MAILPIT_HOST=\(mailpitHost)"]
+        for assignment in sidecarEnvironment {
+            args += ["-e", assignment]
         }
         args.append(imageOverride ?? inst.imageTag)
         return args
@@ -284,9 +277,12 @@ public enum SiteRecipe {
         return args
     }
 
+    /// The port Elasticsearch listens on inside its container.
+    public static let elasticsearchPort = 9200
+
     /// The sidecar's base URL as WordPress sees it, injected as `EP_HOST`.
     public static func elasticsearchURL(esHost: String) -> String {
-        "http://\(esHost):9200"
+        "http://\(esHost):\(elasticsearchPort)"
     }
 
     /// Probe ES cluster health (green/yellow ⇒ ready) from a one-shot curl.
@@ -479,19 +475,16 @@ public enum SiteRecipe {
 
     /// Arbitrary proxied one-shot wp-cli invocation (`wp-container wp <site> -- …`).
     ///
-    /// - `mailpitHost`: when non-nil, inject `WPC_MAILPIT_HOST` so `wp_mail`
-    ///   invoked from wp-cli (e.g. `wp eval 'wp_mail(...)'`, or an agent
-    ///   verifying an email) is caught by Mailpit too — the wp-cli one-shot
-    ///   container otherwise lacks the env the long-lived wp container gets
-    ///   (issue #10).
+    /// - `sidecarEnvironment`: `KEY=value` assignments for the running sidecars
+    ///   (`SidecarAddons.environment(for:cli:)`), so wp-cli reaches them like the
+    ///   long-lived wp container does: `wp eval` that sends mail is caught by
+    ///   Mailpit (issue #10), and `wp elasticpress sync` finds Elasticsearch.
     public static func wpProxyArgs(_ inst: any RunnableInstance, dbHost: String, wpArgs: [String],
-                                   mailpitHost: String? = nil,
-                                   elasticsearchURL: String? = nil) -> [String] {
+                                   sidecarEnvironment: [String] = []) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
-        if let mailpitHost { args += ["-e", "WPC_MAILPIT_HOST=\(mailpitHost)"] }
-        // ElasticPress commands (`wp elasticpress sync`) need the sidecar's host;
-        // the managed handler defines `EP_HOST` from this env var.
-        if let elasticsearchURL { args += ["-e", "EP_HOST=\(elasticsearchURL)"] }
+        for assignment in sidecarEnvironment {
+            args += ["-e", assignment]
+        }
         // Mount the managed php/ overrides + scan dir so a one-shot wp-cli picks
         // up the same auto_prepend runtime handlers as the long-lived container
         // (issue #13) — e.g. `wp eval` that sends mail still hits Mailpit, and
@@ -557,15 +550,16 @@ public enum SiteRecipe {
     public static func runImageArgs(_ inst: any RunnableInstance, image: String, dbHost: String,
                                     command: [String], workdir: String, env: [String] = [],
                                     interactive: Bool = false, tty: Bool = false,
-                                    mailpitHost: String? = nil, elasticsearchURL: String? = nil) -> [String] {
+                                    sidecarEnvironment: [String] = []) -> [String] {
         // The base args already mount a worktree env's checkout over `wordpress/`.
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
         if FileManager.default.fileExists(atPath: inst.phpConfFolder.path) {
             args += ["-v", "\(inst.phpConfFolder.path):\(phpConfContainerPath)",
                      "-e", "PHP_INI_SCAN_DIR=\(phpDefaultConfDir):\(phpConfContainerPath)"]
         }
-        if let mailpitHost { args += ["-e", "WPC_MAILPIT_HOST=\(mailpitHost)"] }
-        if let elasticsearchURL { args += ["-e", "EP_HOST=\(elasticsearchURL)"] }
+        for assignment in sidecarEnvironment {
+            args += ["-e", assignment]
+        }
         // User env comes last so it overrides the defaults above.
         args += processArgs(workdir: workdir, env: env, interactive: interactive, tty: tty)
         args.append(image)

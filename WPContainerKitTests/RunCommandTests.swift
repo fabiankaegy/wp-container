@@ -64,7 +64,7 @@ final class RunCommandTests: XCTestCase {
     func testRunImageCarriesMountsAndEnvironment() throws {
         let args = SiteRecipe.runImageArgs(env, image: "composer:2", dbHost: "10.0.0.2", command: ["composer", "install"],
                                            workdir: "/var/www/html", env: ["FOO=bar"],
-                                           mailpitHost: "10.0.0.3", elasticsearchURL: "http://10.0.0.4:9200")
+                                           sidecarEnvironment: ["WPC_MAILPIT_HOST=10.0.0.3", "EP_HOST=http://10.0.0.4:9200"])
         XCTAssertEqual(Array(args.prefix(4)), ["run", "--progress", "none", "--rm"])
         XCTAssertTrue(containsPair(args, "-v", "\(env.wordpressFolder.path):/var/www/html"))
         let checkoutMount = "\(env.worktreePath.path):/var/www/html/wp-content/plugins/demo"

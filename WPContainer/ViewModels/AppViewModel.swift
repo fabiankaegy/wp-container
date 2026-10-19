@@ -188,45 +188,34 @@ public final class AppViewModel {
     public func elasticsearchEndpoint(_ site: Site) async -> String? {
         guard site.elasticsearchEnabled,
               let ip = try? await cli.ipAddress(of: site.esContainerName), !ip.isEmpty else { return nil }
-        return "http://\(ip):9200"
+        return SiteRecipe.elasticsearchURL(esHost: ip)
     }
 
     public func setXdebug(_ site: Site, enabled: Bool) { toggleAddon(site) { $0.xdebugEnabled = enabled } }
-    public func setElasticsearch(_ site: Site, enabled: Bool) { toggleAddon(site) { $0.elasticsearchEnabled = enabled } }
+    public func setElasticsearch(_ site: Site, enabled: Bool) { setSidecar(SidecarAddons.elasticsearch, site, enabled: enabled) }
 
     // MARK: - Mailpit (issue #10)
 
-    /// Enable/disable the per-site Mailpit email catcher: write or remove the
-    /// mu-plugin, allocate the mailbox web port on first enable, and restart a
-    /// running site so the container recipe takes effect. The proxy's refresh
+    /// Enable/disable the per-site Mailpit email catcher. The proxy's refresh
     /// loop picks up the new `<slug>-mail.localhost` host + cert SAN within a few
     /// seconds; the primary mailbox URL is the proxy-independent localhost port.
-    public func setMailpit(_ site: Site, enabled: Bool) {
+    public func setMailpit(_ site: Site, enabled: Bool) { setSidecar(SidecarAddons.mailpit, site, enabled: enabled) }
+
+    /// Turn a sidecar on or off (syncing its PHP handler and reserving its host
+    /// port on first enable), then restart a running site so the container
+    /// recipe takes effect.
+    private func setSidecar(_ addon: any SidecarAddon, _ site: Site, enabled: Bool) {
         Task {
-            var updated = site
-            if enabled {
-                try? MailpitService.writeHandler(phpConfFolder: site.phpConfFolder)
-                if site.mailpitPort == nil {
-                    // Reserve the mailbox web port inside the locked mutation.
-                    let result = await store.allocatePort { port, env -> Site? in
-                        guard let i = env.sites.firstIndex(where: { $0.id == site.id }) else { return nil }
-                        env.sites[i].mailpitPort = port
-                        env.sites[i].mailpitEnabled = true
-                        return env.sites[i]
-                    }
-                    guard let (_, reservedSite) = result, let s = reservedSite else {
-                        lastError = "No free port available for the mailbox."
-                        return
-                    }
-                    updated = s
-                } else {
-                    updated.mailpitEnabled = true
-                    await store.upsertSite(updated)
-                }
-            } else {
-                MailpitService.removeHandler(phpConfFolder: site.phpConfFolder)
-                updated.mailpitEnabled = false
-                await store.upsertSite(updated)
+            let result: Site?
+            do {
+                result = try await store.setSidecar(addon, enabled: enabled, siteID: site.id)
+            } catch {
+                lastError = SiteLifecycleErrorText(error)
+                return
+            }
+            guard var updated = result else {
+                lastError = "No free port available for \(addon.displayName)."
+                return
             }
             if site.status.isRunning {
                 await lifecycle.stop(updated)

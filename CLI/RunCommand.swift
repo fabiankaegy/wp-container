@@ -56,11 +56,10 @@ struct RunCommand: AsyncParsableCommand {
                 guard let dbHost = try await ctx.cli.ipAddress(of: inst.dbContainerName) else {
                     throw CLIErrorJSON("not_running", detail: "start \(target) first")
                 }
-                let sidecars = await ctx.sidecarAddresses(for: inst)
+                let sidecarEnvironment = await SidecarAddons.environment(for: inst, cli: ctx.cli)
                 args = SiteRecipe.runImageArgs(inst, image: image, dbHost: dbHost, command: command, workdir: dir,
                                                env: env, interactive: interactive, tty: tty,
-                                               mailpitHost: sidecars.mailpitHost,
-                                               elasticsearchURL: sidecars.elasticsearchURL)
+                                               sidecarEnvironment: sidecarEnvironment)
             } else {
                 args = SiteRecipe.execArgs(inst, command: command, workdir: dir, env: env,
                                            interactive: interactive, tty: tty)

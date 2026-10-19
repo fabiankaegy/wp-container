@@ -3,7 +3,7 @@ import XCTest
 
 /// Coverage for how ElasticPress finds the Elasticsearch sidecar: the managed
 /// prepend handler that defines `EP_HOST`, and the `EP_HOST` env var passed to
-/// one-shot wp-cli containers.
+/// one-shot wp-cli containers through the sidecar addon.
 final class ElasticsearchServiceTests: XCTestCase {
 
     private var tempRoot: URL!
@@ -33,7 +33,7 @@ final class ElasticsearchServiceTests: XCTestCase {
 
     func testWPProxyArgsPassEPHostWhenGiven() {
         let args = SiteRecipe.wpProxyArgs(makeSite(), dbHost: "10.0.0.2", wpArgs: ["elasticpress", "sync"],
-                                          elasticsearchURL: "http://10.0.0.5:9200")
+                                          sidecarEnvironment: SidecarAddons.elasticsearch.assignments(ip: "10.0.0.5"))
         XCTAssertTrue(containsPair(args, "-e", "EP_HOST=http://10.0.0.5:9200"))
     }
 
@@ -45,7 +45,7 @@ final class ElasticsearchServiceTests: XCTestCase {
     func testEPHostComesBeforeTheImage() throws {
         let site = makeSite()
         let args = SiteRecipe.wpProxyArgs(site, dbHost: "10.0.0.2", wpArgs: ["elasticpress", "sync"],
-                                          elasticsearchURL: "http://10.0.0.5:9200")
+                                          sidecarEnvironment: SidecarAddons.elasticsearch.assignments(ip: "10.0.0.5"))
         let envIndex = try XCTUnwrap(args.firstIndex(of: "EP_HOST=http://10.0.0.5:9200"))
         let imageIndex = try XCTUnwrap(args.firstIndex(of: SiteRecipe.cliImage(for: site)))
         XCTAssertLessThan(envIndex, imageIndex, "container run options must precede the image")

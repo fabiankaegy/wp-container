@@ -54,6 +54,38 @@ struct XdebugCommand: AsyncParsableCommand {
     }
 }
 
+/// Turn a sidecar on or off for a site and restart it when running. JSON:
+/// `{ok, slug, addon, enabled, restarted}`, plus the addon's endpoint under its
+/// `endpointKey` (`mailboxUrl` for Mailpit).
+private func toggleSidecarAndRestart(_ addon: any SidecarAddon, enabled: Bool, slug: String,
+                                     output: JSONOptions, ctx: CLIContext) async throws {
+    let envelope = try await ctx.load()
+    guard let site = envelope.sites.first(where: { $0.slug == slug }) else {
+        throw CLIErrorJSON("site_not_found", detail: slug)
+    }
+    guard let updated = try await ctx.persistence.setSidecar(addon, enabled: enabled, siteID: site.id)?.site else {
+        throw CLIErrorJSON("no_free_port")
+    }
+    var restarted = false
+    if await ctx.runningContainerNames().contains(site.wpContainerName) {
+        await ctx.lifecycle.stop(updated)
+        _ = try await ctx.lifecycle.startSite(updated)
+        await ctx.lifecycle.markRunning(updated.id)
+        restarted = true
+    }
+    let endpoint = addon.endpointURL(for: updated)?.absoluteString
+    if output.json {
+        var payload: [String: Any] = ["ok": true, "slug": slug, "addon": addon.id, "enabled": enabled, "restarted": restarted]
+        if let key = addon.endpointKey { payload[key] = endpoint as Any? ?? NSNull() }
+        emitLine(MCPJSON.string(payload))
+    } else {
+        var line = "\(enabled ? "Enabled" : "Disabled") \(addon.displayName) for \(slug)."
+        if let endpoint { line += " Open it at \(endpoint)." }
+        line += restarted ? " Restarted to apply." : " Restart the site to apply."
+        emitLine(line)
+    }
+}
+
 // MARK: - elasticsearch (§2c)
 
 struct ElasticsearchCommand: AsyncParsableCommand {
@@ -64,10 +96,9 @@ struct ElasticsearchCommand: AsyncParsableCommand {
 
     func run() async throws {
         guard let onOff = OnOff(rawValue: state.lowercased()) else { throw CLIErrorJSON("bad_args", detail: "state must be on|off") }
-        let ctx = CLIContext()
         do {
-            try await toggleAndRestart(slug: slug, output: output, ctx: ctx,
-                                       label: onOff.enabled ? "Enabled Elasticsearch" : "Disabled Elasticsearch") { $0.elasticsearchEnabled = onOff.enabled }
+            try await toggleSidecarAndRestart(SidecarAddons.elasticsearch, enabled: onOff.enabled, slug: slug,
+                                              output: output, ctx: CLIContext())
         } catch { throw failCommand(error, json: output.json) }
     }
 }
@@ -79,10 +110,10 @@ struct MailpitCommand: AsyncParsableCommand {
         commandName: "mailpit",
         abstract: "Enable or disable the Mailpit email catcher for a site: mailpit on|off <slug>.",
         discussion: """
-        On enable, writes the wpc-mailpit mu-plugin, reserves a localhost port for \
-        the mailbox web UI, and (for a running site) restarts to launch the mail \
-        container. Outgoing WordPress mail is then caught by Mailpit instead of \
-        being sent. The mailbox is browsable at the printed URL.
+        On enable, writes the Mailpit mail-routing handler, reserves a localhost \
+        port for the mailbox web UI, and (for a running site) restarts to launch \
+        the mail container. Outgoing WordPress mail is then caught by Mailpit \
+        instead of being sent. The mailbox is browsable at the printed URL.
         """
     )
     @Argument(help: "on | off") var state: String
@@ -93,55 +124,9 @@ struct MailpitCommand: AsyncParsableCommand {
         guard let onOff = OnOff(rawValue: state.lowercased()) else {
             throw CLIErrorJSON("bad_args", detail: "state must be on|off")
         }
-        let ctx = CLIContext()
         do {
-            let envelope = try await ctx.load()
-            guard let site = envelope.sites.first(where: { $0.slug == slug }) else {
-                throw CLIErrorJSON("site_not_found", detail: slug)
-            }
-            let updated: Site
-            if onOff.enabled {
-                try MailpitService.writeHandler(phpConfFolder: site.phpConfFolder)
-                if site.mailpitPort == nil {
-                    guard let (_, reservedSite, _) = try await ctx.persistence.allocatePort(reserve: { port, env -> Site? in
-                        guard let i = env.sites.firstIndex(where: { $0.id == site.id }) else { return nil }
-                        env.sites[i].mailpitPort = port
-                        env.sites[i].mailpitEnabled = true
-                        return env.sites[i]
-                    }), let s = reservedSite else { throw CLIErrorJSON("no_free_port") }
-                    updated = s
-                } else {
-                    let env2 = try await ctx.persistence.mutate { e in
-                        if let i = e.sites.firstIndex(where: { $0.id == site.id }) { e.sites[i].mailpitEnabled = true }
-                    }
-                    updated = env2.sites.first { $0.id == site.id } ?? site
-                }
-            } else {
-                MailpitService.removeHandler(phpConfFolder: site.phpConfFolder)
-                let env2 = try await ctx.persistence.mutate { e in
-                    if let i = e.sites.firstIndex(where: { $0.id == site.id }) { e.sites[i].mailpitEnabled = false }
-                }
-                updated = env2.sites.first { $0.id == site.id } ?? site
-            }
-            let running = await ctx.runningContainerNames().contains(site.wpContainerName)
-            var restarted = false
-            if running {
-                await ctx.lifecycle.stop(updated)
-                _ = try await ctx.lifecycle.startSite(updated)
-                await ctx.lifecycle.markRunning(updated.id)
-                restarted = true
-            }
-            let mailbox = updated.mailboxURL?.absoluteString
-            if output.json {
-                emitLine(MCPJSON.string(["ok": true, "slug": slug, "enabled": onOff.enabled,
-                                         "restarted": restarted,
-                                         "mailboxUrl": mailbox as Any? ?? NSNull()]))
-            } else {
-                var line = (onOff.enabled ? "Enabled Mailpit" : "Disabled Mailpit") + " for \(slug)."
-                if onOff.enabled, let mailbox { line += " Mailbox: \(mailbox)." }
-                line += restarted ? " Restarted to apply." : " Restart the site to apply."
-                emitLine(line)
-            }
+            try await toggleSidecarAndRestart(SidecarAddons.mailpit, enabled: onOff.enabled, slug: slug,
+                                              output: output, ctx: CLIContext())
         } catch { throw failCommand(error, json: output.json) }
     }
 }
