@@ -65,12 +65,16 @@ final class SitePreviews {
     }
 }
 
-/// Loads a page offscreen and returns a 1280×800 snapshot of its top.
+/// Loads a page offscreen and returns a 1280×800 snapshot of its top, taken
+/// once entrance and scroll animations have played out.
 @MainActor
 private enum PreviewCapture {
     static func snapshot(_ url: URL) async -> NSImage? {
         let frame = CGRect(x: 0, y: 0, width: 1280, height: 800)
-        let web = WKWebView(frame: frame, configuration: WKWebViewConfiguration())
+        let configuration = WKWebViewConfiguration()
+        configuration.userContentController.addUserScript(WKUserScript(source: prepareScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        disableHiddenPageTimerThrottling(configuration.preferences)
+        let web = WKWebView(frame: frame, configuration: configuration)
         // WebKit only lays out and paints a view that lives in a window; this
         // one is never ordered on screen.
         let window = NSWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
@@ -82,13 +86,85 @@ private enum PreviewCapture {
 
         web.load(URLRequest(url: url, timeoutInterval: 20))
         guard await waiter.finished(within: .seconds(25)) else { return nil }
-        // Let web fonts, images and entrance animations settle.
-        try? await Task.sleep(for: .seconds(1.5))
+        _ = try? await web.callAsyncJavaScript(settleScript, contentWorld: .page)
         let config = WKSnapshotConfiguration()
         config.rect = frame
         config.snapshotWidth = 960
         return try? await web.takeSnapshot(configuration: config)
     }
+
+    /// The page counts as hidden, so WebKit clamps its timers to about one a
+    /// second, which would stretch the settle pass to ~20s. There's no public
+    /// switch, so flip the SPI preference when it exists.
+    private static func disableHiddenPageTimerThrottling(_ preferences: WKPreferences) {
+        let selector = NSSelectorFromString("_setHiddenPageDOMTimerThrottlingEnabled:")
+        guard preferences.responds(to: selector) else { return }
+        typealias Setter = @convention(c) (AnyObject, Selector, Bool) -> Void
+        unsafeBitCast(preferences.method(for: selector), to: Setter.self)(preferences, selector, false)
+    }
+
+    /// Runs before any page script. WebKit never fires requestAnimationFrame
+    /// for an offscreen page, which freezes JS-driven entrance animations
+    /// (Motion, GSAP) on their first frame, so frames are driven by timers and
+    /// the page reports itself visible. It also emulates
+    /// `prefers-reduced-motion: reduce` for `matchMedia` and CSS `@media`
+    /// rules, so sites that honor it skip their motion entirely.
+    private static let prepareScript = #"""
+    (() => {
+      let last = 0;
+      window.requestAnimationFrame = (cb) => setTimeout(() => cb(last = performance.now()), Math.max(0, 16 - (performance.now() - last)));
+      window.cancelAnimationFrame = (id) => clearTimeout(id);
+      Object.defineProperty(Document.prototype, 'visibilityState', { get: () => 'visible' });
+      Object.defineProperty(Document.prototype, 'hidden', { get: () => false });
+
+      const rewrite = (query) => query
+        .replace(/\(\s*prefers-reduced-motion\s*(:\s*reduce\s*)?\)/gi, '(min-width: 0px)')
+        .replace(/\(\s*prefers-reduced-motion\s*:\s*no-preference\s*\)/gi, '(max-width: -1px)');
+      const matchMedia = window.matchMedia.bind(window);
+      window.matchMedia = (query) => matchMedia(rewrite(String(query)));
+      const visit = (list) => {
+        for (const item of list) {
+          try {
+            if (item.media && /prefers-reduced-motion/i.test(item.media.mediaText)) item.media.mediaText = rewrite(item.media.mediaText);
+            if (item.styleSheet) visit([item.styleSheet]);
+            if (item.cssRules) visit(item.cssRules);
+          } catch (e) {}
+        }
+      };
+      window.__wpcReduceMotion = () => visit(document.styleSheets);
+      document.addEventListener('DOMContentLoaded', window.__wpcReduceMotion);
+    })();
+    """#
+
+    /// Runs after load: scrolls through the page so scroll-triggered reveals
+    /// fire, returns to the top, fast-forwards whatever animations are still
+    /// running and waits for visible images. Every wait is capped, so a busy
+    /// page costs a few seconds at most.
+    private static let settleScript = #"""
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    window.__wpcReduceMotion?.();
+    await Promise.race([document.fonts.ready, sleep(2000)]);
+    const step = innerHeight * 0.8;
+    const end = Math.min(document.documentElement.scrollHeight, step * 15);
+    for (let y = step; y < end; y += step) {
+      scrollTo(0, y);
+      await sleep(60);
+    }
+    scrollTo(0, 0);
+    await sleep(300);
+    window.__wpcReduceMotion?.();
+    for (const animation of document.getAnimations()) {
+      try { animation.finish(); } catch (e) {} // infinite ones throw; leave them be
+    }
+    const inView = (r) => r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
+    const images = [...document.images].filter((image) => !image.complete && inView(image.getBoundingClientRect()));
+    const loaded = images.map((image) => new Promise((resolve) => {
+      image.addEventListener('load', resolve, { once: true });
+      image.addEventListener('error', resolve, { once: true });
+    }));
+    await Promise.race([Promise.all(loaded), sleep(3000)]);
+    await sleep(100);
+    """#
 }
 
 /// Resolves once the main frame finishes or fails loading. Accepts the local
