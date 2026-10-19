@@ -232,3 +232,21 @@ private struct StatusTint: ViewModifier {
         }
     }
 }
+
+/// Remembers a table's column layout (visibility, order, widths) across
+/// launches, the way Finder and Music do. Stored as JSON in UserDefaults.
+enum ColumnLayout {
+    /// The saved layout, or a fresh one with `hidden` column IDs turned off.
+    /// (`defaultVisibility(.hidden)` alone isn't reliably honored on macOS.)
+    static func load<Row: Identifiable>(_ key: String, hidden: [String] = []) -> TableColumnCustomization<Row> {
+        if let data = UserDefaults.standard.data(forKey: key),
+           let layout = try? JSONDecoder().decode(TableColumnCustomization<Row>.self, from: data) { return layout }
+        var layout = TableColumnCustomization<Row>()
+        for id in hidden { layout[visibility: id] = .hidden }
+        return layout
+    }
+
+    static func save<Row: Identifiable>(_ layout: TableColumnCustomization<Row>, _ key: String) {
+        if let data = try? JSONEncoder().encode(layout) { UserDefaults.standard.set(data, forKey: key) }
+    }
+}

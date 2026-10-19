@@ -29,6 +29,10 @@ struct BranchTable: View {
     @State private var search = ""
     @State private var sortOrder = [KeyPathComparator(\BranchRow.lastUsed, order: .reverse)]
     @State private var confirmingDelete: [WorktreeEnv] = []
+    /// Right-click the header to show, hide or reorder columns; remembered.
+    @State private var columns: TableColumnCustomization<BranchRow> = ColumnLayout.load(Self.columnsKey)
+
+    private static let columnsKey = "branchTableColumns"
 
     private var scope: [WorktreeEnv] { site.map { vm.store.envs(forSite: $0.id) } ?? vm.activeEnvs }
 
@@ -38,9 +42,11 @@ struct BranchTable: View {
         let rows = rows(scope)
         VStack(spacing: 0) {
             bar(scope)
-            Table(rows, selection: $vm.branchSelection, sortOrder: $sortOrder) {
+            Table(rows, selection: $vm.branchSelection, sortOrder: $sortOrder, columnCustomization: $columns) {
                 TableColumn("") { row in statusGlyph(row.env) }
                     .width(18)
+                    .customizationID("status")
+                    .disabledCustomizationBehavior(.visibility)
                 TableColumn("Branch", value: \.branch) { row in
                     HStack(spacing: 6) {
                         Text(row.branch).font(.system(.body, design: .monospaced)).lineLimit(1)
@@ -48,9 +54,12 @@ struct BranchTable: View {
                     }
                 }
                 .width(min: 200, ideal: 340)
+                .customizationID("branch")
+                .disabledCustomizationBehavior(.visibility)
                 if site == nil {
                     TableColumn("Site", value: \.siteName) { row in Text(row.siteName).foregroundStyle(.secondary) }
                         .width(min: 90, ideal: 130)
+                        .customizationID("site")
                 }
                 // Most sites keep every branch in one wp-content repo; the
                 // column only earns its width when there's more than one.
@@ -61,20 +70,24 @@ struct BranchTable: View {
                             .help(row.env.repoRelPath)
                     }
                     .width(min: 100, ideal: 150)
+                    .customizationID("repository")
                 }
                 TableColumn("Port", value: \.port) { row in
                     Text(row.env.isSettled ? "—" : String(row.port)).monospacedDigit().foregroundStyle(.secondary)
                 }
                 .width(56)
+                .customizationID("port")
                 TableColumn("Last Used", value: \.lastUsed) { row in
                     Text(row.env.status.isRunning ? "Now" : row.lastUsed.formatted(.relative(presentation: .named)))
                         .statusTint(.orange, when: row.isStale)
                 }
                 .width(min: 90, ideal: 110)
+                .customizationID("lastUsed")
                 TableColumn("Memory", value: \.memory) { row in
                     Text(row.memory > 0 ? Format.bytes(row.memory) : "—").monospacedDigit().foregroundStyle(.secondary)
                 }
                 .width(min: 70, ideal: 80)
+                .customizationID("memory")
             }
             .contextMenu(forSelectionType: UUID.self) { ids in
                 contextMenu(ids.compactMap(vm.store.env(id:)))
@@ -90,6 +103,7 @@ struct BranchTable: View {
                 let visible = Set(ids)
                 if !vm.branchSelection.isSubset(of: visible) { vm.branchSelection.formIntersection(visible) }
             }
+            .onChange(of: columns) { _, layout in ColumnLayout.save(layout, Self.columnsKey) }
             footer(shown: rows.count, total: scope.count)
         }
         .confirmationDialog("Delete \(confirmingDelete.count) branch environment\(confirmingDelete.count == 1 ? "" : "s")?",

@@ -18,11 +18,11 @@ struct GalleryView: View {
             if sections.allSatisfy({ $0.sites.isEmpty }) {
                 emptyState
             } else if vm.libraryStyle == .list {
-                LibraryListView(sites: sections.flatMap(\.sites))
+                LibraryListView(sections: sections)
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 24) {
-                        ForEach(sections, id: \.title) { section in
+                        ForEach(sections) { section in
                             if !section.sites.isEmpty {
                                 VStack(alignment: .leading, spacing: 12) {
                                     if let title = section.title {
@@ -72,7 +72,6 @@ struct GalleryView: View {
         .navigationSubtitle(subtitle(sections))
     }
 
-    private struct GallerySection { let title: String?; let sites: [Site] }
 
 
     private var sections: [GallerySection] {
@@ -91,7 +90,7 @@ struct GalleryView: View {
             let groups = vm.store.sortedGroups
             guard !groups.isEmpty, q.isEmpty else { return [GallerySection(title: nil, sites: sites)] }
             return [GallerySection(title: "Ungrouped", sites: sites.filter { $0.groupID == nil })]
-                + groups.map { g in GallerySection(title: g.name, sites: sites.filter { $0.groupID == g.id }) }
+                + groups.map { g in GallerySection(id: g.id, title: g.name, sites: sites.filter { $0.groupID == g.id }) }
         }
     }
 
@@ -395,4 +394,15 @@ struct ToolbarSearchField: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel(prompt)
     }
+}
+
+/// A run of library sites, optionally under a group heading. Shared by the
+/// gallery and the list view, where a titled section becomes a header row.
+struct GallerySection: Identifiable {
+    /// The group's ID, or a fixed ID for the "Ungrouped" (or untitled) section.
+    var id = GallerySection.ungroupedID
+    let title: String?
+    let sites: [Site]
+
+    static let ungroupedID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
 }
