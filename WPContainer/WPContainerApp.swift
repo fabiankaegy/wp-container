@@ -89,9 +89,10 @@ struct WPContainerApp: App {
         // Menu bar extra (PLAN.md §2h): a compact list of all sites + running
         // envs with inline start/stop. Keeps the app alive when the main window
         // is closed; Dock presence stays normal.
-        // The `server.rack` SF Symbol renders as a template image, so macOS
-        // tints and sizes it like every other status item.
-        MenuBarExtra("WP Container", systemImage: "server.rack") {
+        // Stacked cards echo the app icon (a site and its branch copy); as an
+        // SF Symbol it renders as a template image, so macOS tints and sizes it
+        // like every other status item.
+        MenuBarExtra("WP Container", systemImage: "rectangle.on.rectangle") {
             MenuBarContent()
                 .environment(viewModel)
         }
