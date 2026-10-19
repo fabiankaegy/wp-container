@@ -46,6 +46,29 @@ public final class AppViewModel {
     @ObservationIgnored private var suppressIdleStopNotify: Set<UUID> = []
 
     public var selection: UUID?
+
+    // MARK: Main window navigation (see AppViewModel+Navigation.swift)
+
+    /// Which library the main window lists when no site screen is open.
+    var library: LibraryItem = .allSites
+    /// The site or env whose screen is open, and which tab; nil shows the library.
+    var screen: SiteScreenRoute?
+    /// Screens to return to with Back (⌘[).
+    var screenHistory: [SiteScreenRoute?] = []
+    /// Rows selected in a branch table; more than one puts the inspector in multi-env mode.
+    var branchSelection: Set<UUID> = []
+    /// Whether the inspector column is shown (⌥⌘I).
+    var showsInspector = true
+    /// Gallery or list for the library (⌘1 / ⌘2), remembered across launches.
+    var libraryStyle: LibraryStyle = LibraryStyle(rawValue: UserDefaults.standard.string(forKey: "libraryStyle") ?? "") ?? .gallery {
+        didSet { UserDefaults.standard.set(libraryStyle.rawValue, forKey: "libraryStyle") }
+    }
+    /// Whether the toolbar's branch switcher is open (⌃⌘B).
+    var presentingBranchPicker = false
+    /// Live CPU / memory / network for running sites and envs, polled while the main window is open.
+    let metrics = LiveMetrics()
+    /// Homepage snapshots for the gallery and site screens.
+    let previews = SitePreviews()
     public var systemStatus: SystemCheckResult?
     public var lastError: String?
     /// Full underlying detail for the last error, when a concise summary was

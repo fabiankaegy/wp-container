@@ -67,7 +67,8 @@ struct WPContainerApp: App {
                     }
                 }
         }
-        .windowStyle(.hiddenTitleBar)
+        // A unified toolbar shows each column's title and actions above it.
+        .windowToolbarStyle(.unified)
         .windowResizability(.contentMinSize)
         .commands { AppCommands(vm: viewModel) }
 
@@ -117,6 +118,22 @@ private struct AppCommands: Commands {
                 .keyboardShortcut("n", modifiers: [.command, .shift])
                 .disabled(vm.selectedSite == nil)
         }
+        CommandGroup(after: .sidebar) {
+            Button("Back") { vm.goBack() }
+                .keyboardShortcut("[", modifiers: .command)
+                .disabled(!vm.canGoBack)
+            Button(vm.showsInspector ? "Hide Inspector" : "Show Inspector") { vm.showsInspector.toggle() }
+                .keyboardShortcut("i", modifiers: [.command, .option])
+            Button("Switch Branch…") { vm.presentingBranchPicker = true }
+                .keyboardShortcut("b", modifiers: [.command, .control])
+                .disabled(vm.screen?.tab != .overview || vm.store.envs(forSite: vm.screenSiteID ?? UUID()).isEmpty)
+            Divider()
+            Button("as Gallery") { vm.libraryStyle = .gallery }
+                .keyboardShortcut("1", modifiers: .command)
+            Button("as List") { vm.libraryStyle = .list }
+                .keyboardShortcut("2", modifiers: .command)
+            Divider()
+        }
         CommandMenu("Site") {
             Button("Start") { if let s = vm.selectedSite { vm.startSite(s) } }
                 .keyboardShortcut("r", modifiers: .command)
@@ -131,6 +148,10 @@ private struct AppCommands: Commands {
             Button("Open WP Admin") { if let s = vm.selectedSite { SystemActions.openInBrowser(s.adminURL) } }
                 .disabled(!(vm.selectedSite?.status.isRunning ?? false))
             Button("Reveal in Finder") { if let s = vm.selectedSite { SystemActions.revealInFinder(s.path) } }
+            Divider()
+            Button("Open Site Screen") { if let id = vm.selection { vm.openScreen(id) } }
+                .keyboardShortcut(.downArrow, modifiers: .command)
+                .disabled(vm.selection == nil || vm.screen?.id == vm.selection)
         }
     }
 }

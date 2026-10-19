@@ -1,7 +1,7 @@
 import SwiftUI
 import WPContainerKit
 
-/// Studio-inspired design tokens and shared UI atoms: colors, card styling,
+/// Design tokens and shared UI atoms: colors, card styling, section colors,
 /// status dot / pill, and deterministic per-site avatars. Centralizing these
 /// keeps every view thin and visually consistent across light and dark modes.
 enum Theme {
@@ -12,46 +12,6 @@ enum Theme {
     static let cardRadius: CGFloat = 12
     static let cardPadding: CGFloat = 18
 
-    // MARK: Studio dark-frame chrome
-
-    /// The dark window frame / shell — constant in BOTH light and dark mode
-    /// (Studio keeps a near-black neutral chrome regardless of appearance).
-    static let frame = Color(red: 0.086, green: 0.094, blue: 0.110)          // ~#161820
-    /// A slightly lighter dark used for the sidebar band (subtle separation).
-    static let sidebar = Color(red: 0.098, green: 0.106, blue: 0.125)        // ~#191B21
-
-    /// The floating content panel: white in light mode, elevated dark-gray in
-    /// dark mode (so it reads as a card docked inside the dark shell).
-    static let panel = dynamic(
-        light: NSColor(calibratedWhite: 1.0, alpha: 1.0),
-        dark:  NSColor(srgbRed: 0.145, green: 0.153, blue: 0.176, alpha: 1.0) // ~#25272D
-    )
-    /// Hairline that separates the panel from the frame.
-    static let panelBorder = dynamic(
-        light: NSColor.black.withAlphaComponent(0.06),
-        dark:  NSColor.white.withAlphaComponent(0.08)
-    )
-
-    // Text/controls that sit on the dark chrome (forced light regardless of
-    // system appearance, because the frame is always dark).
-    static let onFrame = Color.white.opacity(0.92)
-    static let onFrameSecondary = Color.white.opacity(0.65)
-    static let onFrameTertiary = Color.white.opacity(0.45)
-    /// Rounded selection / hover fills for sidebar rows.
-    static let sidebarSelection = Color.white.opacity(0.14)
-    static let sidebarHover = Color.white.opacity(0.07)
-
-    /// Vertical inset that keeps content clear of the traffic-light band in the
-    /// hidden-title-bar window (also leaves a draggable strip along the top).
-    static let titlebarInset: CGFloat = 28
-
-    /// A color that resolves differently in light vs dark appearance.
-    static func dynamic(light: NSColor, dark: NSColor) -> Color {
-        Color(nsColor: NSColor(name: nil) { appearance in
-            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
-        })
-    }
-
     // MARK: Status colors
 
     static func color(for status: SiteStatus) -> Color {
@@ -60,9 +20,28 @@ enum Theme {
         case .starting: return .orange
         case .stopping: return .orange
         case .error:    return .red
-        // Fixed neutral gray — NOT `.secondary`, which resolves to near-black
-        // in light appearance and would vanish on the constant-dark sidebar.
         case .stopped:  return .gray
+        }
+    }
+
+    // MARK: Section colors
+
+    /// The tile color for a sidebar or inspector section, by its title.
+    static func sectionColor(for title: String) -> Color {
+        switch title {
+        case "Overview", "Site", "Domain", "Environment": return .blue
+        case "Live": return .green
+        case "Branches": return .purple
+        case "Development": return .orange
+        case "Software": return .indigo
+        case "Resources": return .teal
+        case "Integrations": return .pink
+        case "Idle stop": return .mint
+        case "Danger Zone": return .red
+        case "Stack": return .orange
+        case "Lifecycle": return .brown
+        case "Network Sites": return .cyan
+        default: return .gray
         }
     }
 

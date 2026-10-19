@@ -148,7 +148,7 @@ struct MenuBarContent: View {
 
     /// Bring the main window forward, optionally selecting a site.
     private func focusMainWindow(select siteID: UUID?) {
-        if let siteID { vm.selection = siteID }
+        if let siteID { vm.openScreen(siteID) }
         NSApplication.shared.activate(ignoringOtherApps: true)
         // Order an existing content window front, or open one if it was closed.
         if let window = NSApplication.shared.windows.first(where: { $0.canBecomeMain && $0.contentView != nil && $0.styleMask.contains(.titled) }) {
