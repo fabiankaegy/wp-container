@@ -134,6 +134,7 @@ struct SiteCard: View {
 
     @State private var hovering = false
     @State private var confirmingDelete = false
+    @FocusState private var focused: Bool
 
     private var isSelected: Bool { vm.selection == site.id }
 
@@ -157,7 +158,14 @@ struct SiteCard: View {
             BranchStrip(site: site)
         }
         .contentShape(Rectangle())
+        // Keyboard focus selects the card, so the accent selection ring is the
+        // one indicator for both mouse and keyboard (no second system ring).
         .focusable()
+        .focusEffectDisabled()
+        .focused($focused)
+        .onChange(of: focused) { _, isFocused in
+            if isFocused { vm.selection = site.id; vm.branchSelection = [] }
+        }
         .onKeyPress(.return) { vm.openScreen(site.id); return .handled }
         .onKeyPress(.space) { vm.selection = site.id; return .handled }
         .onHover { hovering = $0 }
