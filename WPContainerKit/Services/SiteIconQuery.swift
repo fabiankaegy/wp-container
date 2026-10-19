@@ -6,16 +6,22 @@ import Foundation
 /// wp-cli container per site. `FaviconLocator`'s filename heuristics remain
 /// the fallback for stopped sites and sites without a Site Icon.
 public enum SiteIconQuery {
-    /// The site icon's file on the host, or nil when the site has none, its
-    /// database isn't reachable, or the stored path looks unsafe.
-    public static func iconFile(for inst: any RunnableInstance, cli: ContainerCLI) async -> URL? {
+    /// The Site Icon's path relative to `wp-content/uploads`, or nil when the
+    /// site has none, its database isn't reachable, or the path looks unsafe.
+    public static func attachmentPath(for inst: any RunnableInstance, cli: ContainerCLI) async -> String? {
         let config = (try? String(contentsOf: inst.wordpressFolder.appendingPathComponent("wp-config.php"), encoding: .utf8)) ?? ""
         let args = ["exec", inst.dbContainerName, "mariadb",
                     "-u\(SiteRecipe.dbUser)", "-p\(SiteRecipe.dbPassword)", inst.databaseName,
                     "-N", "-B", "-e", sql(prefix: tablePrefix(fromWPConfig: config))]
-        guard let result = try? await cli.runCapturing(args), result.succeeded,
-              let relative = uploadsRelativePath(result.stdout) else { return nil }
-        let file = inst.wordpressFolder.appendingPathComponent("wp-content/uploads/\(relative)")
+        guard let result = try? await cli.runCapturing(args), result.succeeded else { return nil }
+        return uploadsRelativePath(result.stdout)
+    }
+
+    /// The Site Icon's file on disk, or nil when the site has none or the file
+    /// isn't local (e.g. media served from production); callers can then
+    /// fetch `attachmentPath` through the site itself.
+    public static func localFile(for inst: any RunnableInstance, relativePath: String) -> URL? {
+        let file = inst.wordpressFolder.appendingPathComponent("wp-content/uploads/\(relativePath)")
         return FileManager.default.fileExists(atPath: file.path) ? file : nil
     }
 
