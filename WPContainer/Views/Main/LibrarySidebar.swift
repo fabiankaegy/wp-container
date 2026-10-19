@@ -104,11 +104,7 @@ struct LibrarySidebar: View {
                 Text(title)
                 Spacer(minLength: 4)
                 if stale > 0 {
-                    Text("\(stale)")
-                        .font(.caption2.weight(.bold))
-                        .padding(.horizontal, 5).padding(.vertical, 1)
-                        .background(.orange.opacity(0.2), in: Capsule())
-                        .foregroundStyle(.orange)
+                    StaleBadge(text: "\(stale)")
                         .help("\(stale) unused for \(EnvSettlement.suggestAfterDays)+ days")
                 }
                 Text("\(count)").foregroundStyle(.secondary).monospacedDigit()

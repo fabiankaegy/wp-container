@@ -192,3 +192,43 @@ struct CLISnippet: View {
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
+
+/// A small orange capsule flagging something unused for a while: a "Stale"
+/// tag or a stale count. On a selected row (accent background) it turns white
+/// so it stays readable.
+struct StaleBadge: View {
+    let text: String
+    @Environment(\.backgroundProminence) private var prominence
+
+    var body: some View {
+        let onAccent = prominence == .increased
+        Text(text)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background((onAccent ? Color.white : .orange).opacity(onAccent ? 0.25 : 0.18), in: Capsule())
+            .foregroundStyle(onAccent ? Color.white : .orange)
+    }
+}
+
+extension View {
+    /// A status color (orange "stale", green "running") that yields to the
+    /// row's own text color when the row is selected, where it would clash.
+    func statusTint(_ color: Color, when active: Bool = true) -> some View {
+        modifier(StatusTint(color: color, active: active))
+    }
+}
+
+private struct StatusTint: ViewModifier {
+    let color: Color
+    let active: Bool
+    @Environment(\.backgroundProminence) private var prominence
+
+    func body(content: Content) -> some View {
+        if active && prominence != .increased {
+            content.foregroundStyle(color)
+        } else {
+            content.foregroundStyle(.secondary)
+        }
+    }
+}

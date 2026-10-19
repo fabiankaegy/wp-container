@@ -70,12 +70,7 @@ struct LibraryListView: View {
             HStack(spacing: 7) {
                 SectionIcon(systemName: "arrow.triangle.branch", color: .purple, size: 18)
                 Text(env.branch).font(.system(.body, design: .monospaced)).lineLimit(1)
-                if EnvSettlement.isStale(env) {
-                    Text("Stale").font(.caption2.weight(.semibold))
-                        .padding(.horizontal, 6).padding(.vertical, 1)
-                        .background(.orange.opacity(0.18), in: Capsule())
-                        .foregroundStyle(.orange)
-                }
+                if EnvSettlement.isStale(env) { StaleBadge(text: "Stale") }
             }
         } else {
             HStack(spacing: 8) {
@@ -104,7 +99,7 @@ struct LibraryListView: View {
         } else if let children = row.children {
             let running = children.filter(\.isRunning).count
             HStack(spacing: 4) {
-                if running > 0 { Text("\(running) running ·").foregroundStyle(.green) }
+                if running > 0 { Text("\(running) running ·").statusTint(.green) }
                 Text("\(children.count)").foregroundStyle(.secondary)
             }
         } else {

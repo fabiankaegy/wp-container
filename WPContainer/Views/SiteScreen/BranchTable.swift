@@ -44,12 +44,7 @@ struct BranchTable: View {
                 TableColumn("Branch", value: \.branch) { row in
                     HStack(spacing: 6) {
                         Text(row.branch).font(.system(.body, design: .monospaced)).lineLimit(1)
-                        if row.isStale {
-                            Text("Stale").font(.caption2.weight(.semibold))
-                                .padding(.horizontal, 6).padding(.vertical, 1)
-                                .background(.orange.opacity(0.18), in: Capsule())
-                                .foregroundStyle(.orange)
-                        }
+                        if row.isStale { StaleBadge(text: "Stale") }
                     }
                 }
                 .width(min: 200, ideal: 340)
@@ -73,7 +68,7 @@ struct BranchTable: View {
                 .width(56)
                 TableColumn("Last Used", value: \.lastUsed) { row in
                     Text(row.env.status.isRunning ? "Now" : row.lastUsed.formatted(.relative(presentation: .named)))
-                        .foregroundStyle(row.isStale ? .orange : .secondary)
+                        .statusTint(.orange, when: row.isStale)
                 }
                 .width(min: 90, ideal: 110)
                 TableColumn("Memory", value: \.memory) { row in
