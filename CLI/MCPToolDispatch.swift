@@ -664,12 +664,12 @@ enum MCPToolDispatch {
         let outcome = await ctx.worktrees.delete(env, parent: parent, keepBranch: keepBranch, keepWorktree: keepWorktree)
         _ = try await ctx.persistence.mutate { store in
             store.envs.removeAll { $0.id == env.id }
-            // The DB server was down, so the env's schema is still there (#17).
-            // Tombstone it for the next shared-env create to reap.
-            if let orphan = outcome.tombstonedSchema, let parent,
-               let i = store.sites.firstIndex(where: { $0.id == parent.id }),
-               !store.sites[i].pendingSchemaDrops.contains(orphan) {
-                store.sites[i].pendingSchemaDrops.append(orphan)
+            // The DB server was down, so the env's schemas are still there (#17).
+            // Tombstone them for the next shared-env create to reap.
+            if let parent, let i = store.sites.firstIndex(where: { $0.id == parent.id }) {
+                for orphan in outcome.tombstonedSchemas where !store.sites[i].pendingSchemaDrops.contains(orphan) {
+                    store.sites[i].pendingSchemaDrops.append(orphan)
+                }
             }
         }
         if let parent { await ctx.lifecycle.stopSharedDatabaseIfUnused(parent: parent) }

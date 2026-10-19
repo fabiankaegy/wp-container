@@ -1269,9 +1269,9 @@ public final class AppViewModel {
             let outcome = await worktrees.delete(env, parent: parent, keepBranch: true, keepWorktree: keepWorktree)
             await store.removeEnv(id: env.id)
             if let parent {
-                // The DB server was down, so the schema is still there (#17) —
-                // tombstone it for the next shared-env create to reap.
-                await store.updatePendingSchemaDrops(siteID: parent.id, adding: outcome.tombstonedSchema)
+                // The DB server was down, so the schemas are still there (#17) —
+                // tombstone them for the next shared-env create to reap.
+                await store.updatePendingSchemaDrops(siteID: parent.id, adding: outcome.tombstonedSchemas)
                 await lifecycle.stopSharedDatabaseIfUnused(parent: parent)
             }
             if selection == env.id { selection = env.parentSiteID }

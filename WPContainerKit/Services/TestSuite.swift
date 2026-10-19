@@ -41,6 +41,15 @@ public enum TestSuite {
 
     // MARK: - Names and paths
 
+    /// Whether `name` is one of our test schemas: the `wpctests_` prefix, the
+    /// identifier charset, and MySQL's length cap. The guard in front of every
+    /// test-schema `DROP DATABASE`.
+    public static func isTestSchemaName(_ name: String) -> Bool {
+        guard name.hasPrefix(schemaPrefix), name.count > schemaPrefix.count,
+              name.count <= WorktreeEnv.maxSchemaNameLength else { return false }
+        return name.allSatisfy { ($0.isASCII && ($0.isLetter || $0.isNumber)) || $0 == "_" }
+    }
+
     /// `wpctests_` + the container slug, sanitized and capped like env schemas.
     public static func databaseName(for inst: any RunnableInstance) -> String {
         let sanitized = String(inst.containerSlug.map { ch in
