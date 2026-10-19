@@ -17,6 +17,7 @@ enum MCPToolDispatch {
         do {
             switch params.name {
             case "wp_cli":            return try await wpCLI(args, ctx: ctx, slug: scopedSlug)
+            case "run_command":       return try await runCommand(args, ctx: ctx, slug: scopedSlug)
             case "read_error_log":    return try await readErrorLog(args, ctx: ctx, slug: scopedSlug)
             case "read_access_log":   return try await readAccessLog(args, ctx: ctx, slug: scopedSlug)
             case "wp_debug_toggle":   return try await wpDebugToggle(args, ctx: ctx, slug: scopedSlug)
@@ -171,6 +172,52 @@ enum MCPToolDispatch {
             "stdout": result.stdout,
             "stderr": result.stderr,
             "exitCode": Int(result.exitCode),
+        ], isError: result.exitCode != 0)
+    }
+
+    // MARK: - run_command
+
+    /// Default `run_command` time limit, in seconds.
+    private static let runCommandTimeout = 600
+
+    private static func runCommand(_ args: [String: Value], ctx: CLIContext, slug: String) async throws -> CallTool.Result {
+        let command = args["command"]?.arrayValue?.compactMap { $0.stringValue } ?? []
+        guard !command.isEmpty else {
+            throw ToolError("bad_args", "Provide `command` as an array, e.g. [\"composer\",\"install\"].")
+        }
+        let target = args["slug"]?.stringValue ?? slug
+        let envelope = try await ctx.load()
+        guard let resolved = resolveTarget(target, in: envelope) else {
+            throw ToolError("not_found", "No site or environment with slug \(target).")
+        }
+        let inst = resolved.instance
+        try await ctx.ensureRunning(resolved, envelope: envelope)
+        guard await ctx.lifecycle.isWPContainerRunning(inst) else {
+            throw ToolError("not_running", "\(target) could not be started.")
+        }
+
+        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let workdir = SiteRecipe.runWorkdir(requested: args["workdir"]?.stringValue, hostCWD: cwd, in: inst)
+        let env = args["env"]?.arrayValue?.compactMap { $0.stringValue } ?? []
+        let timeout = max(1, args["timeout"]?.intValue ?? runCommandTimeout)
+        let limited = SiteRecipe.timeLimited(command, seconds: timeout)
+        let cmdArgs: [String]
+        if let image = args["image"]?.stringValue, !image.isEmpty {
+            let host = try await dbHost(for: inst, ctx: ctx)
+            let sidecarEnvironment = await SidecarAddons.environment(for: inst, cli: ctx.cli)
+            cmdArgs = SiteRecipe.runImageArgs(inst, image: image, dbHost: host, command: limited, workdir: workdir,
+                                              env: env, sidecarEnvironment: sidecarEnvironment)
+        } else {
+            cmdArgs = SiteRecipe.execArgs(inst, command: limited, workdir: workdir, env: env)
+        }
+
+        let result = try await ctx.cli.runCapturing(cmdArgs)
+        return MCPResult.json([
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "exitCode": Int(result.exitCode),
+            "timedOut": result.exitCode == SiteRecipe.timeoutExitCode,
+            "workdir": workdir,
         ], isError: result.exitCode != 0)
     }
 
@@ -467,7 +514,7 @@ enum MCPToolDispatch {
         let envs = envelope.envs.map { e -> [String: Any] in
             ["envSlug": e.envSlug, "parentSlug": e.parentSlug, "branch": e.branch,
              "status": running.contains(e.wpContainerName) ? "running" : "stopped",
-             "url": e.localURL.absoluteString, "port": e.port]
+             "url": e.url.absoluteString, "localUrl": e.localURL.absoluteString, "port": e.port]
         }
         return MCPResult.json(["sites": sites, "envs": envs])
     }
@@ -519,7 +566,7 @@ enum MCPToolDispatch {
         }
         let d = WorktreeDescriptor(from: env)
         var payload: [String: Any] = [
-            "url": d.url, "port": d.port, "path": d.path, "worktreePath": d.worktreePath,
+            "url": d.url, "localUrl": d.localUrl, "port": d.port, "path": d.path, "worktreePath": d.worktreePath,
             "branch": d.branch, "envSlug": d.envSlug, "containers": d.containers,
             // So an agent can see WHERE this env's data actually lives (#17).
             "database": ["name": env.databaseName, "container": env.dbContainerName,
@@ -540,7 +587,7 @@ enum MCPToolDispatch {
         let envs = envelope.envs.filter { filter == "*" || $0.parentSlug == filter }.map { e -> [String: Any] in
             ["envSlug": e.envSlug, "parentSlug": e.parentSlug, "branch": e.branch, "repoRelPath": e.repoRelPath,
              "status": running.contains(e.wpContainerName) ? "running" : "stopped",
-             "url": e.localURL.absoluteString, "port": e.port, "worktreePath": e.worktreePath.path,
+             "url": e.url.absoluteString, "localUrl": e.localURL.absoluteString, "port": e.port, "worktreePath": e.worktreePath.path,
              // Auto-stop-when-idle (issue #16), so an agent can see whether an env
              // may be parked under it and opt in/out via `set_idle_stop`.
              "idleStopMinutes": e.idleStopMinutes as Any? ?? NSNull(),

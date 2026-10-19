@@ -41,7 +41,7 @@ final class EnvURLMigrationTests: XCTestCase {
     // MARK: - Variant derivation
 
     func testPassesCoverEveryFormAndPutFullURLsFirst() {
-        let passes = EnvURLMigration.passes(from: "https://mysite.test", to: "127.0.0.1:8901")
+        let passes = EnvURLMigration.passes(from: "https://mysite.test", to: "127.0.0.1:8901", https: false)
         XCTAssertEqual(passes, [
             EnvURLMigration.Pass(source: "https://mysite.test", target: "http://127.0.0.1:8901"),
             EnvURLMigration.Pass(source: "http://mysite.test", target: "http://127.0.0.1:8901"),
@@ -51,23 +51,45 @@ final class EnvURLMigrationTests: XCTestCase {
     }
 
     func testPassesAreIdenticalWhicheverSchemeTheOriginArrivesIn() {
-        XCTAssertEqual(EnvURLMigration.passes(from: "http://mysite.test", to: "127.0.0.1:8901"),
-                       EnvURLMigration.passes(from: "mysite.test", to: "127.0.0.1:8901"))
+        XCTAssertEqual(EnvURLMigration.passes(from: "http://mysite.test", to: "127.0.0.1:8901", https: false),
+                       EnvURLMigration.passes(from: "mysite.test", to: "127.0.0.1:8901", https: false))
     }
 
     func testPassesCarryPortsThrough() {
-        let passes = EnvURLMigration.passes(from: "http://127.0.0.1:8880", to: "127.0.0.1:8901")
+        let passes = EnvURLMigration.passes(from: "http://127.0.0.1:8880", to: "127.0.0.1:8901", https: false)
         XCTAssertEqual(passes.first?.source, "https://127.0.0.1:8880")
         XCTAssertEqual(passes.last, EnvURLMigration.Pass(source: "127.0.0.1:8880", target: "127.0.0.1:8901"))
     }
 
     func testNoPassesWhenTheOriginIsAlreadyTheTarget() {
-        XCTAssertTrue(EnvURLMigration.passes(from: "http://127.0.0.1:8901", to: "127.0.0.1:8901").isEmpty)
-        XCTAssertTrue(EnvURLMigration.passes(from: "", to: "127.0.0.1:8901").isEmpty)
+        XCTAssertTrue(EnvURLMigration.passes(from: "http://127.0.0.1:8901", to: "127.0.0.1:8901", https: false).isEmpty)
+        XCTAssertTrue(EnvURLMigration.passes(from: "", to: "127.0.0.1:8901", https: false).isEmpty)
     }
 
-    func testTargetAuthorityIsTheLoopbackPort() {
-        XCTAssertEqual(EnvURLMigration.targetAuthority(port: 8901), "127.0.0.1:8901")
+    func testTargetAuthorityIsTheEnvDomain() {
+        XCTAssertEqual(EnvURLMigration.targetAuthority(for: makeEnv(slug: "my-site-wt-authors", port: 8901)),
+                       "my-site-wt-authors.localhost")
+    }
+
+    func testHTTPSPassesLandOnHTTPSWhicheverSchemeTheOriginUsed() {
+        let passes = EnvURLMigration.passes(from: "https://mysite.test", to: "my-site-wt-x.localhost", https: true)
+        XCTAssertEqual(passes, [
+            EnvURLMigration.Pass(source: "https://mysite.test", target: "https://my-site-wt-x.localhost"),
+            EnvURLMigration.Pass(source: "http://mysite.test", target: "https://my-site-wt-x.localhost"),
+            EnvURLMigration.Pass(source: "//mysite.test", target: "//my-site-wt-x.localhost"),
+            EnvURLMigration.Pass(source: "mysite.test", target: "my-site-wt-x.localhost"),
+        ])
+    }
+
+    func testAnOldLoopbackEnvIsRemigratedOntoItsDomain() {
+        // An env created before env domains has `127.0.0.1:<port>` everywhere;
+        // `fix-urls` adds that as a candidate and it must survive filtering.
+        let origins = EnvURLMigration.staleOrigins(
+            candidates: ["http://127.0.0.1:8901", "https://mysite.test", "http://127.0.0.1:8901/"],
+            target: "my-site-wt-x.localhost", networkDomain: "https://mysite.test")
+        XCTAssertEqual(origins, ["127.0.0.1:8901", "mysite.test"])
+        XCTAssertEqual(EnvURLMigration.passes(from: origins[0], to: "my-site-wt-x.localhost", https: false).first,
+                       EnvURLMigration.Pass(source: "https://127.0.0.1:8901", target: "http://my-site-wt-x.localhost"))
     }
 
     // MARK: - Stale-origin filtering
@@ -148,42 +170,52 @@ final class EnvURLMigrationTests: XCTestCase {
 
     func testMultisiteCloneGetsDomainCurrentSite() {
         let updates = EnvURLMigration.configConstantUpdates(
-            existing: ["DOMAIN_CURRENT_SITE": "mysite.test"], targetAuthority: "127.0.0.1:8901", multisite: true)
+            existing: ["DOMAIN_CURRENT_SITE": "mysite.test"], targetAuthority: "127.0.0.1:8901", https: false, multisite: true)
         XCTAssertEqual(updates, [EnvURLMigration.ConstantUpdate(name: "DOMAIN_CURRENT_SITE", value: "127.0.0.1:8901")])
     }
 
     func testDomainCurrentSiteAlreadyCorrectIsLeftAlone() {
         let updates = EnvURLMigration.configConstantUpdates(
-            existing: ["DOMAIN_CURRENT_SITE": "127.0.0.1:8901"], targetAuthority: "127.0.0.1:8901", multisite: true)
+            existing: ["DOMAIN_CURRENT_SITE": "127.0.0.1:8901"], targetAuthority: "127.0.0.1:8901", https: false, multisite: true)
         XCTAssertTrue(updates.isEmpty)
     }
 
     func testSingleSiteCloneGetsNoDomainCurrentSite() {
         let updates = EnvURLMigration.configConstantUpdates(
-            existing: [:], targetAuthority: "127.0.0.1:8901", multisite: false)
+            existing: [:], targetAuthority: "127.0.0.1:8901", https: false, multisite: false)
         XCTAssertTrue(updates.isEmpty)
     }
 
     func testAStaleDomainCurrentSiteIsFixedEvenOnAnUndetectedNetwork() {
         let updates = EnvURLMigration.configConstantUpdates(
-            existing: ["DOMAIN_CURRENT_SITE": "mysite.test"], targetAuthority: "127.0.0.1:8901", multisite: false)
+            existing: ["DOMAIN_CURRENT_SITE": "mysite.test"], targetAuthority: "127.0.0.1:8901", https: false, multisite: false)
         XCTAssertEqual(updates.map(\.name), ["DOMAIN_CURRENT_SITE"])
     }
 
     func testHardcodedHomeAndSiteurlAreRewrittenToTheEnvURL() {
         let updates = EnvURLMigration.configConstantUpdates(
             existing: ["WP_HOME": "https://mysite.test", "WP_SITEURL": "https://mysite.test"],
-            targetAuthority: "127.0.0.1:8901", multisite: false)
+            targetAuthority: "127.0.0.1:8901", https: false, multisite: false)
         XCTAssertEqual(updates, [
             EnvURLMigration.ConstantUpdate(name: "WP_HOME", value: "http://127.0.0.1:8901"),
             EnvURLMigration.ConstantUpdate(name: "WP_SITEURL", value: "http://127.0.0.1:8901"),
         ])
     }
 
+    func testHardcodedHomeTakesTheHTTPSScheme() {
+        let updates = EnvURLMigration.configConstantUpdates(
+            existing: ["WP_HOME": "http://127.0.0.1:8901", "DOMAIN_CURRENT_SITE": "127.0.0.1:8901"],
+            targetAuthority: "my-site-wt-x.localhost", https: true, multisite: true)
+        XCTAssertEqual(updates, [
+            EnvURLMigration.ConstantUpdate(name: "DOMAIN_CURRENT_SITE", value: "my-site-wt-x.localhost"),
+            EnvURLMigration.ConstantUpdate(name: "WP_HOME", value: "https://my-site-wt-x.localhost"),
+        ])
+    }
+
     func testHomeAndSiteurlAreNeverAddedWhenAbsent() {
         // A clone that never pinned them must keep reading its options.
         let updates = EnvURLMigration.configConstantUpdates(
-            existing: ["WP_DEBUG": "true"], targetAuthority: "127.0.0.1:8901", multisite: false)
+            existing: ["WP_DEBUG": "true"], targetAuthority: "127.0.0.1:8901", https: false, multisite: false)
         XCTAssertTrue(updates.isEmpty)
     }
 
@@ -204,7 +236,7 @@ final class EnvURLMigrationTests: XCTestCase {
         let existing = try WPConfigService.read(wordpressFolder: folder).constants
         XCTAssertTrue(EnvURLMigration.isMultisite(networkType: .none, constants: existing))
         for update in EnvURLMigration.configConstantUpdates(existing: existing,
-                                                            targetAuthority: "127.0.0.1:8901",
+                                                            targetAuthority: "127.0.0.1:8901", https: false,
                                                             multisite: true) {
             try WPConfigService.setConstant(update.name, value: update.value, rawValue: false, wordpressFolder: folder)
         }
@@ -218,7 +250,7 @@ final class EnvURLMigrationTests: XCTestCase {
         XCTAssertEqual(try WPConfigService.read(wordpressFolder: folder).tablePrefix, "wp_")
         // Re-running is a no-op: the constant already matches.
         XCTAssertTrue(EnvURLMigration.configConstantUpdates(existing: rewritten,
-                                                            targetAuthority: "127.0.0.1:8901",
+                                                            targetAuthority: "127.0.0.1:8901", https: false,
                                                             multisite: true).isEmpty)
     }
 
@@ -233,7 +265,7 @@ final class EnvURLMigrationTests: XCTestCase {
 
         let existing = try WPConfigService.read(wordpressFolder: folder).constants
         for update in EnvURLMigration.configConstantUpdates(existing: existing,
-                                                            targetAuthority: "127.0.0.1:8901",
+                                                            targetAuthority: "127.0.0.1:8901", https: false,
                                                             multisite: false) {
             try WPConfigService.setConstant(update.name, value: update.value, rawValue: false, wordpressFolder: folder)
         }
@@ -261,6 +293,14 @@ final class EnvURLMigrationTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    private func makeEnv(slug: String, port: Int) -> WorktreeEnv {
+        WorktreeEnv(parentSiteID: UUID(), parentSlug: "my-site", envSlug: slug,
+                    repoRelPath: "wp-content", branch: "x",
+                    worktreePath: URL(fileURLWithPath: "/tmp/\(slug)/worktree"),
+                    envPath: URL(fileURLWithPath: "/tmp/\(slug)"),
+                    port: port, imageTag: "wordpress:6.8")
+    }
 
     private func makeTempWordPressFolder(config: String) throws -> URL {
         let folder = URL(fileURLWithPath: NSTemporaryDirectory())

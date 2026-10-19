@@ -30,10 +30,18 @@ public enum SiteResolver {
         /// The instance's `php/` overrides folder, mounted so wp-cli loads the
         /// managed runtime handlers.
         public let phpConfPath: String
+        /// Extra bind mounts as `host:container` (a worktree env's checkout),
+        /// mounted after `wordpressPath` so they shadow it.
+        public let mounts: [String]
     }
 
-    /// The most-specific match for `path` (longest `wordpress/` prefix wins), or
-    /// nil when the path is not inside any known site/env.
+    /// The WordPress document root inside the containers.
+    private static let documentRoot = "/var/www/html"
+
+    /// The most-specific match for `path` (longest matching root wins), or nil
+    /// when the path is not inside any known site/env. A root is an instance's
+    /// `wordpress/` folder or one of its extra mounts, such as a worktree
+    /// checkout, whose subpath is reported relative to `wordpressPath`.
     public static func resolve(path: String, in envelope: StoreEnvelope) -> Match? {
         let target = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
         var best: Match?
@@ -41,12 +49,18 @@ public enum SiteResolver {
 
         func consider(_ inst: any RunnableInstance, kind: String, slug: String) {
             let wpPath = inst.wordpressFolder.resolvingSymlinksInPath().path
-            let sub: String?
-            if target == wpPath { sub = "" }
-            else if target.hasPrefix(wpPath + "/") { sub = String(target.dropFirst(wpPath.count + 1)) }
-            else { sub = nil }
-            if let sub, wpPath.count > bestLen {
-                bestLen = wpPath.count
+            var roots = [(host: wpPath, sub: "")]
+            for mount in inst.extraMounts where mount.containerPath.hasPrefix(documentRoot + "/") {
+                let host = URL(fileURLWithPath: mount.hostPath).resolvingSymlinksInPath().path
+                roots.append((host, String(mount.containerPath.dropFirst(documentRoot.count + 1))))
+            }
+            for root in roots where root.host.count > bestLen {
+                let rest: String
+                if target == root.host { rest = "" }
+                else if target.hasPrefix(root.host + "/") { rest = String(target.dropFirst(root.host.count + 1)) }
+                else { continue }
+                let sub = [root.sub, rest].filter { !$0.isEmpty }.joined(separator: "/")
+                bestLen = root.host.count
                 best = Match(matched: true, kind: kind, slug: slug,
                              wordpressPath: wpPath, dbContainer: inst.dbContainerName,
                              port: inst.port, subpath: sub,
@@ -55,7 +69,8 @@ public enum SiteResolver {
                              sidecars: SidecarAddons.refs(for: inst),
                              mailContainer: inst.mailContainerName,
                              esContainer: inst.esContainerName,
-                             phpConfPath: inst.phpConfFolder.path)
+                             phpConfPath: inst.phpConfFolder.path,
+                             mounts: inst.extraMounts.map { "\($0.hostPath):\($0.containerPath)" })
             }
         }
 

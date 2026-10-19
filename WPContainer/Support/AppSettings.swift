@@ -20,6 +20,9 @@ enum AppSettings {
     static let defaultWPDebugKey = "defaultWPDebug"
     static let defaultScriptDebugKey = "defaultScriptDebug"
     static let defaultGlobalWPRouterKey = "defaultGlobalWPRouter"
+    /// The terminal app the Terminal buttons open (`TerminalApp` raw value).
+    /// Absent → Terminal; read through `TerminalApps.selected`.
+    static let terminalAppKey = "terminalApp"
     /// Whether the one-time "install the command-line tool?" offer has been shown.
     /// Defaults FALSE (absent → not yet offered), so it fires once and never nags.
     static let didOfferCLIInstallKey = "didOfferCLIInstall"

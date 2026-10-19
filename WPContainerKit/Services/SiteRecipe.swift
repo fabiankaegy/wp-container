@@ -79,6 +79,9 @@ public enum SiteRecipe {
     }
 
     // MARK: - Images
+    // Every `container run` below passes `--progress none`: the captured
+    // stderr then holds only the container's own output, so `--json`
+    // results, MCP results, and error messages carry no `[n/6]` lines.
     public static func pullImageArgs(_ image: String) -> [String] {
         ["image", "pull", image]
     }
@@ -92,7 +95,7 @@ public enum SiteRecipe {
     /// Gate on absence of `<wordpress>/index.php`.
     public static func seedWordPressArgs(_ inst: any RunnableInstance) -> [String] {
         [
-            "run", "--rm", "--entrypoint", "/bin/sh",
+            "run", "--progress", "none", "--rm", "--entrypoint", "/bin/sh",
             "-v", "\(inst.wordpressFolder.path):/var/www/html",
             inst.imageTag,
             "-c", "cp -r /usr/src/wordpress/. /var/www/html/",
@@ -107,7 +110,7 @@ public enum SiteRecipe {
         // VALIDATED: mariadb must run as 999:999 when bind-mounting database/,
         // otherwise the same virtiofs chown restriction kills its entrypoint
         // (holds for both fresh init and restarts).
-        var args = ["run", "-d", "--rm", "--name", inst.dbContainerName, "--user", "999:999"]
+        var args = ["run", "--progress", "none", "-d", "--rm", "--name", inst.dbContainerName, "--user", "999:999"]
         args += resourceArgs(for: inst)
         args += labelArgs(for: inst)
         args += [
@@ -148,7 +151,7 @@ public enum SiteRecipe {
     /// `wordpress` user (no per-env users: envs of one site are already clones of
     /// each other's data with a coupled lifecycle).
     public static func createEnvDatabaseArgs(dbHost: String, schema: String) -> [String] {
-        var args = ["run", "--rm", databaseImage, "mariadb"]
+        var args = ["run", "--progress", "none", "--rm", databaseImage, "mariadb"]
         args += mariadbClientFlags(dbHost: dbHost)
         args += ["-e", """
         CREATE DATABASE IF NOT EXISTS `\(schema)`; \
@@ -172,7 +175,7 @@ public enum SiteRecipe {
         let flags = mariadbClientFlags(dbHost: dbHost).joined(separator: " ")
         let dump = "/tmp/wpc-clone.sql"
         return [
-            "run", "--rm", "--entrypoint", "/bin/sh", databaseImage, "-c",
+            "run", "--progress", "none", "--rm", "--entrypoint", "/bin/sh", databaseImage, "-c",
             "set -e; mariadb-dump \(flags) --single-transaction --quick \(from) > \(dump); "
                 + "mariadb \(flags) \(to) < \(dump)",
         ]
@@ -187,7 +190,7 @@ public enum SiteRecipe {
     /// concurrent env creation, whose schema exists before its record does. Only
     /// names we tombstoned ourselves are ever dropped (`Site.pendingSchemaDrops`).
     public static func dropEnvDatabaseArgs(dbHost: String, schema: String) -> [String] {
-        var args = ["run", "--rm", databaseImage, "mariadb"]
+        var args = ["run", "--progress", "none", "--rm", databaseImage, "mariadb"]
         args += mariadbClientFlags(dbHost: dbHost)
         args += ["-e", "DROP DATABASE IF EXISTS `\(schema)`;"]
         return args
@@ -213,7 +216,7 @@ public enum SiteRecipe {
                                         imageOverride: String? = nil,
                                         xdebugClientHost: String? = nil,
                                         sidecarEnvironment: [String] = []) -> [String] {
-        var args = ["run", "-d", "--rm", "--name", inst.wpContainerName]
+        var args = ["run", "--progress", "none", "-d", "--rm", "--name", inst.wpContainerName]
         args += resourceArgs(for: inst)
         args += labelArgs(for: inst)
         // Publish the host port ONLY for instances that own it (sites). A worktree
@@ -261,7 +264,7 @@ public enum SiteRecipe {
     /// override (the image already runs as a non-root user), bind-mounts a data
     /// dir, single-node with security off and a modest heap.
     public static func runElasticsearchArgs(_ inst: any RunnableInstance) -> [String] {
-        var args = ["run", "-d", "--rm", "--name", inst.esContainerName]
+        var args = ["run", "--progress", "none", "-d", "--rm", "--name", inst.esContainerName]
         args += resourceArgs(for: inst)
         args += labelArgs(for: inst)
         args += [
@@ -306,7 +309,7 @@ public enum SiteRecipe {
     /// `route(forHost:)` calls `touchLocked` for every route including mailbox ones.
     /// Only the direct `127.0.0.1:<mailpitPort>` URL bypasses it.
     public static func runMailpitArgs(_ inst: any RunnableInstance, webPort: Int) -> [String] {
-        var args = ["run", "-d", "--rm", "--name", inst.mailContainerName]
+        var args = ["run", "--progress", "none", "-d", "--rm", "--name", inst.mailContainerName]
         args += resourceArgs(for: inst)
         args += labelArgs(for: inst)
         args += [
@@ -354,10 +357,15 @@ public enum SiteRecipe {
 
     // MARK: - One-shot wp-cli
     private static func wpCLIBaseArgs(_ inst: any RunnableInstance, dbHost: String) -> [String] {
-        var args = ["run", "--rm"]
+        var args = ["run", "--progress", "none", "--rm"]
         args += labelArgs(for: inst)
+        args += ["-v", "\(inst.wordpressFolder.path):/var/www/html"]
+        // A worktree env's checkout shadows the snapshot of the repo inside its
+        // `wordpress/` copy, so wp-cli loads the branch's code.
+        for mount in inst.extraMounts {
+            args += ["-v", "\(mount.hostPath):\(mount.containerPath)"]
+        }
         args += [
-            "-v", "\(inst.wordpressFolder.path):/var/www/html",
             "-e", "WORDPRESS_DB_HOST=\(dbHost)",
             "-e", "WORDPRESS_DB_USER=\(dbUser)",
             "-e", "WORDPRESS_DB_PASSWORD=\(dbPassword)",
@@ -445,25 +453,13 @@ public enum SiteRecipe {
         return args
     }
 
-    /// `wp option update home/siteurl` + cache flush — used after cloning a site
-    /// into a worktree env so URLs point at the env's port.
-    public static func wpUpdateURLsArgs(_ inst: any RunnableInstance, dbHost: String) -> [String] {
-        var args = wpCLIBaseArgs(inst, dbHost: dbHost)
-        let url = "http://127.0.0.1:\(inst.port)"
-        // sh -c inside the wp-cli container chains the three commands; the host
-        // side is still a plain argument array (no host shell interpolation).
-        args += [
-            cliImage(for: inst),
-            "sh", "-c",
-            "wp option update home '\(url)' && wp option update siteurl '\(url)' && wp cache flush",
-        ]
-        return args
-    }
-
     /// Set `home`/`siteurl` to an arbitrary URL + flush cache — used when
-    /// toggling HTTPS on/off for a site (PLAN.md §2f).
+    /// toggling HTTPS on/off for a site (PLAN.md §2f) and to finish a worktree
+    /// env's URL migration (`EnvURLMigrator`).
     public static func wpSetURLsArgs(_ inst: any RunnableInstance, dbHost: String, url: String) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
+        // sh -c inside the wp-cli container chains the three commands; the host
+        // side is still a plain argument array (no host shell interpolation).
         args += [
             cliImage(for: inst),
             "sh", "-c",
@@ -501,6 +497,95 @@ public enum SiteRecipe {
         }
         args += [cliImage(for: inst), "wp"]
         args += wpArgs
+        return args
+    }
+
+    // MARK: - Arbitrary commands (`wp-container run`)
+
+    /// The WordPress document root inside the wp container.
+    public static let wordpressContainerPath = "/var/www/html"
+
+    /// The container path of a host directory that sits inside one of the
+    /// instance's bind mounts, or nil. Extra mounts (a worktree checkout) are
+    /// checked first because they shadow part of the base `wordpress/` mount.
+    public static func containerPath(forHostPath hostPath: URL, in inst: any RunnableInstance) -> String? {
+        let target = hostPath.resolvingSymlinksInPath().standardizedFileURL.path
+        let base = Mount(hostPath: inst.wordpressFolder.path, containerPath: wordpressContainerPath)
+        for mount in inst.extraMounts + [base] {
+            let root = URL(fileURLWithPath: mount.hostPath).resolvingSymlinksInPath().standardizedFileURL.path
+            if target == root { return mount.containerPath }
+            if target.hasPrefix(root + "/") {
+                return mount.containerPath + "/" + target.dropFirst(root.count + 1)
+            }
+        }
+        return nil
+    }
+
+    /// The working directory for `wp-container run`: `requested` when given
+    /// (absolute, or relative to the document root), else the container path
+    /// of `hostCWD`, else the document root.
+    public static func runWorkdir(requested: String?, hostCWD: URL, in inst: any RunnableInstance) -> String {
+        if let requested, !requested.isEmpty {
+            if requested.hasPrefix("/") { return requested }
+            return wordpressContainerPath + "/" + requested
+        }
+        return containerPath(forHostPath: hostCWD, in: inst) ?? wordpressContainerPath
+    }
+
+    /// `container exec` args that run `command` in the instance's running wp
+    /// container, which already carries the database, sidecar, and PHP
+    /// override environment.
+    public static func execArgs(_ inst: any RunnableInstance, command: [String], workdir: String,
+                                env: [String] = [], interactive: Bool = false, tty: Bool = false) -> [String] {
+        var args = ["exec"]
+        args += processArgs(workdir: workdir, env: env, interactive: interactive, tty: tty)
+        args.append(inst.wpContainerName)
+        args += command
+        return args
+    }
+
+    /// One-shot `container run` args that run `command` in `image` with the wp
+    /// container's mounts and environment, for tools the WordPress image lacks
+    /// (`composer:2`, `node:20`).
+    public static func runImageArgs(_ inst: any RunnableInstance, image: String, dbHost: String,
+                                    command: [String], workdir: String, env: [String] = [],
+                                    interactive: Bool = false, tty: Bool = false,
+                                    sidecarEnvironment: [String] = []) -> [String] {
+        // The base args already mount a worktree env's checkout over `wordpress/`.
+        var args = wpCLIBaseArgs(inst, dbHost: dbHost)
+        if FileManager.default.fileExists(atPath: inst.phpConfFolder.path) {
+            args += ["-v", "\(inst.phpConfFolder.path):\(phpConfContainerPath)",
+                     "-e", "PHP_INI_SCAN_DIR=\(phpDefaultConfDir):\(phpConfContainerPath)"]
+        }
+        for assignment in sidecarEnvironment {
+            args += ["-e", assignment]
+        }
+        // User env comes last so it overrides the defaults above.
+        args += processArgs(workdir: workdir, env: env, interactive: interactive, tty: tty)
+        args.append(image)
+        args += command
+        return args
+    }
+
+    /// Exit status of `timeout` (coreutils and BusyBox) when the limit is hit.
+    public static let timeoutExitCode: Int32 = 124
+
+    /// Wraps `command` so the container stops it after `seconds`. The limit
+    /// runs inside the container because `container` does not forward signals
+    /// from a stopped client to the process. Images without `timeout` run the
+    /// command unlimited.
+    public static func timeLimited(_ command: [String], seconds: Int) -> [String] {
+        let script = #"if command -v timeout >/dev/null 2>&1; then exec timeout "$0" "$@"; fi; exec "$@""#
+        return ["sh", "-c", script, "\(seconds)"] + command
+    }
+
+    /// Process flags shared by `exec` and `run`: stdin, TTY, workdir, env.
+    private static func processArgs(workdir: String, env: [String], interactive: Bool, tty: Bool) -> [String] {
+        var args: [String] = []
+        if interactive { args.append("-i") }
+        if tty { args.append("-t") }
+        args += ["-w", workdir]
+        for entry in env { args += ["-e", entry] }
         return args
     }
 
