@@ -89,6 +89,12 @@ struct BranchTable: View {
             .overlay {
                 if rows.isEmpty { empty(scope) }
             }
+            // Never act on rows the filter or search hides: drop them from the
+            // selection, or "Delete 54…" could target rows you can't see.
+            .onChange(of: rows.map(\.id), initial: true) { _, ids in
+                let visible = Set(ids)
+                if !vm.branchSelection.isSubset(of: visible) { vm.branchSelection.formIntersection(visible) }
+            }
             footer(shown: rows.count, total: scope.count)
         }
         .confirmationDialog("Delete \(confirmingDelete.count) branch environment\(confirmingDelete.count == 1 ? "" : "s")?",
