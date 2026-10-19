@@ -564,7 +564,7 @@ public final class AppViewModel {
                     try ShellPathService.apply(install: false)
                     WPCLIShim.removeRouter()
                 }
-            } catch { lastError = "Global wp router: \(error)" }
+            } catch { lastError = "Couldn’t update the global wp command: \(error)" }
         }
     }
 
@@ -600,7 +600,7 @@ public final class AppViewModel {
             try? ProxyControl.claim(port: port)
             proxyPort = port
         } catch {
-            lastError = "HTTPS proxy: \(error)"
+            lastError = "Couldn’t start the proxy: \(error)"
             notifications.notifyProxyFailed(reason: Self.proxyFailureReason(error))
         }
     }
@@ -613,9 +613,9 @@ public final class AppViewModel {
         case .noPortAvailable:
             return "Ports 443 and 8443 are both busy. Quit whatever is using them, then start the proxy again."
         case .listenerFailed(let detail):
-            return "The proxy couldn’t bind its port (\(detail)). Another process may be holding 443 or 8443."
+            return "The proxy couldn’t open its port (\(detail)). Quit any app using port 443 or 8443, then start the proxy again."
         case .identityUnavailable(let detail):
-            return "The TLS certificate couldn’t be loaded (\(detail)). Re-trust the WP Container CA in Settings."
+            return "The TLS certificate couldn’t be loaded (\(detail)). Trust the WP Container CA again from a site’s Integrations section."
         }
     }
 

@@ -140,7 +140,7 @@ struct MenuBarContent: View {
     private var emptyState: some View {
         VStack(spacing: 6) {
             Text("No sites yet").font(.callout).foregroundStyle(.secondary)
-            Button("Add a Site…") { vm.presentingAddSite = true; focusMainWindow(select: nil) }
+            Button("Add Site…") { vm.presentingAddSite = true; focusMainWindow(select: nil) }
                 .buttonStyle(.link)
         }
         .frame(maxWidth: .infinity).padding(.vertical, 18)

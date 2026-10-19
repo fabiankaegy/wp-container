@@ -174,7 +174,7 @@ private struct SiteDangerZone: View {
         SectionCard(title: "Danger Zone", systemImage: "exclamationmark.triangle") {
             VStack(alignment: .leading, spacing: 8) {
                 if site.isArchived {
-                    Text("Archived. It stays stopped and out of your library until you bring it back; starting it does too.")
+                    Text("Archived sites stay stopped and out of your library. Unarchive or start it to bring it back.")
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     Button("Unarchive Site") { vm.unarchiveSite(site) }

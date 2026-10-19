@@ -83,7 +83,7 @@ struct EnvInspector: View {
                 switch portOwnership {
                 case .noProxy:
                     HStack(spacing: 6) {
-                        Text("The reverse proxy serves this URL and isn’t running.")
+                        Text("This URL needs the proxy, which isn’t running.")
                             .font(.caption2).foregroundStyle(.secondary)
                         Button("Start Proxy") {
                             Task {
@@ -94,10 +94,9 @@ struct EnvInspector: View {
                         .buttonStyle(.link).font(.caption2)
                     }
                 case .conflicted:
-                    Text("The proxy is running but doesn’t own port \(env.port), so this URL "
-                         + "and idle-stop aren’t being served. If this environment was started "
-                         + "by an older build, stop and start it once; otherwise something else "
-                         + "is holding the port.")
+                    Text("The proxy doesn’t hold port \(env.port), so this URL and idle stop "
+                         + "don’t work. Stop and start this environment. If that doesn’t help, "
+                         + "another app is using the port.")
                         .font(.caption2).foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 case .owned, .unknown:
@@ -164,7 +163,7 @@ struct EnvInspector: View {
                         .font(.caption).foregroundStyle(.secondary)
                     Button("Restore") { vm.restoreEnv(env) }
                 } else {
-                    Text("Settling stops it and frees its port. Its checkout, files and database are kept until you restore it.")
+                    Text("Settling stops it and frees its port. Its checkout, files and database are kept, so you can restore it anytime.")
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     Button("Settle") { vm.settleEnvs([env]) }
