@@ -147,18 +147,16 @@ struct BranchTable: View {
 
     private func bar(_ scope: [WorktreeEnv]) -> some View {
         HStack(spacing: 10) {
-            Picker("Show", selection: $filter) {
-                ForEach(BranchFilter.allCases) { f in
-                    Text("\(f.rawValue) \(scope.filter(f.includes).count)").tag(f)
-                }
+            // The segmented filter can't shrink, so fall back to a pop-up
+            // menu when the pane is too narrow for it.
+            ViewThatFits(in: .horizontal) {
+                filterPicker(scope).pickerStyle(.segmented)
+                filterPicker(scope).pickerStyle(.menu)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
-            Spacer()
+            Spacer(minLength: 0)
             TextField("Filter Branches", text: $search)
                 .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 200)
+                .frame(minWidth: 100, maxWidth: 200)
             if let site {
                 Button("New", systemImage: "plus") {
                     vm.selection = site.id
@@ -169,6 +167,16 @@ struct BranchTable: View {
         .controlSize(.small)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    private func filterPicker(_ scope: [WorktreeEnv]) -> some View {
+        Picker("Show", selection: $filter) {
+            ForEach(BranchFilter.allCases) { f in
+                Text("\(f.rawValue) \(scope.filter(f.includes).count)").tag(f)
+            }
+        }
+        .labelsHidden()
+        .fixedSize()
     }
 
     @ViewBuilder

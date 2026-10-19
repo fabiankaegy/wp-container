@@ -20,6 +20,11 @@ struct MainWindow: View {
                         .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 320)
                 } detail: {
                     detail
+                        // Never pass the content's minimum width up to the split
+                        // view: a detail wider than its column (a narrow window, a
+                        // wide inspector) sends AppKit into a layout loop that
+                        // crashes the app. Content that can't fit clips instead.
+                        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
                         .toolbar {
                             // While the inspector is open its toggle lives in the
                             // inspector's own toolbar section (InspectorView).
