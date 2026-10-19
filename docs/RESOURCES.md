@@ -79,9 +79,10 @@ matters more — see the next section.
   listening nothing is stopped and nothing is woken. Both the Idle stop card and
   `wp-container idle` say so when that's the case.
 - **Environments need the proxy to be reachable at all.** An environment's
-  container publishes no host port: the proxy binds `127.0.0.1:<env port>` itself
-  and relays to the container's vmnet IP. That is what makes the one URL every
-  surface advertises both trackable and wakeable. The app starts the proxy
+  container publishes no host port: the proxy serves its `<env>.localhost`
+  domain on 443/80, binds `127.0.0.1:<env port>` itself, and relays both to the
+  container's vmnet IP. That is what makes every environment URL both trackable
+  and wakeable. The app starts the proxy
   whenever an environment starts; the CLI and MCP print a warning if none is
   running (the environment still starts — wp-cli and MCP don't need HTTP).
 - **Extra safety on sites:** a site is never auto-stopped while any of its
@@ -92,7 +93,7 @@ matters more — see the next section.
   parent's own wp container is down, and no sibling env is borrowing it. Without
   that, idling envs would reclaim only half the memory.
 - **Waking:** hitting any stopped URL the proxy serves — an environment's
-  `http://127.0.0.1:<port>` included — returns a "Waking up …" page that reloads
+  domain and its `http://127.0.0.1:<port>` included — returns a "Waking up …" page that reloads
   every 2 seconds and lands on the live site once WordPress answers (a 503 with
   `Retry-After` for non-browser clients). Repeated requests during the wake
   trigger exactly one start. A shared-database env woken while its parent site is
@@ -103,7 +104,7 @@ matters more — see the next section.
 | Counted | Not counted |
 |---|---|
 | Requests to `https://<slug>.localhost` or a custom domain | Requests to a **site's** `http://127.0.0.1:<port>` |
-| Requests to an **environment's** `http://127.0.0.1:<port>` | Requests to a mailbox's direct `http://127.0.0.1:<mailpitPort>` |
+| Requests to an **environment's** `<env>.localhost` or `http://127.0.0.1:<port>` | Requests to a mailbox's direct `http://127.0.0.1:<mailpitPort>` |
 | Requests to `<slug>-mail.localhost` (the mailbox is proxied too) | Anything inside the container you started yourself (`container exec`) |
 | `wp-container wp …` (and the `wp` shim/router) | |
 | MCP tool calls scoped to the site/env | |
@@ -120,10 +121,13 @@ work across processes. The idle clock is the latest of those, plus the moment th
 proxy first saw the instance running.
 
 **Environments have no blind spot left.** Their advertised
-`http://127.0.0.1:<port>` URL — the one the app, the CLI, the JSON payloads and
-WordPress's own `home`/`siteurl` all use — is a socket the proxy holds, so
-browsing an environment keeps it alive and reopening a parked one wakes it, at
-the exact URL you already have in a tab. That is why the default is on.
+`http(s)://<env>.localhost` URL — the one the app, the CLI, the JSON payloads and
+WordPress's own `home`/`siteurl` all use — is routed by the proxy, and their
+`http://127.0.0.1:<port>` is a socket the proxy holds, so browsing an
+environment keeps it alive and reopening a parked one wakes it, at the exact URL
+you already have in a tab. That is why the default is on. (An environment
+created before environment domains keeps its `127.0.0.1` URL until
+`wp-container worktree fix-urls <env>` moves it.)
 
 **Sites still have one.** A site's container publishes its own port, so a request
 to `http://127.0.0.1:<port>` goes straight to it and the proxy never sees it.

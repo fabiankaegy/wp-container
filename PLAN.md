@@ -113,8 +113,15 @@ worktree of one repo inside it:
    `-v <worktreePath>:/var/www/html/<repoRelPath>` — the worktree checkout replaces
    the primary checkout inside the env container only. (Nested-mount shadowing is
    verified in Phase V.)
-5. Fix URLs for the new port: one-shot wp-cli `wp option update home/siteurl` (+
-   `wp cache flush`). Admin creds are inherited from the parent (cloned DB).
+5. Migrate every URL onto the env's domain, `http(s)://<envSlug>.localhost`
+   (scheme follows the parent's HTTPS; `EnvURLMigration`, full
+   `wp search-replace`, then `home`/`siteurl` + `wp cache flush`). `.localhost`
+   resolves natively, so no /etc/hosts write and no Touch ID prompt — agents
+   create envs headless. The hostname comes from `WorktreeEnv.domainHost` alone
+   (label capped at 63 chars with a stable hash). Envs created before this keep
+   `http://127.0.0.1:<port>` (`usesDomainURL == false`) until
+   `worktree fix-urls` moves them. Admin creds are inherited from the parent
+   (cloned DB).
 6. Emit a machine-readable descriptor: `{url, port, path, worktreePath, branch, containers}`.
 
 **Deletion:** stop containers (never the parent's shared db container) → drop the
@@ -280,9 +287,11 @@ wp-cli is a first-class citizen on all four surfaces (implementation: one-shot
   env's wp container publishes NOTHING; the proxy binds `127.0.0.1:<env port>`
   itself, one loopback listener per env, and relays to the container's vmnet IP.
   The premise above held only as long as the proxy was an optional extra path, and
-  for envs it can't be: `http://127.0.0.1:<port>` is the ONLY URL an env is ever
-  advertised at (app, CLI, MCP payloads, magic-login) and it is what WordPress has
-  pinned as `home`/`siteurl`. Leaving that URL on Apple's forwarder meant the idle
+  for envs it can't be: `http://127.0.0.1:<port>` was then the ONLY URL an env
+  was ever advertised at (app, CLI, MCP payloads, magic-login) and what WordPress
+  had pinned as `home`/`siteurl` (since superseded by env domains — §2b step 5 —
+  which the proxy serves by Host; the port listener stays for pre-domain envs).
+  Leaving that URL on Apple's forwarder meant the idle
   clock could not see the traffic that mattered and wake-on-request could not fire
   where users actually clicked — the two halves of issue #16 — while also routing
   every env's bulk HTTP through the lossy forwarder. Owning the socket fixes all

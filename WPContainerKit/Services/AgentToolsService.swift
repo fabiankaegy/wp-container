@@ -15,14 +15,14 @@ public enum AgentToolsService {
     public static let cliPath = "/usr/local/bin/wp-container"
 
     /// Canonical MCP tool names (single source of truth shared with the server
-    /// and the doc so they never drift). 20 tools (issue #13 added two).
+    /// and the doc so they never drift).
     public static let mcpToolNames: [String] = [
-        "wp_cli", "read_error_log", "read_access_log", "wp_debug_toggle",
+        "wp_cli", "run_command", "read_error_log", "read_access_log", "wp_debug_toggle",
         "read_wp_config", "edit_wp_config", "get_site_info", "site_health_check",
         "site_start", "site_stop", "site_restart", "site_status", "list_sites",
         "worktree_create", "worktree_list", "worktree_delete",
-        "xdebug_toggle", "elasticsearch_toggle", "redis_toggle",
-        "login_link", "create_user",
+        "xdebug_toggle", "elasticsearch_toggle", "mailpit_toggle", "redis_toggle",
+        "login_link", "create_user", "db_import", "set_idle_stop",
     ]
 
     public static let defaultDocName = "AGENTS.md"
@@ -209,6 +209,16 @@ public enum AgentToolsService {
         (`/opt/homebrew/bin/wp`), which does NOT know this container and will fail with
         "not a WordPress installation". Either call the shim above, or install the global
         router once with `wp-container setup wp` so plain `wp` inside this site works.
+
+        ## Running other commands
+
+        Run PHP, tests, and build tools inside the site's container; the working directory
+        follows your current folder:
+
+        ```bash
+        wp-container run \(site.slug) -- vendor/bin/phpunit
+        wp-container run \(site.slug) --image composer:2 -- composer install
+        ```
 
         ## Branch environments (git worktrees)
 

@@ -587,7 +587,8 @@ public final class AppViewModel {
     /// Whether anything depends on the reverse proxy for its URL to work at all:
     /// an HTTPS or custom-domain site (both route through the proxy, §2f/§2i), or
     /// ANY worktree env — an env's container publishes no host port, so the proxy
-    /// is what serves its `127.0.0.1:<port>` URL (issue #16 follow-through).
+    /// is what serves its domain and `127.0.0.1:<port>` URLs (issue #16
+    /// follow-through).
     private var anySiteNeedsProxy: Bool {
         if !store.envs.isEmpty { return true }
         return store.sites.contains { $0.httpsEnabled || $0.customDomain != nil }
@@ -693,7 +694,7 @@ public final class AppViewModel {
         if WPCLIShim.routerInstalled { _ = try? WPCLIShim.writeRouter() }
     }
 
-    /// Open an interactive wp-cli shell for the site in Terminal.app (§2e).
+    /// Open an interactive wp-cli shell for the site in the chosen terminal app (§2e).
     public func openWPCLI(_ site: Site) {
         let command = WPCLIShim.interactiveTerminalCommand(for: site, slug: site.slug)
         SystemActions.openTerminalRunning(command)
@@ -749,7 +750,7 @@ public final class AppViewModel {
                 notifications.notifyStarted(name: site.name, url: site.url, faviconFolder: site.wordpressFolder)
             } else if let env = store.env(id: event.instanceID) {
                 notifications.notifyStarted(name: "\(env.parentSlug) · \(env.branch)",
-                                            url: env.localURL, faviconFolder: env.wordpressFolder)
+                                            url: env.url, faviconFolder: env.wordpressFolder)
             }
         case .stopped where prior != nil && prior != .stopped:
             // `prior != nil` skips a first-observation stop (e.g. deleting a
@@ -1005,7 +1006,7 @@ public final class AppViewModel {
             // Clear exactly the tombstones whose DROP succeeded (#17).
             await store.updatePendingSchemaDrops(siteID: parent.id, removing: outcome.reapedSchemas)
             notifications.notifyEnvReady(branch: env.branch, parent: parent.name,
-                                         url: env.localURL, faviconFolder: env.wordpressFolder)
+                                         url: env.url, faviconFolder: env.wordpressFolder)
             clearSuppressionSoon(env.id)
             // e.g. the shared-database safety fallback (#17) — surfaced without
             // failing the creation.
@@ -1175,7 +1176,7 @@ public final class AppViewModel {
             await store.removeSite(id: site.id)
             // Drop this site's (and its envs') hostnames from the trusted
             // leaf's SAN set now that they're gone.
-            let staleHosts = site.proxyHosts + childEnvs.map { "\($0.envSlug).localhost" }
+            let staleHosts = site.proxyHosts + childEnvs.map { $0.domainHost }
             try? await ca.removeLeafCoverage(staleHosts)
         }
     }
@@ -1206,7 +1207,7 @@ public final class AppViewModel {
                 // Clear exactly the tombstones whose DROP succeeded (#17).
                 await store.updatePendingSchemaDrops(siteID: parent.id, removing: outcome.reapedSchemas)
                 notifications.notifyEnvReady(branch: env.branch, parent: parent.name,
-                                             url: env.localURL, faviconFolder: env.wordpressFolder)
+                                             url: env.url, faviconFolder: env.wordpressFolder)
                 clearSuppressionSoon(env.id)
                 let warnings = await lifecycle.drainWarnings(for: env.id)
                 if !warnings.isEmpty { lastError = warnings.joined(separator: "\n") }
@@ -1222,8 +1223,9 @@ public final class AppViewModel {
     public func startEnv(_ env: WorktreeEnv) {
         Task {
             // An env's URL is SERVED BY THE PROXY (issue #16 follow-through): its
-            // container publishes no host port, so without a listener on
-            // `127.0.0.1:<port>` the env starts fine but nothing answers. Same
+            // container publishes no host port, so without the proxy (on 443/80
+            // for its domain, `127.0.0.1:<port>` for its loopback URL) the env
+            // starts fine but nothing answers. Same
             // treatment HTTPS/custom-domain sites already get.
             await ensureProxyRunning()
             // Guarded start (issue #5): a double-click / dot-spam start while
@@ -1265,7 +1267,7 @@ public final class AppViewModel {
                 await lifecycle.stopSharedDatabaseIfUnused(parent: parent)
             }
             if selection == env.id { selection = env.parentSiteID }
-            try? await ca.removeLeafCoverage(["\(env.envSlug).localhost"])
+            try? await ca.removeLeafCoverage([env.domainHost])
         }
     }
 }

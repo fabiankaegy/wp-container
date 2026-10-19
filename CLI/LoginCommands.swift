@@ -44,7 +44,7 @@ struct LoginCommand: AsyncParsableCommand {
             let publicURL: URL
             switch resolved {
             case .site(let s): publicURL = s.url
-            case .env(let e): publicURL = e.localURL
+            case .env(let e): publicURL = e.url
             }
             let sidecarEnvironment = await SidecarAddons.environment(for: inst, cli: ctx.cli)
 

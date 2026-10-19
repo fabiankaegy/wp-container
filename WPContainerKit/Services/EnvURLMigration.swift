@@ -33,10 +33,15 @@ public enum EnvURLMigration {
         }
     }
 
-    /// The authority (`host[:port]`) every url in a migrated env points at.
-    /// Always the env's own loopback port — an env publishes no hostname of its
-    /// own beyond `<envSlug>.localhost`, which the proxy maps to this same port.
-    public static func targetAuthority(port: Int) -> String { "127.0.0.1:\(port)" }
+    /// The authority every url in a migrated env points at: the env's
+    /// `domainHost`, served by the proxy by Host on 443/80 — no port, which is
+    /// what lets WordPress (and every link it writes) be scheme-correct behind
+    /// the proxy. The env's `127.0.0.1:<port>` keeps working, but it is
+    /// something to migrate AWAY from, not to (see `staleOrigins`).
+    public static func targetAuthority(for env: WorktreeEnv) -> String { env.domainHost }
+
+    /// `https` or `http`.
+    public static func scheme(https: Bool) -> String { https ? "https" : "http" }
 
     /// Normalize an arbitrary origin — `https://host/path`, `//host`,
     /// `host:port`, a bare `host`, a `wp_blogs.domain` column value — down to its
@@ -72,17 +77,21 @@ public enum EnvURLMigration {
     /// The ordered `wp search-replace` passes migrating one origin authority onto
     /// another. Empty when the two are the same (or either is unusable).
     ///
+    /// Both full-url forms land on `https`'s scheme — the one the env is served
+    /// at — whichever scheme the origin used.
+    ///
     /// Order is load-bearing: the full-url forms run FIRST so scheme-specific
     /// occurrences are consumed before the bare-host pass, which would otherwise
-    /// rewrite the host inside `https://old` and leave a dead `https://` scheme
-    /// on an env that only ever answers plain HTTP. The bare-host pass is what
-    /// reaches the multisite domain columns (`wp_blogs.domain`, `wp_site.domain`),
-    /// which hold no scheme at all.
-    public static func passes(from source: String, to target: String) -> [Pass] {
+    /// rewrite the host inside `https://old` / `http://old` and keep the OLD
+    /// scheme — a dead `https://` on an http env, or mixed content on an https
+    /// one. The bare-host pass is what reaches the multisite domain columns
+    /// (`wp_blogs.domain`, `wp_site.domain`), which hold no scheme at all.
+    public static func passes(from source: String, to target: String, https: Bool) -> [Pass] {
         guard let s = authority(from: source), let t = authority(from: target), s != t else { return [] }
+        let scheme = scheme(https: https)
         return [
-            Pass(source: "https://\(s)", target: "http://\(t)"),
-            Pass(source: "http://\(s)", target: "http://\(t)"),
+            Pass(source: "https://\(s)", target: "\(scheme)://\(t)"),
+            Pass(source: "http://\(s)", target: "\(scheme)://\(t)"),
             Pass(source: "//\(s)", target: "//\(t)"),
             Pass(source: s, target: t),
         ]
@@ -90,6 +99,10 @@ public enum EnvURLMigration {
 
     /// Normalize, dedupe and order the origins to migrate: everything that isn't
     /// already the target, in first-seen order.
+    ///
+    /// Callers include the env's own `localURL` (`127.0.0.1:<env port>`) among
+    /// the candidates: it is where envs created before env domains were
+    /// migrated to, so it is what `fix-urls` has to move off of.
     ///
     /// `networkDomain` (the value the multisite bootstrap keys off —
     /// `DOMAIN_CURRENT_SITE`, else `wp_site.domain`) is moved LAST. Until that
@@ -146,15 +159,16 @@ public enum EnvURLMigration {
     /// `WP_HOME`/`WP_SITEURL` — those override the database options entirely.
     ///
     /// `WP_HOME`/`WP_SITEURL` are only ever REWRITTEN, never added: a clone that
-    /// didn't pin them should keep reading its options.
+    /// didn't pin them should keep reading its options. They take `https`'s
+    /// scheme, like every full url the passes write.
     public static func configConstantUpdates(existing: [String: String], targetAuthority: String,
-                                             multisite: Bool) -> [ConstantUpdate] {
+                                             https: Bool, multisite: Bool) -> [ConstantUpdate] {
         var out: [ConstantUpdate] = []
         if multisite || existing["DOMAIN_CURRENT_SITE"] != nil,
            existing["DOMAIN_CURRENT_SITE"] != targetAuthority {
             out.append(ConstantUpdate(name: "DOMAIN_CURRENT_SITE", value: targetAuthority))
         }
-        let url = "http://\(targetAuthority)"
+        let url = "\(scheme(https: https))://\(targetAuthority)"
         for name in ["WP_HOME", "WP_SITEURL"] {
             guard let current = existing[name], current != url else { continue }
             out.append(ConstantUpdate(name: name, value: url))
@@ -277,20 +291,22 @@ public struct EnvURLMigrator: Sendable {
         return discovery
     }
 
-    /// Migrate every `origins` entry onto `targetAuthority`, then rewrite the
-    /// wp-config constants that override the database, then finish with the
-    /// belt-and-braces `wp option update home/siteurl` + `wp cache flush`.
+    /// Migrate every `origins` entry onto `<scheme>://<targetAuthority>`, then
+    /// rewrite the wp-config constants that override the database (and, for
+    /// `https`, make sure wp-config honors the proxy's `X-Forwarded-Proto`, or
+    /// WordPress would build `http://` urls and redirect-loop), then finish with
+    /// the belt-and-braces `wp option update home/siteurl` + `wp cache flush`.
     ///
     /// Only the finisher throws. A failed search-replace pass is recorded as a
     /// warning and the migration carries on, so this can never brick an env
     /// creation — the env still ends up with the old shallow behavior.
     public func migrate(instance: any RunnableInstance, dbHost: String, wordpressFolder: URL,
-                        origins: [String], targetAuthority: String,
+                        origins: [String], targetAuthority: String, https: Bool,
                         multisite: Bool, dryRun: Bool) async throws -> URLMigrationReport {
         var report = URLMigrationReport(target: targetAuthority, dryRun: dryRun)
         for origin in origins {
             var results: [URLMigrationPassResult] = []
-            for pass in EnvURLMigration.passes(from: origin, to: targetAuthority) {
+            for pass in EnvURLMigration.passes(from: origin, to: targetAuthority, https: https) {
                 let args = SiteRecipe.wpSearchReplaceArgs(instance, dbHost: dbHost,
                                                           source: pass.source, target: pass.target,
                                                           network: multisite, dryRun: dryRun)
@@ -311,8 +327,20 @@ public struct EnvURLMigrator: Sendable {
 
         let parsed = try? WPConfigService.read(wordpressFolder: wordpressFolder)
         report.configUpdates = EnvURLMigration.configConstantUpdates(
-            existing: parsed?.constants ?? [:], targetAuthority: targetAuthority, multisite: multisite)
+            existing: parsed?.constants ?? [:], targetAuthority: targetAuthority,
+            https: https, multisite: multisite)
         guard !dryRun else { return report }
+
+        if https {
+            // Usually already there — an HTTPS parent's wp-config carries it into
+            // the clone — but a parent switched to HTTPS after this env was
+            // cloned would not have passed it on.
+            do {
+                try WPConfigService.enableForwardedProto(wordpressFolder: wordpressFolder)
+            } catch {
+                report.warnings.append("Could not add the X-Forwarded-Proto handler to wp-config.php: \(error)")
+            }
+        }
 
         if !report.configUpdates.isEmpty {
             if parsed == nil {
@@ -329,7 +357,8 @@ public struct EnvURLMigrator: Sendable {
                 }
             }
         }
-        try await cli.run(SiteRecipe.wpUpdateURLsArgs(instance, dbHost: dbHost))
+        let url = "\(EnvURLMigration.scheme(https: https))://\(targetAuthority)"
+        try await cli.run(SiteRecipe.wpSetURLsArgs(instance, dbHost: dbHost, url: url))
         return report
     }
 

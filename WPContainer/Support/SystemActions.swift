@@ -15,18 +15,22 @@ enum SystemActions {
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
-    /// Open Terminal.app at the given directory. When `pathPrepend` is set, the
-    /// new shell has that dir first on PATH (so a site's `./wp` shim answers to a
-    /// plain `wp` in that shell — a lightweight local alternative to the global
-    /// router).
+    /// Open the chosen terminal app at the given directory. When `pathPrepend`
+    /// is set, the new shell has that dir first on PATH (so a site's `./wp` shim
+    /// answers to a plain `wp` in that shell — a lightweight local alternative
+    /// to the global router). Plain Terminal with no PATH change opens through
+    /// NSWorkspace, which needs no Automation permission.
     static func openTerminal(at directory: URL, pathPrepend: URL? = nil) {
-        guard let pathPrepend else {
+        if pathPrepend == nil, TerminalApps.selected == .terminal {
             let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
-            let config = NSWorkspace.OpenConfiguration()
-            NSWorkspace.shared.open([directory], withApplicationAt: terminal, configuration: config)
+            NSWorkspace.shared.open([directory], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration())
             return
         }
-        let cmd = "cd \(shellQuote(directory.path)); export PATH=\(shellQuote(pathPrepend.path)):\"$PATH\"; clear"
+        var cmd = "cd \(shellQuote(directory.path)); "
+        if let pathPrepend {
+            cmd += "export PATH=\(shellQuote(pathPrepend.path)):\"$PATH\"; "
+        }
+        cmd += "clear"
         openTerminalRunning(cmd)
     }
 
@@ -34,22 +38,10 @@ enum SystemActions {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    /// Open a new Terminal.app window running `command` (used for the interactive
-    /// wp-cli container). The command is escaped for AppleScript.
+    /// Open a new window of the chosen terminal app running `command` (used for
+    /// the interactive wp-cli container).
     static func openTerminalRunning(_ command: String) {
-        let escaped = command
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        let script = """
-        tell application "Terminal"
-            activate
-            do script "\(escaped)"
-        end tell
-        """
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
-        try? process.run()
+        TerminalApps.open(running: command)
     }
 
     /// Copy a string to the general pasteboard.

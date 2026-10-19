@@ -466,11 +466,11 @@ struct SidebarEnvRow: View {
 
     @ViewBuilder
     private var contextMenu: some View {
-        Button("Open", systemImage: "safari") { SystemActions.openInBrowser(env.localURL) }
+        Button("Open", systemImage: "safari") { SystemActions.openInBrowser(env.url) }
             .disabled(!env.status.isRunning)
         Button("WP Admin", systemImage: "person.badge.key") { SystemActions.openInBrowser(env.adminURL) }
             .disabled(!env.status.isRunning)
-        Button("Copy URL", systemImage: "link") { SystemActions.copyToClipboard(env.localURL.absoluteString) }
+        Button("Copy URL", systemImage: "link") { SystemActions.copyToClipboard(env.url.absoluteString) }
 
         if env.status.isRunning {
             Button("Stop", systemImage: "stop.fill") { vm.stopEnv(env) }

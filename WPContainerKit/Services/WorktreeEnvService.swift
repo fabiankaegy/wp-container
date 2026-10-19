@@ -312,10 +312,10 @@ public actor WorktreeEnvService {
                 try await liveDatabaseTransfer(parent: parent, env: env, envDBHost: dbHost)
             }
 
-            // 5. Migrate every url in the clone onto the env's own port — not
+            // 5. Migrate every url in the clone onto the env's own domain — not
             // just the main site's two option rows (see `EnvURLMigration`).
-            await lifecycle.recordWarnings(try await migrateURLs(env: env, parent: parent, dbHost: dbHost),
-                                           for: env.id)
+            let migrationWarnings = try await migrateURLs(env: &env, parent: parent, dbHost: dbHost)
+            await lifecycle.recordWarnings(migrationWarnings, for: env.id)
 
             await lifecycle.markRunning(env.id)
             env.provisioned = true
@@ -427,9 +427,11 @@ public actor WorktreeEnvService {
 
     // MARK: - URL migration (see `EnvURLMigration`)
 
-    /// Rewrite the parent's urls to the env's own `http://127.0.0.1:<port>`
-    /// across the whole cloned database, then fix the wp-config constants that
-    /// override it. Returns non-fatal warnings for the caller to surface.
+    /// Rewrite the parent's urls to the env's domain URL (`env.domainHost`, on
+    /// the parent's scheme) across the whole cloned database, then fix the
+    /// wp-config constants that override it. On success the env is flipped onto
+    /// that URL (`usesDomainURL`, `httpsEnabled`). Returns non-fatal warnings for
+    /// the caller to surface.
     ///
     /// The parent's LOCAL url goes along with its effective one: a parent served
     /// over HTTPS or a custom domain still has `127.0.0.1:<parent port>` all
@@ -439,18 +441,20 @@ public actor WorktreeEnvService {
     /// Throws only what the old shallow behavior threw (the final
     /// `wp option update` + cache flush) — a failed search-replace pass is a
     /// warning, never a failed create.
-    private func migrateURLs(env: WorktreeEnv, parent: Site, dbHost: String) async throws -> [String] {
-        let target = EnvURLMigration.targetAuthority(port: env.port)
+    private func migrateURLs(env: inout WorktreeEnv, parent: Site, dbHost: String) async throws -> [String] {
+        let target = EnvURLMigration.targetAuthority(for: env)
         let effective = parent.url.absoluteString
         let origins = EnvURLMigration.staleOrigins(
-            candidates: [parent.localURL.absoluteString, effective],
+            candidates: [parent.localURL.absoluteString, effective, env.localURL.absoluteString],
             target: target, networkDomain: effective)
         let constants = (try? WPConfigService.read(wordpressFolder: env.wordpressFolder))?.constants ?? [:]
         let report = try await EnvURLMigrator(cli: cli).migrate(
             instance: env, dbHost: dbHost, wordpressFolder: env.wordpressFolder,
-            origins: origins, targetAuthority: target,
+            origins: origins, targetAuthority: target, https: parent.httpsEnabled,
             multisite: EnvURLMigration.isMultisite(networkType: parent.networkType, constants: constants),
             dryRun: false)
+        env.httpsEnabled = parent.httpsEnabled
+        env.usesDomainURL = true
         return report.warnings
     }
 

@@ -59,7 +59,8 @@ Sites are provisioned automatically (no install wizard) and log in with
   ```bash
   wp-container worktree create --site my-blog \
     --repo wp-content/plugins/my-plugin --branch feature-x --json
-  # → {"url": "http://127.0.0.1:8882", "path": …, "worktreePath": …}
+  # → {"url": "http://my-blog-wt-feature-x.localhost",
+  #    "localUrl": "http://127.0.0.1:8882", "path": …, "worktreePath": …}
   ```
 - **`wp-container` CLI** — everything the app does, scriptable, with `--json`
   everywhere: `list`, `create` (`--wp/--php/--multisite/--domain/--group`),
@@ -97,9 +98,9 @@ Sites are provisioned automatically (no install wizard) and log in with
 - **MCP agent tools** — `wp-container agent-tools enable <site> [--root …]` writes
   `.mcp.json` (+ Cursor/VS Code configs) and a marked `AGENTS.md` block into a
   chosen root (site folder, or your `wp-content` repo root for IDE discovery);
-  the bundled MCP stdio server (`wp-container mcp --site <slug>`) exposes 18 tools
+  the bundled MCP stdio server (`wp-container mcp --site <slug>`) exposes 24 tools
   in the spirit of [10up/localwp-agent-tools](https://github.com/10up/localwp-agent-tools):
-  `wp_cli`, log readers, `wp-config` editing, site info/health, start/stop/status,
+  `wp_cli`, `run_command`, log readers, `wp-config` editing, site info/health, start/stop/status,
   `list_sites`, `worktree_*`, `xdebug_toggle` / `elasticsearch_toggle`, plus
   `login_link` / `create_user`.
 - **Agent-friendly login** — `wp-container login <site>` prints a one-time magic
@@ -118,6 +119,12 @@ Sites are provisioned automatically (no install wizard) and log in with
   router (`wp-container setup wp`) so plain `wp` inside a site runs containerized
   wp-cli and defers to Homebrew's `wp` elsewhere; an interactive WP-CLI Terminal
   button; and the MCP `wp_cli` tool.
+- **Run any command in a site** — `wp-container run <site|env> -- <command>` runs
+  in the live WordPress container with its database, Mailpit, Elasticsearch, and
+  PHP environment (`php`, `vendor/bin/phpunit`); `--image composer:2` or
+  `--image node:20` runs a one-shot container with the same mounts for tools the
+  WordPress image lacks. The working directory follows your current folder, and
+  the MCP `run_command` tool exposes the same to agents.
 - **Dev-ready by default** — every site gets `WP_DEVELOPMENT_MODE=all` /
   `WP_ENVIRONMENT_TYPE=local`, with live `WP_DEBUG`-family switches in
   Settings → Development.
@@ -190,9 +197,10 @@ site.
 - **Environments: on by default (3 hours), with a 6-hour grace period after
   creation. Sites: off by default.** The difference between envs and sites is
   observability, not importance. An environment's container
-  publishes no host port — the proxy binds `127.0.0.1:<env port>` itself and
-  relays to the container — so the one URL every surface advertises (and that
-  WordPress has pinned as `home`/`siteurl`) runs through the proxy. Every request
+  publishes no host port — the proxy serves its `<env>.localhost` domain (the URL
+  every surface advertises, and that WordPress has as `home`/`siteurl`) and binds
+  `127.0.0.1:<env port>` itself, relaying both to the container — so every way
+  into an environment runs through the proxy. Every request
   to an environment therefore counts as use, and reopening a parked one wakes it
   **at that same URL**. A *site* still publishes its own port, and a request
   straight to `http://127.0.0.1:<port>` bypasses the proxy — that's the one
