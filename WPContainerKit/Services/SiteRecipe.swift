@@ -519,6 +519,94 @@ public enum SiteRecipe {
         return args
     }
 
+    // MARK: - Arbitrary commands (`wp-container run`)
+
+    /// The WordPress document root inside the wp container.
+    public static let wordpressContainerPath = "/var/www/html"
+
+    /// The container path of a host directory that sits inside one of the
+    /// instance's bind mounts, or nil. Extra mounts (a worktree checkout) are
+    /// checked first because they shadow part of the base `wordpress/` mount.
+    public static func containerPath(forHostPath hostPath: URL, in inst: any RunnableInstance) -> String? {
+        let target = hostPath.resolvingSymlinksInPath().standardizedFileURL.path
+        let base = Mount(hostPath: inst.wordpressFolder.path, containerPath: wordpressContainerPath)
+        for mount in inst.extraMounts + [base] {
+            let root = URL(fileURLWithPath: mount.hostPath).resolvingSymlinksInPath().standardizedFileURL.path
+            if target == root { return mount.containerPath }
+            if target.hasPrefix(root + "/") {
+                return mount.containerPath + "/" + target.dropFirst(root.count + 1)
+            }
+        }
+        return nil
+    }
+
+    /// The working directory for `wp-container run`: `requested` when given
+    /// (absolute, or relative to the document root), else the container path
+    /// of `hostCWD`, else the document root.
+    public static func runWorkdir(requested: String?, hostCWD: URL, in inst: any RunnableInstance) -> String {
+        if let requested, !requested.isEmpty {
+            if requested.hasPrefix("/") { return requested }
+            return wordpressContainerPath + "/" + requested
+        }
+        return containerPath(forHostPath: hostCWD, in: inst) ?? wordpressContainerPath
+    }
+
+    /// `container exec` args that run `command` in the instance's running wp
+    /// container, which already carries the database, sidecar, and PHP
+    /// override environment.
+    public static func execArgs(_ inst: any RunnableInstance, command: [String], workdir: String,
+                                env: [String] = [], interactive: Bool = false, tty: Bool = false) -> [String] {
+        var args = ["exec"]
+        args += processArgs(workdir: workdir, env: env, interactive: interactive, tty: tty)
+        args.append(inst.wpContainerName)
+        args += command
+        return args
+    }
+
+    /// One-shot `container run` args that run `command` in `image` with the wp
+    /// container's mounts and environment, for tools the WordPress image lacks
+    /// (`composer:2`, `node:20`).
+    public static func runImageArgs(_ inst: any RunnableInstance, image: String, dbHost: String,
+                                    command: [String], workdir: String, env: [String] = [],
+                                    interactive: Bool = false, tty: Bool = false,
+                                    mailpitHost: String? = nil, elasticsearchURL: String? = nil) -> [String] {
+        // The base args already mount a worktree env's checkout over `wordpress/`.
+        var args = wpCLIBaseArgs(inst, dbHost: dbHost)
+        if FileManager.default.fileExists(atPath: inst.phpConfFolder.path) {
+            args += ["-v", "\(inst.phpConfFolder.path):\(phpConfContainerPath)",
+                     "-e", "PHP_INI_SCAN_DIR=\(phpDefaultConfDir):\(phpConfContainerPath)"]
+        }
+        if let mailpitHost { args += ["-e", "WPC_MAILPIT_HOST=\(mailpitHost)"] }
+        if let elasticsearchURL { args += ["-e", "EP_HOST=\(elasticsearchURL)"] }
+        // User env comes last so it overrides the defaults above.
+        args += processArgs(workdir: workdir, env: env, interactive: interactive, tty: tty)
+        args.append(image)
+        args += command
+        return args
+    }
+
+    /// Exit status of `timeout` (coreutils and BusyBox) when the limit is hit.
+    public static let timeoutExitCode: Int32 = 124
+
+    /// Wraps `command` so the container stops it after `seconds`. The limit
+    /// runs inside the container because `container` does not forward signals
+    /// from a stopped client to the process. Images without `timeout` run the
+    /// command unlimited.
+    public static func timeLimited(_ command: [String], seconds: Int) -> [String] {
+        let script = #"if command -v timeout >/dev/null 2>&1; then exec timeout "$0" "$@"; fi; exec "$@""#
+        return ["sh", "-c", script, "\(seconds)"] + command
+    }
+
+    /// Process flags shared by `exec` and `run`: stdin, TTY, workdir, env.
+    private static func processArgs(workdir: String, env: [String], interactive: Bool, tty: Bool) -> [String] {
+        var args: [String] = []
+        if interactive { args.append("-i") }
+        if tty { args.append("-t") }
+        args += ["-w", workdir]
+        for entry in env { args += ["-e", entry] }
+        return args
+    }
+
     /// `wp db export` to stdout inside a one-shot wp-cli container (live DB clone).
     public static func wpDBExportArgs(_ inst: any RunnableInstance, dbHost: String) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
