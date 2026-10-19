@@ -363,8 +363,13 @@ public enum SiteRecipe {
     private static func wpCLIBaseArgs(_ inst: any RunnableInstance, dbHost: String) -> [String] {
         var args = ["run", "--progress", "none", "--rm"]
         args += labelArgs(for: inst)
+        args += ["-v", "\(inst.wordpressFolder.path):/var/www/html"]
+        // A worktree env's checkout shadows the snapshot of the repo inside its
+        // `wordpress/` copy, so wp-cli loads the branch's code.
+        for mount in inst.extraMounts {
+            args += ["-v", "\(mount.hostPath):\(mount.containerPath)"]
+        }
         args += [
-            "-v", "\(inst.wordpressFolder.path):/var/www/html",
             "-e", "WORDPRESS_DB_HOST=\(dbHost)",
             "-e", "WORDPRESS_DB_USER=\(dbUser)",
             "-e", "WORDPRESS_DB_PASSWORD=\(dbPassword)",
