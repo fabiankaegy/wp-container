@@ -385,8 +385,11 @@ public enum SiteRecipe {
     }
 
     // MARK: - One-shot wp-cli
-    private static func wpCLIBaseArgs(_ inst: any RunnableInstance, dbHost: String) -> [String] {
-        var args = ["run", "--progress", "none", "--rm"]
+    /// `showProgress` keeps `container run`'s image-pull progress, for a run
+    /// attached to a terminal; captured runs turn it off.
+    private static func wpCLIBaseArgs(_ inst: any RunnableInstance, dbHost: String,
+                                      showProgress: Bool = false) -> [String] {
+        var args = showProgress ? ["run", "--rm"] : ["run", "--progress", "none", "--rm"]
         args += labelArgs(for: inst)
         args += ["-v", "\(inst.wordpressFolder.path):/var/www/html"]
         // A worktree env's checkout shadows the snapshot of the repo inside its
@@ -581,7 +584,9 @@ public enum SiteRecipe {
                                     interactive: Bool = false, tty: Bool = false,
                                     sidecarEnvironment: [String] = []) -> [String] {
         // The base args already mount a worktree env's checkout over `wordpress/`.
-        var args = wpCLIBaseArgs(inst, dbHost: dbHost)
+        // In a terminal, keep the pull progress: a first `node:20` pull otherwise
+        // looks hung.
+        var args = wpCLIBaseArgs(inst, dbHost: dbHost, showProgress: tty)
         if FileManager.default.fileExists(atPath: inst.phpConfFolder.path) {
             args += ["-v", "\(inst.phpConfFolder.path):\(phpConfContainerPath)",
                      "-e", "PHP_INI_SCAN_DIR=\(phpDefaultConfDir):\(phpConfContainerPath)"]
