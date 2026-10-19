@@ -202,10 +202,12 @@ public enum WPConfigService {
                 }
             case .lineComment:
                 // Keep the newline so line numbers and statement boundaries hold.
-                if ch == "\n" { out.append(ch); state = .code }
+                // `isNewline` because a CRLF pair is one Character, and the
+                // `wordpress` image's wp-config.php uses CRLF line endings.
+                if ch.isNewline { out.append(ch); state = .code }
             case .blockComment:
                 if ch == "*", next == "/" { state = .code; i += 2; continue }
-                if ch == "\n" { out.append(ch) }
+                if ch.isNewline { out.append(ch) }
             }
             i += 1
         }
