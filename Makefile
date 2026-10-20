@@ -5,7 +5,7 @@ DERIVED  := build
 PRODUCTS := $(DERIVED)/Build/Products/$(CONFIG)
 PREFIX   := /usr/local/bin
 
-.PHONY: all generate build build-app build-cli install-cli verify-version release clean
+.PHONY: all generate build build-app build-cli test install-cli verify-version release clean
 
 all: build
 
@@ -22,6 +22,11 @@ build-app: generate
 
 build-cli: generate
 	xcodebuild -project $(PROJECT) -scheme wp-container -configuration $(CONFIG) -derivedDataPath $(DERIVED) build
+
+# Runs both unit-test bundles (pure logic: no app launch, no containers).
+test: generate
+	xcodebuild -project $(PROJECT) -scheme WPContainerKitTests -configuration $(CONFIG) -derivedDataPath $(DERIVED) test
+	xcodebuild -project $(PROJECT) -scheme HostsHelperTests    -configuration $(CONFIG) -derivedDataPath $(DERIVED) test
 
 # Copies the built CLI to /usr/local/bin and adds a `wpc` convenience symlink.
 # Run this yourself after `make build-cli`; it is intentionally not invoked by CI.

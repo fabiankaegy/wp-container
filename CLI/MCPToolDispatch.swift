@@ -18,6 +18,7 @@ enum MCPToolDispatch {
             switch params.name {
             case "wp_cli":            return try await wpCLI(args, ctx: ctx, slug: scopedSlug)
             case "run_command":       return try await runCommand(args, ctx: ctx, slug: scopedSlug)
+            case "run_tests":         return try await runTests(args, ctx: ctx, slug: scopedSlug)
             case "read_error_log":    return try await readErrorLog(args, ctx: ctx, slug: scopedSlug)
             case "read_access_log":   return try await readAccessLog(args, ctx: ctx, slug: scopedSlug)
             case "wp_debug_toggle":   return try await wpDebugToggle(args, ctx: ctx, slug: scopedSlug)
@@ -220,6 +221,55 @@ enum MCPToolDispatch {
             "timedOut": result.exitCode == SiteRecipe.timeoutExitCode,
             "workdir": workdir,
         ], isError: result.exitCode != 0)
+    }
+
+    // MARK: - run_tests
+
+    /// Default `run_tests` time limit, in seconds.
+    private static let runTestsTimeout = 1800
+
+    private static func runTests(_ args: [String: Value], ctx: CLIContext, slug: String) async throws -> CallTool.Result {
+        let target = args["slug"]?.stringValue ?? slug
+        let envelope = try await ctx.load()
+        guard let resolved = resolveTarget(target, in: envelope) else {
+            throw ToolError("not_found", "No site or environment with slug \(target).")
+        }
+        let inst = resolved.instance
+        try await ctx.ensureRunning(resolved, envelope: envelope)
+        let host = try await dbHost(for: inst, ctx: ctx)
+
+        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let workdir = SiteRecipe.runWorkdir(requested: args["path"]?.stringValue, hostCWD: cwd, in: inst)
+        let polyfills: String?
+        do {
+            polyfills = try TestSuite.checkProject(workdir: workdir, in: inst, slug: target)
+        } catch let error as TestSuiteError {
+            throw ToolError("phpunit_missing", error.description)
+        }
+        let (library, schema) = try await TestSuite.prepare(inst, cli: ctx.cli)
+        let sidecarEnvironment = await SidecarAddons.environment(for: inst, cli: ctx.cli)
+        let timeout = max(1, args["timeout"]?.intValue ?? runTestsTimeout)
+        let phpunitArgs = args["args"]?.arrayValue?.compactMap { $0.stringValue } ?? []
+        let result = try await ctx.cli.runCapturing(SiteRecipe.runTestsArgs(
+            inst, dbHost: host, library: library, schema: schema, workdir: workdir, phpunitArgs: phpunitArgs,
+            polyfillsPath: polyfills, sidecarEnvironment: sidecarEnvironment, timeLimit: timeout))
+
+        var payload: [String: Any] = [
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "exitCode": Int(result.exitCode),
+            "timedOut": result.exitCode == SiteRecipe.timeoutExitCode,
+            "workdir": workdir,
+            "schema": schema,
+        ]
+        if let summary = TestSuite.summary(fromOutput: result.stdout) {
+            payload["summary"] = [
+                "passed": summary.passed, "tests": summary.tests, "assertions": summary.assertions,
+                "failures": summary.failures, "errors": summary.errors, "skipped": summary.skipped,
+                "incomplete": summary.incomplete, "risky": summary.risky, "warnings": summary.warnings,
+            ]
+        }
+        return MCPResult.json(payload, isError: result.exitCode != 0)
     }
 
     // MARK: - Logs
@@ -614,12 +664,12 @@ enum MCPToolDispatch {
         let outcome = await ctx.worktrees.delete(env, parent: parent, keepBranch: keepBranch, keepWorktree: keepWorktree)
         _ = try await ctx.persistence.mutate { store in
             store.envs.removeAll { $0.id == env.id }
-            // The DB server was down, so the env's schema is still there (#17).
-            // Tombstone it for the next shared-env create to reap.
-            if let orphan = outcome.tombstonedSchema, let parent,
-               let i = store.sites.firstIndex(where: { $0.id == parent.id }),
-               !store.sites[i].pendingSchemaDrops.contains(orphan) {
-                store.sites[i].pendingSchemaDrops.append(orphan)
+            // The DB server was down, so the env's schemas are still there (#17).
+            // Tombstone them for the next shared-env create to reap.
+            if let parent, let i = store.sites.firstIndex(where: { $0.id == parent.id }) {
+                for orphan in outcome.tombstonedSchemas where !store.sites[i].pendingSchemaDrops.contains(orphan) {
+                    store.sites[i].pendingSchemaDrops.append(orphan)
+                }
             }
         }
         if let parent { await ctx.lifecycle.stopSharedDatabaseIfUnused(parent: parent) }
@@ -667,10 +717,10 @@ enum MCPToolDispatch {
 
     // MARK: - db_import (PLAN.md §2m)
 
-    /// Imports a `.sql`/`.sql.gz` dump into a site's database. Sites only (not
-    /// worktree environments) in v1. Auto-starts a stopped site (the kit never
-    /// starts containers itself) and persists the detected/overridden source
-    /// URL into `lastImportSourceURL` afterward (the kit doesn't write it).
+    /// Imports a `.sql`/`.sql.gz` dump into a site's or worktree env's database.
+    /// Auto-starts a stopped target (the kit never starts containers itself) and
+    /// persists a site's detected/overridden source URL into
+    /// `lastImportSourceURL` afterward (the kit doesn't write it).
     /// No streaming progress over MCP — the progress callback is a no-op and
     /// only the final summary (or a structured phaseFailed error) is returned.
     private static func dbImport(_ args: [String: Value], ctx: CLIContext, slug: String) async throws -> CallTool.Result {
@@ -679,11 +729,14 @@ enum MCPToolDispatch {
         }
         let targetSlug = args["site"]?.stringValue ?? slug
         let envelope = try await ctx.load()
-        guard let site = envelope.sites.first(where: { $0.slug == targetSlug }) else {
-            if envelope.envs.contains(where: { $0.envSlug == targetSlug }) {
-                throw ToolError("unsupported_target", "db_import targets sites only (not worktree environments) in this version.")
-            }
-            throw ToolError("site_not_found", "No site with slug \(targetSlug).")
+        guard let resolved = resolveTarget(targetSlug, in: envelope) else {
+            throw ToolError("site_not_found", "No site or environment with slug \(targetSlug).")
+        }
+        let inst = resolved.instance
+        let publicURL: URL
+        switch resolved {
+        case .site(let s): publicURL = s.url
+        case .env(let e): publicURL = e.url
         }
 
         let mediaArg = args["media"]?.stringValue ?? "remote"
@@ -711,29 +764,22 @@ enum MCPToolDispatch {
 
         // Auto-start (mirrors the CLI surface): the kit throws .siteNotRunning
         // rather than starting containers itself.
-        let running = await ctx.runningContainerNames()
-        if !running.contains(site.wpContainerName) {
-            let provisioned = try await ctx.lifecycle.startSite(site)
-            if provisioned != site.provisioned {
-                _ = try await ctx.persistence.mutate { env in
-                    if let i = env.sites.firstIndex(where: { $0.id == site.id }) { env.sites[i].provisioned = provisioned }
-                }
-            }
-        }
+        try await ctx.ensureRunning(resolved, envelope: envelope)
 
         let dumpURL = URL(fileURLWithPath: (file as NSString).expandingTildeInPath)
         let importer = DatabaseImportService(cli: ctx.cli, lifecycle: ctx.lifecycle)
         do {
-            let summary = try await importer.importDatabase(into: site, dump: dumpURL, options: options) { _ in
+            let summary = try await importer.importDatabase(into: inst, publicURL: publicURL, dump: dumpURL,
+                                                            options: options) { _ in
                 // No streaming progress over MCP — final result only.
             }
-            if let detectedSource = summary.sourceURL {
+            if case .site(let site) = resolved, let detectedSource = summary.sourceURL {
                 _ = try? await ctx.persistence.mutate { env in
                     if let i = env.sites.firstIndex(where: { $0.id == site.id }) { env.sites[i].lastImportSourceURL = detectedSource }
                 }
             }
             return MCPResult.json([
-                "site": site.slug,
+                "site": targetSlug,
                 "sourceURL": summary.sourceURL as Any? ?? NSNull(),
                 "localURL": summary.localURL,
                 "backupPath": summary.backupPath,

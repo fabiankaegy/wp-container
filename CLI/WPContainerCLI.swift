@@ -19,6 +19,7 @@ struct WPContainerCLI: AsyncParsableCommand {
             WorktreeCommand.self,
             WPCommand.self,
             RunCommand.self,
+            TestCommand.self,
             LoginCommand.self,
             MCPCommand.self,
             AgentToolsCommand.self,
@@ -531,12 +532,12 @@ struct DeleteCommand: AsyncParsableCommand {
                 let outcome = await ctx.worktrees.delete(env, parent: parent, keepBranch: true, keepWorktree: false)
                 _ = try await ctx.persistence.mutate { store in
                     store.envs.removeAll { $0.id == env.id }
-                    // The DB server was down, so the env's schema is still there
-                    // (issue #17). Tombstone it for the next shared-env create.
-                    if let orphan = outcome.tombstonedSchema, let parent,
-                       let i = store.sites.firstIndex(where: { $0.id == parent.id }),
-                       !store.sites[i].pendingSchemaDrops.contains(orphan) {
-                        store.sites[i].pendingSchemaDrops.append(orphan)
+                    // The DB server was down, so the env's schemas are still there
+                    // (issue #17). Tombstone them for the next shared-env create.
+                    if let parent, let i = store.sites.firstIndex(where: { $0.id == parent.id }) {
+                        for orphan in outcome.tombstonedSchemas where !store.sites[i].pendingSchemaDrops.contains(orphan) {
+                            store.sites[i].pendingSchemaDrops.append(orphan)
+                        }
                     }
                 }
                 if let parent { await ctx.lifecycle.stopSharedDatabaseIfUnused(parent: parent) }
@@ -732,8 +733,18 @@ struct WorktreeDelete: AsyncParsableCommand {
             let envelope = try await ctx.load()
             guard let env = envelope.envs.first(where: { $0.envSlug == envSlug }) else { throw CLIErrorJSON("env_not_found", detail: envSlug) }
             let parent = envelope.sites.first { $0.id == env.parentSiteID }
-            await ctx.worktrees.delete(env, parent: parent, keepBranch: keepBranch, keepWorktree: keepWorktree)
-            _ = try await ctx.persistence.mutate { store in store.envs.removeAll { $0.id == env.id } }
+            let outcome = await ctx.worktrees.delete(env, parent: parent, keepBranch: keepBranch, keepWorktree: keepWorktree)
+            _ = try await ctx.persistence.mutate { store in
+                store.envs.removeAll { $0.id == env.id }
+                // The DB server was down, so the env's schemas are still there
+                // (issue #17). Tombstone them for the next shared-env create.
+                if let parent, let i = store.sites.firstIndex(where: { $0.id == parent.id }) {
+                    for orphan in outcome.tombstonedSchemas where !store.sites[i].pendingSchemaDrops.contains(orphan) {
+                        store.sites[i].pendingSchemaDrops.append(orphan)
+                    }
+                }
+            }
+            if let parent { await ctx.lifecycle.stopSharedDatabaseIfUnused(parent: parent) }
             try? await CertificateAuthority().removeLeafCoverage([env.domainHost])
             if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(envSlug) deleted"))) }
             else { emitLine("Deleted env \(envSlug).") }

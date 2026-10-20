@@ -156,19 +156,19 @@ public final class SiteStore {
     }
 
     /// Record and/or clear a site's shared-schema tombstones in one locked write
-    /// (issue #17). `adding` is a schema a deletion could not drop because the DB
+    /// (issue #17). `adding` are schemas a deletion could not drop because the DB
     /// server was down; `removing` are the ones a create just dropped for real.
     /// Read-modify-write on the LIVE record, never a caller's snapshot, so two
     /// concurrent env operations can't clobber each other's list.
-    public func updatePendingSchemaDrops(siteID: UUID, adding: String? = nil, removing: [String] = []) async {
-        guard adding != nil || !removing.isEmpty else { return }
+    public func updatePendingSchemaDrops(siteID: UUID, adding: [String] = [], removing: [String] = []) async {
+        guard !adding.isEmpty || !removing.isEmpty else { return }
         await apply { env in
             guard let i = env.sites.firstIndex(where: { $0.id == siteID }) else { return }
             if !removing.isEmpty {
                 env.sites[i].pendingSchemaDrops.removeAll { removing.contains($0) }
             }
-            if let adding, !env.sites[i].pendingSchemaDrops.contains(adding) {
-                env.sites[i].pendingSchemaDrops.append(adding)
+            for schema in adding where !env.sites[i].pendingSchemaDrops.contains(schema) {
+                env.sites[i].pendingSchemaDrops.append(schema)
             }
         }
     }

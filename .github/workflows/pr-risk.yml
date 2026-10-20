@@ -1,0 +1,38 @@
+# Checks every PR for footguns with TypeSafe's Jev and auto-approves the rest.
+# See .github/pr-risk/README.md for the repo settings this relies on.
+name: PR risk
+
+on:
+  # pull_request_target runs the base branch's copy of this workflow and script,
+  # so a PR can't rewrite its own gate. Never check out the PR head here.
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: pr-risk-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  assess:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: .github/pr-risk
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      # No dependencies to install: Node 24 runs the TypeScript directly.
+      - run: node action.ts
+        working-directory: .github/pr-risk
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}

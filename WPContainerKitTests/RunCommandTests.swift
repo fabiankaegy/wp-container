@@ -79,6 +79,15 @@ final class RunCommandTests: XCTestCase {
         XCTAssertGreaterThan(userEnvIndex, dbEnvIndex, "user env must follow the defaults so it overrides them")
     }
 
+    func testRunImageKeepsPullProgressOnlyInATerminal() {
+        let captured = SiteRecipe.runImageArgs(site, image: "node:20", dbHost: "10.0.0.2", command: ["npm", "ci"],
+                                               workdir: "/var/www/html")
+        XCTAssertEqual(Array(captured.prefix(3)), ["run", "--progress", "none"])
+        let terminal = SiteRecipe.runImageArgs(site, image: "node:20", dbHost: "10.0.0.2", command: ["npm", "ci"],
+                                               workdir: "/var/www/html", interactive: true, tty: true)
+        XCTAssertFalse(terminal.contains("--progress"))
+    }
+
     // MARK: - Time limit
 
     func testTimeLimitedPassesArgumentsThrough() throws {

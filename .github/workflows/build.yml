@@ -1,0 +1,29 @@
+# Builds the app and CLI and runs the unit tests on every PR and push to main.
+name: Build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # The deployment target is macOS 26, so this needs the macOS 26 SDK.
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      # The Makefile expects Homebrew's arm64 path, which matches the runner.
+      - run: brew install xcodegen
+      - run: xcodebuild -version
+      - run: make verify-version
+      # Debug builds sign ad-hoc, so no certificates are needed here.
+      - run: make build
+      - run: make test
