@@ -140,8 +140,25 @@ public enum ShareGate {
         guard let query else { return false }
         return query.split(separator: "&").contains { part in
             let key = part.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
-            return key.removingPercentEncoding == "rest_route"
+            return phpVariableName(key) == "rest_route"
         }
+    }
+
+    /// The `$_GET` name PHP derives from a raw query key: percent-decoded, leading spaces dropped,
+    /// array suffix removed, and spaces, dots and an unmatched `[` turned into `_`.
+    private static func phpVariableName(_ rawKey: String) -> String {
+        let plusDecoded = rawKey.replacingOccurrences(of: "+", with: " ")
+        let decoded = plusDecoded.removingPercentEncoding ?? plusDecoded
+        let trimmed = String(decoded.drop { $0 == " " })
+        func normalise(_ text: Substring) -> String {
+            String(text.map { $0 == " " || $0 == "." ? "_" : $0 })
+        }
+        guard let open = trimmed.firstIndex(of: "[") else { return normalise(trimmed[...]) }
+        let afterOpen = trimmed.index(after: open)
+        if trimmed[afterOpen...].contains("]") {
+            return normalise(trimmed[..<open])
+        }
+        return normalise(trimmed[..<open]) + "_" + String(trimmed[afterOpen...])
     }
 
     /// Replaces `origin` only where it ends at a delimiter, so longer hosts and ports are left alone.
