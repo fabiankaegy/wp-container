@@ -199,9 +199,9 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.agentToolsDoc = try? c.decodeIfPresent(String.self, forKey: .agentToolsDoc)
         // Absent in stores written before the Database Importer (§2m).
         self.lastImportSourceURL = try? c.decodeIfPresent(String.self, forKey: .lastImportSourceURL)
-        // Absent in stores written before issue #17. Only ever holds names that
-        // pass `WorktreeEnv.isManagedSchemaName`; a hand-edited store can't widen
-        // the blast radius because every drop re-checks.
+        // Absent in stores written before issue #17. Only ever holds env and test
+        // schema names (`WorktreeEnvService.isReapableSchemaName`); a hand-edited
+        // store can't widen the blast radius because every drop re-checks.
         self.pendingSchemaDrops = ((try? c.decodeIfPresent([String].self, forKey: .pendingSchemaDrops)) ?? [])
             ?? []
     }

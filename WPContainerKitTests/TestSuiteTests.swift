@@ -37,6 +37,22 @@ final class TestSuiteTests: XCTestCase {
         XCTAssertTrue(name.hasPrefix(TestSuite.schemaPrefix))
     }
 
+    func testTestSchemaNamesAreRecognized() {
+        XCTAssertTrue(TestSuite.isTestSchemaName(TestSuite.databaseName(for: makeEnv())))
+        XCTAssertFalse(TestSuite.isTestSchemaName("wpctests_"))
+        XCTAssertFalse(TestSuite.isTestSchemaName("wpc_example_wt_feature"))
+        XCTAssertFalse(TestSuite.isTestSchemaName("wpctests_x; DROP DATABASE wordpress"))
+        XCTAssertFalse(TestSuite.isTestSchemaName("wpctests_" + String(repeating: "a", count: 60)))
+    }
+
+    func testOnlyEnvAndTestSchemasAreReapable() {
+        XCTAssertTrue(WorktreeEnvService.isReapableSchemaName("wpc_example_wt_feature"))
+        XCTAssertTrue(WorktreeEnvService.isReapableSchemaName("wpctests_example_wt_feature"))
+        XCTAssertFalse(WorktreeEnvService.isReapableSchemaName(SiteRecipe.dbName))
+        XCTAssertFalse(WorktreeEnvService.isReapableSchemaName("mysql"))
+        XCTAssertFalse(WorktreeEnvService.isReapableSchemaName("wpctests"))
+    }
+
     func testCreateTestDatabaseRunsInTheDatabaseContainer() {
         let args = SiteRecipe.createTestDatabaseArgs(makeEnv(), schema: "wpctests_example_wt_feature")
         XCTAssertEqual(Array(args.prefix(3)), ["exec", "wpc-example-wt-feature-db", "mariadb"])
