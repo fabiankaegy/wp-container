@@ -20,6 +20,76 @@ public struct SiteExportSummary: Sendable, Codable {
     }
 }
 
+/// What `SiteArchiveService.inspect` reads from an archive without extracting it.
+public struct SiteArchiveInfo: Sendable {
+    public var manifest: SiteArchiveManifest
+    public var uncompressedBytes: Int64
+    public var entryCount: Int
+
+    public init(manifest: SiteArchiveManifest, uncompressedBytes: Int64, entryCount: Int) {
+        self.manifest = manifest
+        self.uncompressedBytes = uncompressedBytes
+        self.entryCount = entryCount
+    }
+}
+
+/// The custom domain an imported site gets.
+public enum SiteImportDomain: Sendable, Equatable {
+    /// The domain recorded in the archive's settings.
+    case keep
+    /// A new domain, normalized before use.
+    case set(String)
+    /// No custom domain.
+    case none
+}
+
+public struct SiteImportOptions: Sendable {
+    /// The new site's name; nil uses the archive's source name.
+    public var name: String?
+    public var domain: SiteImportDomain
+    /// The folder the site folder is created in.
+    public var parentFolder: URL
+    /// A group to add the site to, created when no group has this name.
+    public var groupName: String?
+    /// An image tag that replaces the archive's.
+    public var imageOverride: String?
+
+    public init(
+        name: String? = nil,
+        domain: SiteImportDomain = .keep,
+        parentFolder: URL = SiteFolders.defaultSitesRoot,
+        groupName: String? = nil,
+        imageOverride: String? = nil
+    ) {
+        self.name = name
+        self.domain = domain
+        self.parentFolder = parentFolder
+        self.groupName = groupName
+        self.imageOverride = imageOverride
+    }
+}
+
+/// Steps of `SiteArchiveService.importSite`, reported at the start of each.
+public enum SiteImportPhase: String, Sendable {
+    case validating, creatingSite, extracting, startingSite, importingDatabase,
+         migratingURLs, applyingSettings, applyingDomain, finishing, rollingBack
+}
+
+/// The result of an import.
+public struct SiteImportResult: Sendable {
+    public var site: Site
+    public var manifest: SiteArchiveManifest
+    public var urlReport: URLMigrationReport
+    public var warnings: [String]
+
+    public init(site: Site, manifest: SiteArchiveManifest, urlReport: URLMigrationReport, warnings: [String]) {
+        self.site = site
+        self.manifest = manifest
+        self.urlReport = urlReport
+        self.warnings = warnings
+    }
+}
+
 /// Exports a site to a portable zip archive and imports one back.
 public actor SiteArchiveService {
 
@@ -29,7 +99,12 @@ public actor SiteArchiveService {
     /// Working folders of the export and import steps; never archived.
     public static let alwaysExcluded: [String] = [".wpc-export", ".wpc-import"]
 
+    /// Free space an import needs, as a multiple of the archive's uncompressed size.
+    public static let importSpaceFactor = 1.2
+
     private static let zipPath = "/usr/bin/zip"
+    private static let unzipPath = "/usr/bin/unzip"
+    private static let zipinfoPath = "/usr/bin/zipinfo"
     private static let rsyncPath = "/usr/bin/rsync"
 
     private let cli: ContainerCLI
@@ -106,6 +181,198 @@ public actor SiteArchiveService {
         let attributes = try? fm.attributesOfItem(atPath: destination.path)
         let bytes = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
         return SiteExportSummary(archive: destination, bytes: bytes, manifest: manifest, warnings: warnings)
+    }
+
+    // MARK: - Import
+
+    /// Creates a new site from an archive: its folder, store record, containers,
+    /// and database. A failure or cancellation after the store record exists
+    /// removes the site again before the error is rethrown.
+    public func importSite(
+        archive: URL,
+        options: SiteImportOptions,
+        progress: @escaping @Sendable (SiteImportPhase) -> Void
+    ) async throws -> SiteImportResult {
+        let fm = FileManager.default
+        func enter(_ phase: SiteImportPhase) throws {
+            try Task.checkCancellation()
+            progress(phase)
+        }
+
+        try enter(.validating)
+        let info = try await Self.inspect(archive: archive)
+        let manifest = info.manifest
+        let settings = manifest.settings
+        let needed = Int64((Double(info.uncompressedBytes) * Self.importSpaceFactor).rounded(.up))
+        if let available = Self.availableCapacity(at: options.parentFolder), available < needed {
+            throw SiteArchiveError.insufficientDiskSpace(needed: needed, available: available)
+        }
+
+        let envelope = try await persistence.load()
+        let name = options.name ?? manifest.source.name
+        let slug = Self.resolveSlug(name: name, existingSlugs: Set(envelope.sites.map(\.slug)),
+                                    parentFolder: options.parentFolder)
+        let domain: String?
+        switch options.domain {
+        case .keep:
+            domain = settings.customDomain.flatMap { $0.isEmpty ? nil : $0 }
+        case .set(let raw):
+            guard let normalized = DomainService.normalize(raw) else { throw SiteArchiveError.invalidDomain(raw) }
+            domain = normalized
+        case .none:
+            domain = nil
+        }
+        if let domain, envelope.sites.contains(where: { $0.customDomain == domain }) {
+            throw SiteArchiveError.domainInUse(domain)
+        }
+
+        try enter(.creatingSite)
+        let sitePath = options.parentFolder.appendingPathComponent(slug, isDirectory: true)
+        let imageTag = options.imageOverride ?? settings.imageTag
+        let groupName = options.groupName
+        let allocation = try await persistence.allocatePort(reserve: { port, env in
+            var site = Site(name: name, slug: slug, path: sitePath, port: port, imageTag: imageTag)
+            settings.apply(to: &site)
+            site.customDomain = domain
+            site.imageTag = imageTag
+            Self.assignGroup(named: groupName, to: &site, in: &env)
+            env.sites.append(site)
+            return site
+        })
+        guard let created = allocation?.value else { throw SiteArchiveError.noFreePort }
+
+        var site = created
+        var warnings: [String] = []
+        let workFolder = options.parentFolder.appendingPathComponent(".wpc-import-\(UUID().uuidString)", isDirectory: true)
+        let urlReport: URLMigrationReport
+        do {
+            try enter(.extracting)
+            try await Self.extract(archive: archive, into: workFolder)
+            try fm.createDirectory(at: site.path, withIntermediateDirectories: true)
+            try fm.moveItem(at: workFolder.appendingPathComponent(SiteArchiveLayout.wordpressFolder, isDirectory: true),
+                            to: site.wordpressFolder)
+            try SiteFolders.ensure(for: site)
+            try? WPCLIShim.writeShim(for: site, siteRoot: site.path, slug: site.slug)
+            if settings.mailpitEnabled {
+                if let enabled = try await persistence.setSidecar(SidecarAddons.mailpit, enabled: true, siteID: site.id) {
+                    site = enabled.site
+                } else {
+                    warnings.append("Mailpit was not enabled: no free port is available for its web UI.")
+                }
+            }
+
+            try enter(.startingSite)
+            _ = try await lifecycle.startSite(site)
+            let address = try await cli.ipAddress(of: site.dbContainerName)
+            guard let dbHost = address, !dbHost.isEmpty else {
+                throw SiteArchiveError.toolFailed(tool: "container", detail: "\(site.slug)'s database container has no address")
+            }
+            try await lifecycle.waitForDatabaseReady(site, dbHost: dbHost)
+
+            try enter(.importingDatabase)
+            try await importDatabase(site, dbHost: dbHost,
+                                     dump: workFolder.appendingPathComponent(SiteArchiveLayout.databaseName))
+
+            try enter(.migratingURLs)
+            urlReport = try await migrateURLs(site, dbHost: dbHost, source: manifest.source)
+            warnings += urlReport.warnings
+
+            try enter(.applyingSettings)
+            let flushed = (try? await cli.runCapturing(SiteRecipe.wpCacheFlushArgs(site, dbHost: dbHost)))?.succeeded ?? false
+            if !flushed { warnings.append("The WordPress object cache could not be flushed.") }
+            await RedisService.flush(site, cli: cli)
+            if site.httpsEnabled || site.customDomain != nil {
+                let ca = CertificateAuthority()
+                try await ca.ensureGenerated()
+                try await ca.ensureLeafCovers(site.proxyHosts)
+                if site.httpsEnabled, !(await ca.isCATrusted()) {
+                    warnings.append("The wpc certificate authority isn't trusted on this Mac; run `wpc https trust` or use Settings ▸ HTTPS.")
+                }
+            }
+
+            try enter(.applyingDomain)
+            if let customDomain = site.customDomain {
+                let domains = try await persistence.load().sites.compactMap(\.customDomain).filter { !$0.isEmpty }
+                do {
+                    try await DomainService(cli: cli).apply(site: site, allCustomDomains: domains)
+                } catch let cancellation as CancellationError {
+                    throw cancellation
+                } catch {
+                    warnings.append("Couldn't register \(customDomain) in /etc/hosts: \(error)")
+                }
+            }
+        } catch {
+            progress(.rollingBack)
+            // An unstructured task does not inherit cancellation, so the cleanup runs to completion.
+            let discarded = site
+            let lifecycle = self.lifecycle
+            let persistence = self.persistence
+            await Task {
+                await SiteDiscard.discard(discarded, keepFolder: false, lifecycle: lifecycle, persistence: persistence)
+            }.value
+            try? fm.removeItem(at: workFolder)
+            throw error
+        }
+
+        progress(.finishing)
+        try? fm.removeItem(at: workFolder)
+        return SiteImportResult(site: site, manifest: manifest, urlReport: urlReport, warnings: warnings)
+    }
+
+    /// Lists, validates, and sizes an archive and decodes its manifest.
+    /// Throws `.notAWPCExport` for a file that is not a zip or lacks the archive layout.
+    public static func inspect(archive: URL) async throws -> SiteArchiveInfo {
+        let listing: CommandResult
+        do {
+            listing = try await runTool(unzipPath, args: ["-Z1", archive.path], cwd: nil)
+        } catch SiteArchiveError.toolFailed {
+            try Task.checkCancellation()
+            throw SiteArchiveError.notAWPCExport
+        }
+        let names = listing.stdout.split(whereSeparator: \.isNewline).map(String.init)
+        guard names.contains(SiteArchiveLayout.manifestName) else { throw SiteArchiveError.notAWPCExport }
+        try validateEntries(names)
+        let wordpressPrefix = SiteArchiveLayout.wordpressFolder + "/"
+        guard names.contains(SiteArchiveLayout.databaseName),
+              names.contains(where: { $0.hasPrefix(wordpressPrefix) }) else {
+            throw SiteArchiveError.notAWPCExport
+        }
+
+        let manifestOutput = try await runTool(unzipPath, args: ["-p", archive.path, SiteArchiveLayout.manifestName], cwd: nil)
+        let manifest: SiteArchiveManifest
+        do {
+            manifest = try SiteArchiveManifest.decode(Data(manifestOutput.stdout.utf8))
+        } catch let error as SiteArchiveError {
+            throw error
+        } catch {
+            throw SiteArchiveError.notAWPCExport
+        }
+
+        let totals = try await runTool(zipinfoPath, args: ["-t", archive.path], cwd: nil).stdout
+        guard let match = totals.firstMatch(of: /(\d+) bytes uncompressed/), let bytes = Int64(match.1) else {
+            throw SiteArchiveError.toolFailed(tool: "zipinfo", detail: totals.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return SiteArchiveInfo(manifest: manifest, uncompressedBytes: bytes, entryCount: names.count)
+    }
+
+    /// Unzips `archive` into `folder`, then deletes top-level symlinks and every
+    /// symlink under `folder/wordpress` whose resolved target lies outside it.
+    public static func extract(archive: URL, into folder: URL) async throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        try await runTool(unzipPath, args: ["-q", "-o", archive.path, "-d", folder.path], cwd: nil)
+
+        for name in [SiteArchiveLayout.manifestName, SiteArchiveLayout.databaseName, SiteArchiveLayout.wordpressFolder] {
+            let entry = folder.appendingPathComponent(name)
+            let linkTarget = try? fm.destinationOfSymbolicLink(atPath: entry.path)
+            if linkTarget != nil {
+                try fm.removeItem(at: entry)
+            }
+        }
+        let wordpress = folder.appendingPathComponent(SiteArchiveLayout.wordpressFolder, isDirectory: true)
+        for relative in externalSymlinks(in: wordpress) {
+            try fm.removeItem(at: wordpress.appendingPathComponent(relative))
+        }
     }
 
     // MARK: - Helpers
@@ -306,8 +573,9 @@ public actor SiteArchiveService {
         return String(cString: resolved)
     }
 
-    /// Runs a packaging tool, mapping a launch failure or non-zero exit to `.toolFailed`.
-    private static func runTool(_ executable: String, args: [String], cwd: URL?) async throws {
+    /// Runs an archive tool, mapping a launch failure or non-zero exit to `.toolFailed`.
+    @discardableResult
+    private static func runTool(_ executable: String, args: [String], cwd: URL?) async throws -> CommandResult {
         let tool = URL(fileURLWithPath: executable).lastPathComponent
         let result: CommandResult
         do {
@@ -320,5 +588,72 @@ public actor SiteArchiveService {
             let detail = output.trimmingCharacters(in: .whitespacesAndNewlines)
             throw SiteArchiveError.toolFailed(tool: tool, detail: "exit \(result.exitCode): \(detail)")
         }
+        return result
+    }
+
+    /// Bytes available for important data on the volume holding `folder`, or
+    /// on its nearest existing ancestor when `folder` does not exist yet.
+    private static func availableCapacity(at folder: URL) -> Int64? {
+        let fm = FileManager.default
+        var candidate = folder.standardizedFileURL
+        while !fm.fileExists(atPath: candidate.path), candidate.path != "/" {
+            candidate = candidate.deletingLastPathComponent()
+        }
+        let values = try? candidate.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return values?.volumeAvailableCapacityForImportantUsage
+    }
+
+    /// Puts `site` in the group named `groupName`, matched case-insensitively,
+    /// adding the group to `envelope` when none matches. A blank name leaves the site ungrouped.
+    private static func assignGroup(named groupName: String?, to site: inout Site, in envelope: inout StoreEnvelope) {
+        guard let groupName, !groupName.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        if let existing = envelope.groups.first(where: { $0.name.caseInsensitiveCompare(groupName) == .orderedSame }) {
+            site.groupID = existing.id
+        } else {
+            let group = SiteGroup(name: groupName, sortOrder: (envelope.groups.map(\.sortOrder).max() ?? -1) + 1)
+            envelope.groups.append(group)
+            site.groupID = group.id
+        }
+    }
+
+    /// Imports `dump` with `wp db import` from a staging folder inside the
+    /// site's docroot, which is removed afterwards. A MySQL `ERROR nnnn` line
+    /// in the output fails the import even when wp-cli exits 0.
+    private func importDatabase(_ site: Site, dbHost: String, dump: URL) async throws {
+        let fm = FileManager.default
+        let staging = site.wordpressFolder.appendingPathComponent(".wpc-import", isDirectory: true)
+        try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: staging) }
+        try fm.moveItem(at: dump, to: staging.appendingPathComponent(SiteArchiveLayout.databaseName))
+
+        let containerPath = "/var/www/html/.wpc-import/\(SiteArchiveLayout.databaseName)"
+        let result = try await cli.runCapturing(SiteRecipe.wpDBImportArgs(site, dbHost: dbHost, containerPath: containerPath))
+        if let line = DatabaseImportService.sqlError(in: result.stdout + "\n" + result.stderr) {
+            throw SiteArchiveError.toolFailed(tool: "wp db import", detail: line)
+        }
+        guard result.succeeded else {
+            let output = result.stderr.isEmpty ? result.stdout : result.stderr
+            let detail = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw SiteArchiveError.toolFailed(tool: "wp db import", detail: "exit \(result.exitCode): \(detail)")
+        }
+    }
+
+    /// Rewrites every url the imported database and wp-config.php carry, plus
+    /// the source site's public and local urls, onto `site`'s url.
+    private func migrateURLs(_ site: Site, dbHost: String,
+                             source: SiteArchiveManifest.Source) async throws -> URLMigrationReport {
+        let migrator = EnvURLMigrator(cli: cli)
+        let discovery = await migrator.discoverOrigins(instance: site, dbHost: dbHost, wordpressFolder: site.wordpressFolder)
+        guard let target = EnvURLMigration.authority(from: site.url.absoluteString) else {
+            throw SiteArchiveError.invalidDomain(site.url.absoluteString)
+        }
+        let origins = EnvURLMigration.staleOrigins(
+            candidates: discovery.candidates + [source.url, source.localURL],
+            target: target, networkDomain: discovery.networkDomain)
+        return try await migrator.migrate(
+            instance: site, dbHost: dbHost, wordpressFolder: site.wordpressFolder,
+            origins: origins, targetAuthority: target, https: site.url.scheme == "https",
+            multisite: EnvURLMigration.isMultisite(networkType: site.networkType, constants: discovery.constants),
+            dryRun: false)
     }
 }
