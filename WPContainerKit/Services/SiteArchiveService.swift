@@ -102,6 +102,9 @@ public actor SiteArchiveService {
     /// Free space an import needs, as a multiple of the archive's uncompressed size.
     public static let importSpaceFactor = 1.2
 
+    /// Age after which an interrupted run's work folder or partial archive is swept.
+    public static let staleLeftoverAge: TimeInterval = 6 * 3600
+
     private static let zipPath = "/usr/bin/zip"
     private static let unzipPath = "/usr/bin/unzip"
     private static let zipinfoPath = "/usr/bin/zipinfo"
@@ -134,16 +137,19 @@ public actor SiteArchiveService {
         let address = try await cli.ipAddress(of: site.dbContainerName)
         guard let dbHost = address, !dbHost.isEmpty else { throw SiteArchiveError.siteNotRunning }
         try Self.refuseExistingOutput(destination, overwrite: overwrite)
+        Self.sweepStalePartialArchives(for: destination, now: Date())
         try await lifecycle.waitForDatabaseReady(site, dbHost: dbHost)
 
+        // Clears working folders an interrupted export left behind.
         let staging = site.path.appendingPathComponent(".wpc-export", isDirectory: true)
+        let dumpFolder = site.wordpressFolder.appendingPathComponent(".wpc-export", isDirectory: true)
         try? fm.removeItem(at: staging)
+        try? fm.removeItem(at: dumpFolder)
         try fm.createDirectory(at: staging, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: staging) }
 
         // The dump lands inside the `wordpress/` mount, where the wp-cli container can write.
         progress(.dumpingDatabase)
-        let dumpFolder = site.wordpressFolder.appendingPathComponent(".wpc-export", isDirectory: true)
         try fm.createDirectory(at: dumpFolder, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: dumpFolder) }
         let containerPath = "/var/www/html/.wpc-export/\(SiteArchiveLayout.databaseName)"
@@ -203,6 +209,7 @@ public actor SiteArchiveService {
         }
 
         try enter(.validating)
+        Self.sweepStaleImportFolders(in: options.parentFolder, now: Date())
         let info = try await Self.inspect(archive: archive)
         let manifest = info.manifest
         let settings = manifest.settings
@@ -584,6 +591,21 @@ public actor SiteArchiveService {
         return links
     }
 
+    /// Removes `.wpc-import-*` work folders in `parentFolder` last modified more
+    /// than `staleLeftoverAge` before `now`. Best effort.
+    public static func sweepStaleImportFolders(in parentFolder: URL, now: Date) {
+        removeStaleItems(in: parentFolder, now: now) { $0.hasPrefix(".wpc-import-") }
+    }
+
+    /// Removes partial archives that earlier exports to `destination` left beside
+    /// it, when last modified more than `staleLeftoverAge` before `now`. Best effort.
+    public static func sweepStalePartialArchives(for destination: URL, now: Date) {
+        let prefix = ".\(destination.lastPathComponent).partial-"
+        removeStaleItems(in: destination.deletingLastPathComponent(), now: now) {
+            $0.hasPrefix(prefix) && $0.hasSuffix(".zip")
+        }
+    }
+
     /// The `$wp_version` declared in `wp-includes/version.php`.
     public static func wordpressVersion(in wordpressFolder: URL) -> String? {
         let file = wordpressFolder.appendingPathComponent("wp-includes/version.php")
@@ -635,6 +657,21 @@ public actor SiteArchiveService {
         guard let resolved = realpath(path, nil) else { return nil }
         defer { free(resolved) }
         return String(cString: resolved)
+    }
+
+    /// Removes the entries of `folder` whose name matches and whose modification
+    /// date is more than `staleLeftoverAge` before `now`, ignoring every error.
+    private static func removeStaleItems(in folder: URL, now: Date, matching: (String) -> Bool) {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: folder.path) else { return }
+        let cutoff = now.addingTimeInterval(-staleLeftoverAge)
+        for name in names where matching(name) {
+            let item = folder.appendingPathComponent(name)
+            let modified = (try? fm.attributesOfItem(atPath: item.path))?[.modificationDate] as? Date
+            if let modified, modified < cutoff {
+                try? fm.removeItem(at: item)
+            }
+        }
     }
 
     /// Runs an archive tool, mapping a launch failure or non-zero exit to `.toolFailed`.
