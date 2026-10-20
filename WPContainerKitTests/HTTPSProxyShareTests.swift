@@ -10,6 +10,7 @@ final class HTTPSProxyShareTests: XCTestCase {
     private var tempRoot: URL!
     private var proxy: HTTPSProxy!
     private var upstream: FakeUpstream!
+    private var openedIDs: [UUID] = []
 
     override func setUp() async throws {
         tempRoot = FileManager.default.temporaryDirectory
@@ -21,20 +22,34 @@ final class HTTPSProxyShareTests: XCTestCase {
     }
 
     override func tearDown() async throws {
-        proxy.stop()
+        // Closed one by one: `stop()` would also clear the real proxy report files.
+        openedIDs.forEach { proxy.closeShareListener(instanceID: $0) }
         upstream.stop()
         try? FileManager.default.removeItem(at: tempRoot)
     }
 
-    private func config(publicOrigin: String = "https://abc.example.com") -> ShareGateConfig {
+    private func openShare(instanceID: UUID, route: HTTPSProxy.Route, config: ShareGateConfig) async throws -> UInt16 {
+        openedIDs.append(instanceID)
+        return try await proxy.openShareListener(instanceID: instanceID, route: route, config: config)
+    }
+
+    private func config(publicOrigin: String = "https://abc.example.com",
+                        allow: [ShareException] = []) -> ShareGateConfig {
         ShareGateConfig(publicOrigin: publicOrigin,
                         upstreamHost: "my-site.localhost",
                         localOrigins: ["http://my-site.localhost", "https://my-site.localhost"],
                         username: "share",
                         password: "example-password",
                         authDisabled: false,
-                        allow: [])
+                        allow: allow)
     }
+
+    private static func request(_ path: String = "/", authorization: String? = nil) -> String {
+        let auth = authorization.map { "Authorization: Basic \($0)\r\n" } ?? ""
+        return "GET \(path) HTTP/1.1\r\nHost: abc.example.com\r\n\(auth)\r\n"
+    }
+
+    private static let wrongCredentials = Data("share:not-the-password".utf8).base64EncodedString()
 
     private var route: HTTPSProxy.Route {
         HTTPSProxy.Route(port: Int(upstream.port), slug: "my-site", containerName: nil)
@@ -45,7 +60,7 @@ final class HTTPSProxyShareTests: XCTestCase {
     // MARK: - Gate
 
     func testShareListenerChallengesWithoutCredentials() async throws {
-        let port = try await proxy.openShareListener(instanceID: UUID(), route: route, config: config())
+        let port = try await openShare(instanceID: UUID(), route: route, config: config())
 
         let response = try await LoopbackClient.exchange(
             port: port, request: "GET / HTTP/1.1\r\nHost: abc.example.com\r\n\r\n")
@@ -55,8 +70,83 @@ final class HTTPSProxyShareTests: XCTestCase {
         XCTAssertEqual(upstream.connectionCount, 0)
     }
 
+    func testWrongCredentialsLockTheShareWithoutReachingTheUpstream() async throws {
+        let port = try await openShare(instanceID: UUID(), route: route, config: config())
+
+        for _ in 0..<10 {
+            let response = try await LoopbackClient.exchange(
+                port: port, request: Self.request(authorization: Self.wrongCredentials))
+            XCTAssertTrue(response.hasPrefix("HTTP/1.1 401"), response)
+        }
+        let locked = try await LoopbackClient.exchange(
+            port: port, request: Self.request(authorization: Self.wrongCredentials))
+        let lockedWithGoodCredentials = try await LoopbackClient.exchange(
+            port: port, request: Self.request(authorization: Self.credentials))
+
+        XCTAssertTrue(locked.hasPrefix("HTTP/1.1 429"), locked)
+        XCTAssertTrue(lockedWithGoodCredentials.hasPrefix("HTTP/1.1 429"), lockedWithGoodCredentials)
+        XCTAssertEqual(upstream.connectionCount, 0)
+    }
+
+    func testRequestsWithoutCredentialsNeverLockTheShare() async throws {
+        let port = try await openShare(instanceID: UUID(), route: route, config: config())
+
+        for _ in 0..<20 {
+            let response = try await LoopbackClient.exchange(port: port, request: Self.request())
+            XCTAssertTrue(response.hasPrefix("HTTP/1.1 401"), response)
+        }
+        let response = try await LoopbackClient.exchange(
+            port: port, request: Self.request(authorization: Self.credentials))
+
+        XCTAssertTrue(response.hasPrefix("HTTP/1.1 302"), response)
+        XCTAssertEqual(upstream.connectionCount, 1)
+    }
+
+    func testCredentiallessRequestGetsChallengeWhileLocked() async throws {
+        let port = try await openShare(instanceID: UUID(), route: route, config: config())
+        for _ in 0..<10 {
+            _ = try await LoopbackClient.exchange(port: port, request: Self.request(authorization: Self.wrongCredentials))
+        }
+
+        let response = try await LoopbackClient.exchange(port: port, request: Self.request())
+
+        XCTAssertTrue(response.hasPrefix("HTTP/1.1 401"), response)
+    }
+
+    func testExceptionPathPassesWhileLocked() async throws {
+        let exception = try ShareException(parsing: "/wp-json/wc/v3/webhooks")
+        let port = try await openShare(instanceID: UUID(), route: route, config: config(allow: [exception]))
+        for _ in 0..<10 {
+            _ = try await LoopbackClient.exchange(port: port, request: Self.request(authorization: Self.wrongCredentials))
+        }
+
+        let response = try await LoopbackClient.exchange(
+            port: port, request: Self.request("/wp-json/wc/v3/webhooks/1"))
+
+        XCTAssertTrue(response.hasPrefix("HTTP/1.1 302"), response)
+        XCTAssertEqual(upstream.connectionCount, 1)
+    }
+
+    func testBareLineFeedInShareRequestIsRejected() async throws {
+        let port = try await openShare(instanceID: UUID(), route: route, config: config())
+
+        let response = try await LoopbackClient.exchange(port: port, request: """
+            GET / HTTP/1.1\r
+            Host: abc.example.com\r
+            Authorization: Basic \(Self.credentials)\r
+            Accept: */*\nX-WPC-Share-Origin: https://forged.example.com\r
+            \r
+
+            """)
+
+        XCTAssertTrue(response.hasPrefix("HTTP/1.1 400"), response)
+        XCTAssertEqual(upstream.connectionCount, 0)
+    }
+
+    // MARK: - Relay
+
     func testShareListenerRelaysWithRewrittenHeaders() async throws {
-        let port = try await proxy.openShareListener(instanceID: UUID(), route: route, config: config())
+        let port = try await openShare(instanceID: UUID(), route: route, config: config())
 
         _ = try await LoopbackClient.exchange(port: port, request: """
             GET /wp-admin/ HTTP/1.1\r
@@ -76,7 +166,7 @@ final class HTTPSProxyShareTests: XCTestCase {
     }
 
     func testShareListenerRewritesResponseLocationAndAddsRobots() async throws {
-        let port = try await proxy.openShareListener(instanceID: UUID(), route: route, config: config())
+        let port = try await openShare(instanceID: UUID(), route: route, config: config())
 
         let response = try await LoopbackClient.exchange(port: port, request: """
             GET /wp-admin HTTP/1.1\r
@@ -95,7 +185,7 @@ final class HTTPSProxyShareTests: XCTestCase {
 
     func testInterimResponseIsForwardedBeforeTheRewrittenFinalHeader() async throws {
         upstream.sendsContinueFirst = true
-        let port = try await proxy.openShareListener(instanceID: UUID(), route: route, config: config())
+        let port = try await openShare(instanceID: UUID(), route: route, config: config())
 
         let response = try await LoopbackClient.exchange(port: port, request: """
             GET /wp-admin HTTP/1.1\r
@@ -111,7 +201,7 @@ final class HTTPSProxyShareTests: XCTestCase {
 
     func testUpdatedShareConfigAppliesToNextRequest() async throws {
         let id = UUID()
-        let port = try await proxy.openShareListener(instanceID: id, route: route,
+        let port = try await openShare(instanceID: id, route: route,
                                                      config: config(publicOrigin: "https://pending.example.com"))
         proxy.updateShareConfig(instanceID: id, config: config(publicOrigin: "https://live.example.com"))
 
@@ -128,15 +218,19 @@ final class HTTPSProxyShareTests: XCTestCase {
 
     func testShareConfigWithLineBreakIsRejected() async {
         do {
-            _ = try await proxy.openShareListener(instanceID: UUID(), route: route,
-                                                  config: config(publicOrigin: "https://abc.example.com\r\nX-Evil: 1"))
+            _ = try await openShare(instanceID: UUID(), route: route,
+                                    config: config(publicOrigin: "https://abc.example.com\r\nX-Evil: 1"))
             XCTFail("expected the config to be rejected")
-        } catch {}
+        } catch ShareError.invalidGateConfig(let field) {
+            XCTAssertEqual(field, "publicOrigin")
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
     }
 
     func testShareConfigUpdateWithLineBreakIsIgnored() async throws {
         let id = UUID()
-        let port = try await proxy.openShareListener(instanceID: id, route: route, config: config())
+        let port = try await openShare(instanceID: id, route: route, config: config())
         proxy.updateShareConfig(instanceID: id, config: config(publicOrigin: "https://abc.example.com\nX-Evil: 1"))
 
         _ = try await LoopbackClient.exchange(port: port, request: """
@@ -150,6 +244,36 @@ final class HTTPSProxyShareTests: XCTestCase {
         let header = try XCTUnwrap(upstream.lastRequestHeader)
         XCTAssertFalse(header.contains("X-Evil"), header)
         XCTAssertTrue(header.contains("X-WPC-Share-Origin: https://abc.example.com"), header)
+    }
+
+    // MARK: - Unavailable upstream
+
+    func testUnreachableUpstreamAnswersTerse502() async throws {
+        let deadPort = upstream.port
+        upstream.stop()
+        let released = await LoopbackClient.waitUntilRefused(port: deadPort, timeout: 2)
+        XCTAssertTrue(released)
+        let deadRoute = HTTPSProxy.Route(port: Int(deadPort), slug: "my-site", containerName: nil)
+        let port = try await openShare(instanceID: UUID(), route: deadRoute, config: config())
+
+        let response = try await LoopbackClient.exchange(
+            port: port, request: Self.request(authorization: Self.credentials))
+
+        XCTAssertTrue(response.hasPrefix("HTTP/1.1 502 Bad Gateway\r\n"), response)
+        XCTAssertTrue(response.contains("\r\nX-Robots-Tag: noindex, nofollow\r\n"), response)
+        XCTAssertTrue(response.hasSuffix("\r\n\r\nThis shared site is not available right now.\n"), response)
+        XCTAssertFalse(response.contains("my-site"), response)
+    }
+
+    func testUpstreamClosingBeforeHeaderAnswers502() async throws {
+        upstream.closesWithoutResponse = true
+        let port = try await openShare(instanceID: UUID(), route: route, config: config())
+
+        let response = try await LoopbackClient.exchange(
+            port: port, request: Self.request(authorization: Self.credentials))
+
+        XCTAssertTrue(response.hasPrefix("HTTP/1.1 502 Bad Gateway\r\n"), response)
+        XCTAssertTrue(response.contains("\r\nX-Robots-Tag: noindex, nofollow\r\n"), response)
     }
 
     // MARK: - Regular listeners
@@ -170,13 +294,32 @@ final class HTTPSProxyShareTests: XCTestCase {
 
     func testClosedShareListenerRefusesConnections() async throws {
         let id = UUID()
-        let port = try await proxy.openShareListener(instanceID: id, route: route, config: config())
+        let port = try await openShare(instanceID: id, route: route, config: config())
         XCTAssertTrue(LoopbackClient.accepts(port: port))
 
         proxy.closeShareListener(instanceID: id)
 
         let refused = await LoopbackClient.waitUntilRefused(port: port, timeout: 2)
         XCTAssertTrue(refused)
+    }
+
+    func testCloseDuringOpenLeavesNothingBound() async throws {
+        let id = UUID()
+        openedIDs.append(id)
+        let opening = Task { [proxy, route, config = config()] in
+            try await proxy!.openShareListener(instanceID: id, route: route, config: config)
+        }
+        proxy.closeShareListener(instanceID: id)
+
+        switch await opening.result {
+        case .success(let port):
+            // The open won the race; the close must still have taken effect.
+            proxy.closeShareListener(instanceID: id)
+            let refused = await LoopbackClient.waitUntilRefused(port: port, timeout: 2)
+            XCTAssertTrue(refused)
+        case .failure:
+            break
+        }
     }
 
     func testRouteForInstanceUsesUpstreamHost() {
@@ -211,12 +354,19 @@ private final class FakeUpstream: @unchecked Sendable {
     private var connections: [NWConnection] = []
     private var headers: [String] = []
     private var continueFirst = false
+    private var closeEarly = false
     let port: UInt16
 
     /// Whether a `100 Continue` interim response is sent, in its own write, ahead of the 302.
     var sendsContinueFirst: Bool {
         get { lock.withLock { continueFirst } }
         set { lock.withLock { continueFirst = newValue } }
+    }
+
+    /// Whether a request is answered by closing the connection without a response.
+    var closesWithoutResponse: Bool {
+        get { lock.withLock { closeEarly } }
+        set { lock.withLock { closeEarly = newValue } }
     }
 
     private init(listener: NWListener, port: UInt16) {
@@ -271,6 +421,11 @@ private final class FakeUpstream: @unchecked Sendable {
             if let end = buffer.range(of: Data("\r\n\r\n".utf8)) {
                 let header = String(decoding: buffer[..<end.lowerBound], as: UTF8.self)
                 self.lock.withLock { self.headers.append(header) }
+                if self.closesWithoutResponse {
+                    connection.send(content: nil, contentContext: .finalMessage, isComplete: true,
+                                    completion: .idempotent)
+                    return
+                }
                 let body = Data(header.utf8)
                 let head = "HTTP/1.1 302 Found\r\nLocation: http://my-site.localhost/wp-admin/\r\n"
                     + "Content-Type: text/plain\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
@@ -305,7 +460,7 @@ private final class OnceFlag: @unchecked Sendable {
 private enum LoopbackClient {
     enum ClientError: Error { case connect(Int32), io(Int32) }
 
-    /// Sends `request`, half-closes, and reads until the peer closes (5s cap).
+    /// Sends `request` and reads until the peer closes (5s receive timeout).
     static func exchange(port: UInt16, request: String) async throws -> String {
         try await withCheckedThrowingContinuation { cont in
             DispatchQueue.global().async {

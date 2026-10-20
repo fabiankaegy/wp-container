@@ -155,6 +155,11 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// `127.0.0.1:<ephemeral>` socket. Opened and closed per share; `stop()` closes
     /// them all, and `reload()` leaves them bound like the env port listeners.
     private var shareListeners: [UUID: ShareListener] = [:]
+    /// Instance → generation of its most recent `openShareListener` call. A close
+    /// or `stop()` removes the entry, so an open still in flight sees it gone (or
+    /// superseded by a newer open) and gives its listener up.
+    private var shareGenerations: [UUID: UInt64] = [:]
+    private var nextShareGeneration: UInt64 = 0
     /// Slugs whose `wpc-<slug>-wp` container was running at the last IP refresh.
     private var _runningSlugs: Set<String> = []
 
@@ -653,6 +658,7 @@ public final class HTTPSProxy: @unchecked Sendable {
         let shares = stateLock.withLock { () -> [NWListener] in
             let all = shareListeners.values.map(\.listener)
             shareListeners.removeAll()
+            shareGenerations.removeAll()
             return all
         }
         shares.forEach { $0.cancel() }
@@ -717,10 +723,9 @@ public final class HTTPSProxy: @unchecked Sendable {
         let throttle: ShareAuthThrottle
     }
 
-    /// One open share: its socket, the route it serves, and the current gate config.
+    /// One open share: its socket and the current gate config.
     private struct ShareListener {
         let listener: NWListener
-        let route: Route
         var config: ShareGateConfig
     }
 
@@ -967,6 +972,11 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// the old listener.
     public func openShareListener(instanceID: UUID, route: Route, config: ShareGateConfig) async throws -> UInt16 {
         try Self.validateShareConfig(config)
+        let generation = stateLock.withLock { () -> UInt64 in
+            nextShareGeneration += 1
+            shareGenerations[instanceID] = nextShareGeneration
+            return nextShareGeneration
+        }
         // Loopback only: the tunnel provider runs on this Mac and is the one
         // client a share listener is for.
         let params = NWParameters.tcp
@@ -980,12 +990,19 @@ public final class HTTPSProxy: @unchecked Sendable {
         listener.newConnectionHandler = { [weak self] connection in
             self?.handle(inbound: connection, context: context)
         }
-        let previous = stateLock.withLock { () -> NWListener? in
+        // Checked under the same lock as the insert: a close, a `stop()` or a newer
+        // open since this call began means the listener must not be stored.
+        let (stored, previous) = stateLock.withLock { () -> (Bool, NWListener?) in
+            guard shareGenerations[instanceID] == generation else { return (false, nil) }
             let old = shareListeners[instanceID]?.listener
-            shareListeners[instanceID] = ShareListener(listener: listener, route: route, config: config)
-            return old
+            shareListeners[instanceID] = ShareListener(listener: listener, config: config)
+            return (true, old)
         }
         previous?.cancel()
+        guard stored else {
+            listener.cancel()
+            throw ProxyError.listenerFailed("share for \(instanceID) was closed while opening")
+        }
 
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<UInt16, Error>) in
             let resumed = ResumeOnce()
@@ -1029,7 +1046,10 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// Close an instance's share listener. Requests already relayed finish; new
     /// connections are refused.
     public func closeShareListener(instanceID: UUID) {
-        let listener = stateLock.withLock { shareListeners.removeValue(forKey: instanceID)?.listener }
+        let listener = stateLock.withLock { () -> NWListener? in
+            shareGenerations.removeValue(forKey: instanceID)
+            return shareListeners.removeValue(forKey: instanceID)?.listener
+        }
         listener?.cancel()
     }
 
@@ -1502,6 +1522,13 @@ public final class HTTPSProxy: @unchecked Sendable {
     }
 
     private func route(inbound: NWConnection, rawHeader: Data, bufferedBody: Data, context: InboundContext, on connQueue: DispatchQueue) {
+        // A share request must split into header lines exactly as the upstream
+        // will: a bare CR or LF could hide an `X-WPC-Share-*` line from
+        // `stripShareHeaders` that the upstream then reads as its own header.
+        if context.share != nil, Self.hasBareLineBreak(rawHeader) {
+            sendRawResponse(Self.shareErrorResponse(status: "400 Bad Request", body: "Bad request.\n"), to: inbound)
+            return
+        }
         guard let header = String(data: rawHeader, encoding: .utf8) else { inbound.cancel(); return }
         let lines = header.components(separatedBy: "\r\n")
         guard let requestLine = lines.first, !requestLine.isEmpty else { inbound.cancel(); return }
@@ -1551,17 +1578,12 @@ public final class HTTPSProxy: @unchecked Sendable {
             inbound.cancel()
             return
         }
-        let now = Date()
-        if share.throttle.isLocked(now: now) {
-            sendRawResponse(ShareGate.throttledResponse(), to: inbound)
-            return
-        }
-        let decision = ShareGate.authorize(requestLine: requestLine, headerLines: headerLines, config: config)
+        let decision = Self.shareDecision(requestLine: requestLine, headerLines: headerLines, config: config,
+                                          throttle: share.throttle, now: Date())
         switch decision {
         case .pass:
             break
         case .challenge:
-            share.throttle.recordFailure(now: now)
             sendRawResponse(ShareGate.challengeResponse(), to: inbound)
             return
         case .throttled:
@@ -1578,6 +1600,60 @@ public final class HTTPSProxy: @unchecked Sendable {
         dial(candidates: upstreamCandidates(for: target)[...], inbound: inbound, upstreamBytes: upstreamBytes,
              host: config.upstreamHost, target: target, wantsHTML: wantsHTML, share: config, on: connQueue)
     }
+
+    /// Gate one share request, consulting the throttle.
+    ///
+    /// Every visitor reaches the listener from the tunnel agent on loopback, so
+    /// the throttle is per share rather than per client. To keep one party from
+    /// locking everyone out, only a request that sent credentials and was
+    /// challenged counts as a failure, and the lock answers 429 only to requests
+    /// that send credentials. Exception paths and an auth-disabled share always
+    /// pass; a request without credentials always gets the plain 401.
+    static func shareDecision(requestLine: String, headerLines: [String], config: ShareGateConfig,
+                              throttle: ShareAuthThrottle, now: Date) -> ShareGateDecision {
+        let credentialless = headerLines.filter { !isAuthorizationHeader($0) }
+        let open = ShareGate.authorize(requestLine: requestLine, headerLines: credentialless, config: config)
+        if open == .pass { return .pass }
+        let sentCredentials = credentialless.count != headerLines.count
+        guard sentCredentials else { return .challenge }
+        if throttle.isLocked(now: now) { return .throttled }
+        let decision = ShareGate.authorize(requestLine: requestLine, headerLines: headerLines, config: config)
+        if decision == .challenge { throttle.recordFailure(now: now) }
+        return decision
+    }
+
+    private static func isAuthorizationHeader(_ line: String) -> Bool {
+        guard let colon = line.firstIndex(of: ":") else { return false }
+        return line[line.startIndex..<colon].trimmingCharacters(in: .whitespaces).lowercased() == "authorization"
+    }
+
+    /// Whether a header block holds a CR or LF that is not part of a CRLF pair.
+    static func hasBareLineBreak(_ data: Data) -> Bool {
+        let cr = UInt8(ascii: "\r"), lf = UInt8(ascii: "\n")
+        var index = data.startIndex
+        while index < data.endIndex {
+            let byte = data[index]
+            if byte == cr {
+                let next = data.index(after: index)
+                guard next < data.endIndex, data[next] == lf else { return true }
+                index = data.index(after: next)
+                continue
+            }
+            if byte == lf { return true }
+            index = data.index(after: index)
+        }
+        return false
+    }
+
+    /// A short plain-text answer for a share visitor, marked non-indexable.
+    static func shareErrorResponse(status: String, body: String) -> String {
+        "HTTP/1.1 \(status)\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: \(body.utf8.count)\r\n"
+            + "Cache-Control: no-store\r\nX-Robots-Tag: noindex, nofollow\r\nConnection: close\r\n\r\n\(body)"
+    }
+
+    /// What a share visitor gets when the instance cannot answer.
+    static let shareUnavailableResponse = shareErrorResponse(status: "502 Bad Gateway",
+                                                             body: "This shared site is not available right now.\n")
 
     /// Upstream addresses for a route, in dialing order.
     private func upstreamCandidates(for target: Route) -> [DialCandidate] {
@@ -1695,6 +1771,12 @@ public final class HTTPSProxy: @unchecked Sendable {
                                   upstreamBytes: upstreamBytes, host: host, target: target,
                                   wantsHTML: wantsHTML, share: share, triedContainerIP: ip, on: connQueue)
                     }
+                    return
+                }
+                // A share never wakes an instance and never shows a visitor the
+                // local pages, which name hosts and commands on this Mac.
+                if share != nil {
+                    connQueue.async { self.sendRawResponse(Self.shareUnavailableResponse, to: inbound) }
                     return
                 }
                 // Every upstream is down. Deciding what to answer needs a fresh
@@ -1914,10 +1996,10 @@ public final class HTTPSProxy: @unchecked Sendable {
             }
         }
         if ended {
-            // The upstream closed before a final header block; a partial header
-            // carries nothing safe to forward, so end the client's response here.
-            inbound.send(content: out.isEmpty ? nil : out, contentContext: .finalMessage, isComplete: true,
-                         completion: .idempotent)
+            // The upstream closed before a final header block. A partial header
+            // carries nothing safe to forward, so the visitor gets the 502.
+            out.append(Data(Self.shareUnavailableResponse.utf8))
+            inbound.send(content: out, contentContext: .finalMessage, isComplete: true, completion: .idempotent)
             upstream.cancel()
             return
         }
