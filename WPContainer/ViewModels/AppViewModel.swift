@@ -84,7 +84,7 @@ public final class AppViewModel {
     /// The site the export sheet exports.
     public var exportSiteTarget: Site?
     public var presentingImportSite = false
-    /// An archive dropped on the window, opened by the import sheet when it appears.
+    /// A .zip dropped on the main window's panel, which the import sheet opens with.
     public var pendingImportArchive: URL?
 
     /// Whether the pre-import database backup was successfully restored after

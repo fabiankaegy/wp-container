@@ -53,21 +53,7 @@ struct SiteDetailView: View {
         } isTargeted: { importDropTargeted = $0 }
         .overlay {
             if importDropTargeted {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Theme.accent.opacity(0.10))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .strokeBorder(Theme.accent, style: StrokeStyle(lineWidth: 2, dash: [8]))
-                    )
-                    .overlay {
-                        Label("Drop to import database", systemImage: "arrow.down.doc.fill")
-                            .font(.headline)
-                            .foregroundStyle(Theme.accent)
-                            .padding(14)
-                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    }
-                    .allowsHitTesting(false)
-                    .padding(8)
+                ImportDropOverlay()
             }
         }
         .animation(.easeOut(duration: 0.12), value: importDropTargeted)

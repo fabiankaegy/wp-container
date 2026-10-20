@@ -18,6 +18,8 @@ struct MainWindow: View {
     /// The default width the divider snaps to (with a haptic tick) when dragged
     /// within `snapDistance` points of it.
     private let sidebarDefault: Double = 272
+    /// Whether a dragged file is hovering the panel.
+    @State private var archiveDropTargeted = false
 
     var body: some View {
         @Bindable var vm = vm
@@ -74,6 +76,21 @@ struct MainWindow: View {
     private var panel: some View {
         detail
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            // A .zip site export dropped anywhere on the panel opens the Import
+            // Site sheet with it. The site detail pane handles drops on itself.
+            .dropDestination(for: URL.self) { urls, _ in
+                guard !isOnboarding,
+                      let archive = urls.first(where: { $0.pathExtension.lowercased() == "zip" }) else { return false }
+                vm.pendingImportArchive = archive
+                vm.presentingImportSite = true
+                return true
+            } isTargeted: { archiveDropTargeted = $0 }
+            .overlay {
+                if archiveDropTargeted && !isOnboarding {
+                    ImportDropOverlay()
+                }
+            }
+            .animation(.easeOut(duration: 0.12), value: archiveDropTargeted)
             .background(Theme.panel, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -87,6 +104,12 @@ struct MainWindow: View {
                 }
             }
             .shadow(color: .black.opacity(0.28), radius: 12, y: 3)
+    }
+
+    /// Whether the panel shows onboarding while the container system is not ready.
+    private var isOnboarding: Bool {
+        guard let status = vm.systemStatus else { return false }
+        return !status.isReady
     }
 
     @ViewBuilder
@@ -181,6 +204,29 @@ struct MainWindow: View {
             .padding(16)
             .transition(.move(edge: .top).combined(with: .opacity))
         }
+    }
+}
+
+// MARK: - Drop overlay
+
+/// The dashed highlight shown while a file is dragged over a drop target.
+struct ImportDropOverlay: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(Theme.accent.opacity(0.10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Theme.accent, style: StrokeStyle(lineWidth: 2, dash: [8]))
+            )
+            .overlay {
+                Label("Drop to import", systemImage: "arrow.down.doc.fill")
+                    .font(.headline)
+                    .foregroundStyle(Theme.accent)
+                    .padding(14)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            .allowsHitTesting(false)
+            .padding(8)
     }
 }
 
