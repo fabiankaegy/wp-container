@@ -20,12 +20,14 @@ public struct ShareStatus: Codable, Sendable, Equatable {
     public var providerExecutable: String?
     public var error: String?
     public var updatedAt: Date
+    /// The `requestID` of the desired settings this status reflects.
+    public var requestID: UUID?
 
     public init(instanceID: UUID, slug: String, state: State, url: String? = nil,
                 provider: String, hostname: String? = nil, temporary: Bool = false,
                 listenerPort: UInt16? = nil, pid: Int32? = nil,
                 providerExecutable: String? = nil, error: String? = nil,
-                updatedAt: Date = Date()) {
+                updatedAt: Date = Date(), requestID: UUID? = nil) {
         self.instanceID = instanceID
         self.slug = slug
         self.state = state
@@ -38,5 +40,6 @@ public struct ShareStatus: Codable, Sendable, Equatable {
         self.providerExecutable = providerExecutable
         self.error = error
         self.updatedAt = updatedAt
+        self.requestID = requestID
     }
 }

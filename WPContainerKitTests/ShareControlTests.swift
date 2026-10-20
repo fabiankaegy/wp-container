@@ -78,7 +78,8 @@ final class ShareControlTests: XCTestCase {
     }
 
     func testRequestRefusesHostnameInUseByLiveStatus() async throws {
-        let other = try await seed("other-site")
+        let other = try await seed("other-site",
+            share: ShareSettings(username: "share", password: "x", active: true))
         let site = try await seed("my-site", port: 8882)
         ProxyControl.writeShares([ShareStatus(instanceID: other.id, slug: "other-site", state: .live,
                                               provider: "ngrok", hostname: "free.example.com")], file: statusFile)
@@ -178,34 +179,81 @@ final class ShareControlTests: XCTestCase {
 
     func testWaitReturnsLiveStatus() async throws {
         let id = UUID()
+        let requestID = UUID()
         let control = makeControl()
         let file = statusFile!
         let writer = Task {
             try await Task.sleep(for: .milliseconds(300))
             ProxyControl.writeShares([ShareStatus(instanceID: id, slug: "my-site", state: .live,
-                                                  url: "https://my-site.example.com", provider: "ngrok")], file: file)
+                                                  url: "https://my-site.example.com", provider: "ngrok",
+                                                  requestID: requestID)], file: file)
         }
-        let status = try await control.waitForStatus(instanceID: id, timeout: .seconds(5))
+        let status = try await control.waitForStatus(instanceID: id, requestID: requestID, timeout: .seconds(5))
         XCTAssertEqual(status.state, .live)
         try await writer.value
     }
 
-    func testWaitIgnoresStatusFromBeforeTheRequest() async throws {
+    func testWaitIgnoresStatusOfAnEarlierRequest() async throws {
         let id = UUID()
         let control = makeControl()
-        let old = ShareStatus(instanceID: id, slug: "my-site", state: .down, provider: "ngrok",
-                              error: "old", updatedAt: Date().addingTimeInterval(-30))
-        ProxyControl.writeShares([old], file: statusFile)
+        ProxyControl.writeShares([ShareStatus(instanceID: id, slug: "my-site", state: .down, provider: "ngrok",
+                                              error: "old", requestID: UUID())], file: statusFile)
         do {
-            _ = try await control.waitForStatus(instanceID: id, timeout: .milliseconds(700))
+            _ = try await control.waitForStatus(instanceID: id, requestID: UUID(), timeout: .milliseconds(700))
             XCTFail("expected timedOut")
         } catch ShareError.timedOut {
         }
     }
 
+    func testRerequestOnLiveShareReturnsPromptlyOnceRepublished() async throws {
+        let site = try await seed("my-site")
+        let control = makeControl()
+        let first = try await control.request(instanceID: site.id, ShareRequest())
+        ProxyControl.writeShares([ShareStatus(instanceID: site.id, slug: "my-site", state: .live, provider: "ngrok",
+                                              requestID: first.requestID)], file: statusFile)
+        let second = try await control.request(instanceID: site.id, ShareRequest(addAllow: ["/hook"]))
+        let file = statusFile!
+        let id = site.id
+        let writer = Task {
+            try await Task.sleep(for: .milliseconds(300))
+            ProxyControl.writeShares([ShareStatus(instanceID: id, slug: "my-site", state: .live, provider: "ngrok",
+                                                  requestID: second.requestID)], file: file)
+        }
+        let started = Date()
+        let status = try await control.waitForStatus(instanceID: site.id, requestID: second.requestID, timeout: .seconds(5))
+        XCTAssertEqual(status.requestID, second.requestID)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+        try await writer.value
+    }
+
+    func testStatusOfStoppedShareDoesNotClash() async throws {
+        let other = try await seed("other-site",
+            share: ShareSettings(username: "share", password: "x", active: false))
+        let site = try await seed("my-site", port: 8882)
+        ProxyControl.writeShares([ShareStatus(instanceID: other.id, slug: "other-site", state: .live,
+                                              provider: "ngrok", hostname: "free.example.com")], file: statusFile)
+        let saved = try await makeControl().request(instanceID: site.id,
+                                                    ShareRequest(hostname: .some("free.example.com")))
+        XCTAssertEqual(saved.hostname, "free.example.com")
+    }
+
+    func testClashFromInheritedHostnameIsRefusedAndNothingWritten() async throws {
+        _ = try await seed("other-site",
+            share: ShareSettings(hostname: "share.example.com", username: "share", password: "x", active: true))
+        let site = try await seed("my-site", port: 8882,
+            share: ShareSettings(hostname: "share.example.com", username: "share", password: "y"))
+        do {
+            _ = try await makeControl().request(instanceID: site.id, ShareRequest())
+            XCTFail("expected hostnameInUse")
+        } catch ShareError.hostnameInUse {
+        }
+        let stored = try await persistence.load().sites.first { $0.id == site.id }?.share
+        XCTAssertEqual(stored?.active, false)
+    }
+
     func testWaitTimesOut() async throws {
         do {
-            _ = try await makeControl().waitForStatus(instanceID: UUID(), timeout: .milliseconds(600))
+            _ = try await makeControl().waitForStatus(instanceID: UUID(), requestID: nil, timeout: .milliseconds(600))
             XCTFail("expected timedOut")
         } catch ShareError.timedOut {
         }
@@ -214,7 +262,7 @@ final class ShareControlTests: XCTestCase {
     func testWaitFailsFastWhenProxyDisappears() async throws {
         let control = makeControl(running: false)
         do {
-            _ = try await control.waitForStatus(instanceID: UUID(), timeout: .seconds(5))
+            _ = try await control.waitForStatus(instanceID: UUID(), requestID: nil, timeout: .seconds(5))
             XCTFail("expected proxyNotRunning")
         } catch ShareError.proxyNotRunning {
         }

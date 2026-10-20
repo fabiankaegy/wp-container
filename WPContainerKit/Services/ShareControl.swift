@@ -55,44 +55,29 @@ public struct ShareControl: Sendable {
         if let hostname = req.hostname, let value = hostname {
             _ = try ShareProviders.fixedURL(forHostname: value)
         }
-        var allow: [ShareException] = []
-        for text in req.addAllow { allow.append(try ShareException(parsing: text)) }
+        let allow = try req.addAllow.map { try ShareException(parsing: $0) }
 
-        var settings = instance.share ?? ShareSettings.generated()
-        if settings.password.isEmpty || req.resetPassword {
-            settings.password = ShareSettings.generated().password
+        let requestID = UUID()
+        let outcome = Outcome()
+        try await persistence.mutateIfChanged { env in
+            Self.merge(req, allow: allow, requestID: requestID, into: instanceID, in: &env,
+                       statuses: ProxyControl.shares(file: statusFile), outcome: outcome)
         }
-        if let provider = req.provider { settings.provider = provider }
-        if let hostname = req.hostname { settings.hostname = hostname }
-        if req.clearAllow { settings.allow = [] }
-        for exception in allow where !settings.allow.contains(exception) {
-            settings.allow.append(exception)
-        }
-        settings.active = true
-        settings.authDisabled = req.noAuth
-        settings.requestID = UUID()
-
-        if let hostname = settings.hostname {
-            try checkHostnameClash(hostname, instanceID: instanceID, among: instances)
-        }
-
-        let saved = settings
-        try await persistence.mutate { env in Self.apply(saved, to: instanceID, in: &env) }
+        if let error = outcome.error { throw error }
+        guard let saved = outcome.settings else { throw ShareError.instanceNotFound(instanceID) }
         return saved
     }
 
-    /// Polls until the instance's status is `live` or `down` and was written at or after `since`
-    /// (default: now), so a status left by an earlier attempt is ignored. Status timestamps carry
-    /// whole-second precision. Callers that want the strictest match pass the time captured before `request`.
-    public func waitForStatus(instanceID: UUID, since: Date = Date(),
+    /// Polls until the instance publishes a `live` or `down` status for `requestID`, the id
+    /// `request` returned in its settings. Statuses of earlier requests are ignored.
+    public func waitForStatus(instanceID: UUID, requestID: UUID?,
                               timeout: Duration = .seconds(45)) async throws -> ShareStatus {
-        let floor = Date(timeIntervalSince1970: since.timeIntervalSince1970.rounded(.down))
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
         while true {
             let statuses = ProxyControl.shares(file: statusFile)
             if let status = statuses.first(where: { $0.instanceID == instanceID }),
-               status.state != .starting, status.updatedAt >= floor {
+               status.state != .starting, status.requestID == requestID {
                 return status
             }
             guard proxyRunning() else { throw ShareError.proxyNotRunning }
@@ -130,23 +115,67 @@ public struct ShareControl: Sendable {
         try await persistence.mutate { env in env.shareDefaultProvider = name }
     }
 
-    private func checkHostnameClash(_ hostname: String, instanceID: UUID,
-                                    among instances: [any RunnableInstance]) throws {
-        let wanted = hostname.lowercased()
-        let statuses = ProxyControl.shares(file: statusFile)
-        for status in statuses where status.instanceID != instanceID && status.state != .down {
-            guard status.hostname?.lowercased() == wanted else { continue }
-            let configured = instances.first { $0.instanceID == status.instanceID }?.share?.hostname
-            throw ShareError.hostnameInUse(hostname: hostname, by: status.slug, providerAssigned: configured == nil)
-        }
-        for other in instances where other.instanceID != instanceID {
-            guard let share = other.share, share.active, share.hostname?.lowercased() == wanted else { continue }
-            throw ShareError.hostnameInUse(hostname: hostname, by: other.containerSlug, providerAssigned: false)
-        }
+    /// Result of the merge, which runs on the store as it is when the lock is held.
+    private final class Outcome: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storedError: ShareError?
+        private var storedSettings: ShareSettings?
+
+        var error: ShareError? { lock.withLock { storedError } }
+        var settings: ShareSettings? { lock.withLock { storedSettings } }
+
+        func fail(_ error: ShareError) { lock.withLock { storedError = error } }
+        func succeed(_ settings: ShareSettings) { lock.withLock { storedSettings = settings } }
     }
 
     private static func instances(in envelope: StoreEnvelope) -> [any RunnableInstance] {
         envelope.sites.map { $0 as any RunnableInstance } + envelope.envs.map { $0 as any RunnableInstance }
+    }
+
+    private static func merge(_ req: ShareRequest, allow: [ShareException], requestID: UUID,
+                              into id: UUID, in envelope: inout StoreEnvelope,
+                              statuses: [ShareStatus], outcome: Outcome) -> Bool {
+        let all = instances(in: envelope)
+        guard let instance = all.first(where: { $0.instanceID == id }) else { return false }
+        var settings = instance.share ?? ShareSettings.generated()
+        if settings.password.isEmpty || req.resetPassword {
+            settings.password = ShareSettings.generated().password
+        }
+        if let provider = req.provider { settings.provider = provider }
+        if let hostname = req.hostname { settings.hostname = hostname }
+        if req.clearAllow { settings.allow = [] }
+        for exception in allow where !settings.allow.contains(exception) {
+            settings.allow.append(exception)
+        }
+        settings.active = true
+        settings.authDisabled = req.noAuth
+        settings.requestID = requestID
+        if let hostname = settings.hostname,
+           let clash = hostnameClash(hostname, instanceID: id, among: all, statuses: statuses) {
+            outcome.fail(clash)
+            return false
+        }
+        apply(settings, to: id, in: &envelope)
+        outcome.succeed(settings)
+        return true
+    }
+
+    /// The error for another active share that holds `hostname`, from its published status or
+    /// its configured hostname.
+    private static func hostnameClash(_ hostname: String, instanceID: UUID, among instances: [any RunnableInstance],
+                                      statuses: [ShareStatus]) -> ShareError? {
+        let wanted = hostname.lowercased()
+        for status in statuses where status.instanceID != instanceID && status.state != .down {
+            guard status.hostname?.lowercased() == wanted else { continue }
+            let holder = instances.first { $0.instanceID == status.instanceID }
+            guard holder?.share?.active == true else { continue }
+            return .hostnameInUse(hostname: hostname, by: status.slug, providerAssigned: holder?.share?.hostname == nil)
+        }
+        for other in instances where other.instanceID != instanceID {
+            guard let share = other.share, share.active, share.hostname?.lowercased() == wanted else { continue }
+            return .hostnameInUse(hostname: hostname, by: other.containerSlug, providerAssigned: false)
+        }
+        return nil
     }
 
     private static func apply(_ settings: ShareSettings, to id: UUID, in envelope: inout StoreEnvelope) {

@@ -534,6 +534,25 @@ final class ShareCoordinatorTests: XCTestCase {
         XCTAssertEqual(statuses().first?.state, .live)
     }
 
+    func testGateChangeRepublishesWithTheNewRequestID() async throws {
+        let first = UUID()
+        let second = UUID()
+        var share = activeShare(provider: "fixture")
+        share.requestID = first
+        let site = makeSite("my-site", share: share)
+        try await save([site])
+        let coordinator = makeCoordinator()
+        try await reconcile(coordinator, running: ["my-site"])
+        XCTAssertEqual(statuses().first?.requestID, first)
+
+        try await setShare(site.id) { $0.requestID = second }
+        try await reconcile(coordinator, running: ["my-site"])
+
+        XCTAssertEqual(launcher.launches.count, 1)
+        XCTAssertEqual(statuses().first?.state, .live)
+        XCTAssertEqual(statuses().first?.requestID, second)
+    }
+
     func testHostnameChangeRestartsTheProvider() async throws {
         let site = makeSite("my-site", share: activeShare(provider: "fixture", hostname: "a.example.com"))
         launcher.urls = ["my-site": "https://a.example.com"]

@@ -351,6 +351,7 @@ public actor ShareCoordinator {
         guard var runtime = runtimes[id], let url = runtime.url else { return }
         runtime.desired = desired
         runtime.instance = instance
+        runtime.updatedAt = Date()
         host?.updateShareConfig(instanceID: id, config: Self.gateConfig(desired, publicOrigin: url))
         do {
             try SharePHPService.activate(for: instance, publicOrigin: url)
@@ -665,7 +666,7 @@ public actor ShareCoordinator {
                            temporary: runtime.temporary, listenerPort: runtime.listenerPort,
                            pid: runtime.handle?.pid, providerExecutable: runtime.executable,
                            error: messages.isEmpty ? nil : messages.joined(separator: "\n"),
-                           updatedAt: runtime.updatedAt)
+                           updatedAt: runtime.updatedAt, requestID: runtime.desired.requestID)
     }
 
     // MARK: - Provider pids
