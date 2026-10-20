@@ -172,7 +172,7 @@ func failCommand(_ error: Error, json: Bool) -> ExitCode {
     return ExitCode.failure
 }
 
-private func humanText(_ error: Error) -> String {
+func humanText(_ error: Error) -> String {
     if let e = error as? ContainerCLIError { return e.description }
     if let e = error as? LifecycleError { return e.description }
     if let e = error as? GitError { return e.description }
@@ -184,7 +184,7 @@ private func humanText(_ error: Error) -> String {
 }
 
 /// The stable `error` code for typed errors that carry one.
-private func errorCode(_ error: Error) -> String? {
+func errorCode(_ error: Error) -> String? {
     guard let archiveError = error as? SiteArchiveError else { return nil }
     switch archiveError {
     case .unsupportedSchema: return "unsupported_schema"

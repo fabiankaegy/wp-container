@@ -51,13 +51,8 @@ struct ExportCommand: AsyncParsableCommand {
             try await ctx.ensureRunning(resolved, envelope: envelope, noStart: noStart)
 
             let fileName = SiteArchiveService.defaultFileName(slug: siteRecord.slug, date: Date())
-            var destination = URL(fileURLWithPath: (output.map { ($0 as NSString).expandingTildeInPath } ?? fileName))
-                .standardizedFileURL
-            // An existing directory receives the archive under its default name.
-            var isDirectory: ObjCBool = false
-            if FileManager.default.fileExists(atPath: destination.path, isDirectory: &isDirectory), isDirectory.boolValue {
-                destination.appendPathComponent(fileName)
-            }
+            let destination = archiveDestination(output.map { ($0 as NSString).expandingTildeInPath } ?? fileName,
+                                                 fileName: fileName)
             let excludes = (noDefaultExcludes ? [] : SiteArchiveService.defaultExcludes) + exclude
 
             let service = SiteArchiveService(cli: ctx.cli, lifecycle: ctx.lifecycle, persistence: ctx.persistence)
@@ -193,6 +188,16 @@ private struct SiteImportResultJSON: Encodable {
     let site: SiteJSON
     let warnings: [String]
     let replacements: Int
+}
+
+/// An existing directory receives the archive under `fileName`.
+func archiveDestination(_ path: String, fileName: String) -> URL {
+    var destination = URL(fileURLWithPath: path).standardizedFileURL
+    var isDirectory: ObjCBool = false
+    if FileManager.default.fileExists(atPath: destination.path, isDirectory: &isDirectory), isDirectory.boolValue {
+        destination.appendPathComponent(fileName)
+    }
+    return destination
 }
 
 private func writeStderr(_ text: String) {

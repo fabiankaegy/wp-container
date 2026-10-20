@@ -156,5 +156,21 @@ enum MCPTools {
                 "create_admin": bool("Create/reset the local admin/password login after import (default true)."),
                 "source_url": str("Trust this URL as the dump's source instead of the detected `home` option."),
              ], required: ["file"])),
+        Tool(name: "site_export",
+             description: "Export a site to a portable .zip archive holding its database, its wordpress/ folder (docroot mounts copied in) and its environment settings. Auto-starts the site if it isn't running. Default excludes (.git, .svn, .DS_Store, __MACOSX, node_modules, bower_components) always apply; `exclude` adds more. Refuses to overwrite an existing archive unless force is true. No streaming progress: returns the final summary (archive path, size in bytes, manifest, warnings).",
+             inputSchema: obj([
+                "slug": str("Site slug (defaults to the scoped site). Worktree environments can't be exported."),
+                "output": str("Absolute path of the .zip to write, or an existing directory to receive <slug>-<yyyyMMdd>.zip."),
+                "exclude": strArray("Extra file or folder names to leave out, added to the default excludes."),
+                "force": bool("Overwrite an existing archive at `output` (default false)."),
+             ], required: ["output"])),
+        Tool(name: "site_import",
+             description: "Create a NEW, separate site from a .zip made by site_export: creates the site folder and record, extracts the files, starts the site, imports the database and migrates its URLs. Users are kept as they were. This MCP session stays scoped to its current site; use the returned slug with a new session to work on the imported site. A hosts-file failure while applying a custom domain is reported as a warning, not an error. A failure removes the partly imported site. No streaming progress: returns {slug, url, warnings}.",
+             inputSchema: obj([
+                "file": str("Absolute path to a .zip made by site_export."),
+                "name": str("Name for the new site (default: the exported site's name)."),
+                "domain": str("Custom domain for the new site, e.g. mysite.local. Omit to keep the archive's domain."),
+                "no_domain": bool("Give the new site no custom domain. Cannot be combined with `domain`."),
+             ], required: ["file"])),
     ]
 }
