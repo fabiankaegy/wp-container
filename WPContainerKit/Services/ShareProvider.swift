@@ -282,7 +282,7 @@ public struct CloudflaredProvider: ShareProvider {
 /// A user-supplied executable that prints its public URL on stdout.
 public struct ScriptProvider: ShareProvider {
     public let name: String
-    public let randomURLsAreTemporary = false
+    public let randomURLsAreTemporary = true
 
     private let executable: URL
 

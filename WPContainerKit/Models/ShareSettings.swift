@@ -170,6 +170,10 @@ public enum ShareError: Error, Sendable, CustomStringConvertible {
     case cancelled
     /// No site or worktree env has this id.
     case instanceNotFound(UUID)
+    /// The instance stopped before its share could start.
+    case instanceNotRunning
+    /// The running proxy host was built without sharing support.
+    case proxyTooOld
 
     public var description: String {
         switch self {
@@ -213,6 +217,10 @@ public enum ShareError: Error, Sendable, CustomStringConvertible {
             return "Sharing was stopped."
         case .instanceNotFound(let id):
             return "No site or environment with id \(id.uuidString) exists."
+        case .instanceNotRunning:
+            return "The site isn't running."
+        case .proxyTooOld:
+            return "The running WP Container proxy doesn't support sharing; update or quit the app, or run `wp-container proxy serve` from this build."
         case .providerStopped(let status, let tail):
             return "The share provider exited with status \(status)." + Self.formatTail(tail)
         case .hostnameMismatch(let expected, let got):

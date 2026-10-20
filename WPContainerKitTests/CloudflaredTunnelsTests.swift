@@ -186,6 +186,39 @@ final class CloudflaredTunnelsTests: XCTestCase {
         XCTAssertEqual(t.records(), [])
     }
 
+    func testHostnameRoutedBeforeIsOverwrittenAfterCleanup() async throws {
+        let t = try tunnels()
+        try await t.ensure(instanceID: id, tunnelName: tunnel, hostname: host)
+        _ = await t.cleanup(t.records()[0])
+        XCTAssertEqual(t.routedHostnames(), [host])
+        try? FileManager.default.removeItem(at: log)
+
+        try await t.ensure(instanceID: id, tunnelName: tunnel, hostname: host)
+
+        XCTAssertEqual(calls(), ["tunnel create wpc-my-site", "tunnel route dns --overwrite-dns wpc-my-site share.example.com"])
+        XCTAssertEqual(t.records(), [CloudflareTunnelRecord(instanceID: id, tunnelName: tunnel, hostname: host)])
+        XCTAssertEqual(t.routedHostnames(), [host])
+    }
+
+    func testOtherHostnameIsNotOverwritten() async throws {
+        let t = try tunnels()
+        try await t.ensure(instanceID: id, tunnelName: tunnel, hostname: host)
+        _ = await t.cleanup(t.records()[0])
+        try? FileManager.default.removeItem(at: log)
+
+        try await t.ensure(instanceID: id, tunnelName: tunnel, hostname: "other.example.com")
+
+        XCTAssertEqual(calls().last, "tunnel route dns wpc-my-site other.example.com")
+    }
+
+    func testLegacyRegistryArrayIsRead() throws {
+        let t = try tunnels()
+        let record = CloudflareTunnelRecord(instanceID: id, tunnelName: tunnel, hostname: host)
+        try JSONEncoder().encode([record]).write(to: registry)
+        XCTAssertEqual(t.records(), [record])
+        XCTAssertEqual(t.routedHostnames(), [host])
+    }
+
     func testTunnelNameForSlug() {
         XCTAssertEqual(CloudflaredTunnels.tunnelName(for: "my-site"), "wpc-my-site")
     }

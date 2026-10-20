@@ -309,10 +309,103 @@ final class ShareControlTests: XCTestCase {
         try await stopper.value
     }
 
+    func testRequestFailsFastWhenTheProxyCannotShare() async throws {
+        let site = try await seed("my-site")
+        let control = makeControl()
+        try FileManager.default.removeItem(at: statusFile)
+        do {
+            _ = try await control.request(instanceID: site.id, ShareRequest())
+            XCTFail("expected proxyTooOld")
+        } catch ShareError.proxyTooOld {
+        }
+        let stored = try await persistence.load().sites[0].share
+        XCTAssertNil(stored)
+        XCTAssertTrue(ShareError.proxyTooOld.description.contains("doesn't support sharing"))
+    }
+
+    func testValidateChecksWithoutWriting() async throws {
+        let site = try await seed("my-site")
+        let control = makeControl()
+        try await control.validate(instanceID: site.id, ShareRequest(provider: "cloudflared", addAllow: ["/hook"]))
+        let stored = try await persistence.load().sites[0].share
+        XCTAssertNil(stored)
+
+        let invalid: [ShareRequest] = [
+            ShareRequest(provider: "no-such-provider"),
+            ShareRequest(hostname: .some("not a host")),
+            ShareRequest(addAllow: ["hook"]),
+        ]
+        for request in invalid {
+            do {
+                try await control.validate(instanceID: site.id, request)
+                XCTFail("expected a validation error")
+            } catch is ShareError {
+            }
+        }
+        let subdomain = try await seed("network", port: 8882, networkType: .subdomain)
+        do {
+            try await control.validate(instanceID: subdomain.id, ShareRequest())
+            XCTFail("expected subdomainMultisite")
+        } catch ShareError.subdomainMultisite {
+        }
+        do {
+            try await makeControl(running: false).validate(instanceID: site.id, ShareRequest())
+            XCTFail("expected proxyNotRunning")
+        } catch ShareError.proxyNotRunning {
+        }
+    }
+
+    func testListOmitsStatusesWhileNoProxyRuns() async throws {
+        let site = try await seed("my-site")
+        _ = try await makeControl().request(instanceID: site.id, ShareRequest())
+        ProxyControl.writeShares([ShareStatus(instanceID: site.id, slug: "my-site", state: .live,
+                                              provider: "ngrok")], file: statusFile)
+        let rows = try await makeControl(running: false).list()
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertNil(rows[0].status)
+    }
+
+    func testListedState() {
+        let live = ShareStatus(instanceID: UUID(), slug: "my-site", state: .live, provider: "ngrok")
+        let down = ShareControl.listedState(active: true, status: nil, proxyRunning: false)
+        XCTAssertEqual(down.state, "down")
+        XCTAssertEqual(down.error, ShareControl.noProxyMessage)
+        XCTAssertTrue(ShareControl.noProxyMessage.contains("No proxy host is running"))
+        XCTAssertEqual(ShareControl.listedState(active: true, status: nil, proxyRunning: true).state, "starting")
+        XCTAssertEqual(ShareControl.listedState(active: true, status: live, proxyRunning: true).state, "live")
+        XCTAssertEqual(ShareControl.listedState(active: false, status: nil, proxyRunning: false).state, "inactive")
+    }
+
+    func testWaitReturnsADownPublishedBeforeTheShareWasCleared() async throws {
+        let site = try await seed("my-site")
+        let control = makeControl()
+        let settings = try await control.request(instanceID: site.id, ShareRequest())
+        ProxyControl.writeShares([ShareStatus(instanceID: site.id, slug: "my-site", state: .down, provider: "ngrok",
+                                              error: "The site isn't running.", requestID: settings.requestID)],
+                                 file: statusFile)
+        try await control.stop(instanceID: site.id)
+
+        let status = try await control.waitForStatus(instanceID: site.id, requestID: settings.requestID,
+                                                     timeout: .seconds(2))
+        XCTAssertEqual(status.state, .down)
+        XCTAssertEqual(status.error, "The site isn't running.")
+    }
+
+    func testStoreIsReadableOnlyByTheUser() async throws {
+        let site = try await seed("my-site")
+        _ = try await makeControl().request(instanceID: site.id, ShareRequest())
+        let attributes = try FileManager.default.attributesOfItem(atPath: tempRoot.appendingPathComponent("sites.json").path)
+        XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+    }
+
     // MARK: - Helpers
 
+    /// A running proxy host keeps its status file present, so one is created here.
     private func makeControl(running: Bool = true) -> ShareControl {
-        ShareControl(persistence: persistence, statusFile: statusFile, proxyRunning: { running })
+        if running && !FileManager.default.fileExists(atPath: statusFile.path) {
+            ProxyControl.writeShares([], file: statusFile)
+        }
+        return ShareControl(persistence: persistence, statusFile: statusFile, proxyRunning: { running })
     }
 
     @discardableResult

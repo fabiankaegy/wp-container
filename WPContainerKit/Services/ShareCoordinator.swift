@@ -282,7 +282,7 @@ public actor ShareCoordinator {
     private func performReconcile(envelope: StoreEnvelope, routes: [String: HTTPSProxy.Route], running: Set<String>) async {
         guard !halted else { return }
         let instances: [any RunnableInstance] = envelope.sites.map { $0 } + envelope.envs.map { $0 }
-        cleanUpTunnels(instances: instances, envelope: envelope)
+        cleanUpTunnels(instances: instances)
 
         // Settings as read when deciding to clear them; a newer request is left alone.
         var cleared: [UUID: ShareSettings] = [:]
@@ -292,12 +292,22 @@ public actor ShareCoordinator {
                 await dropInactive(id, settings: instance.share)
                 continue
             }
+            let desired = Self.desired(for: instance, share: share, envelope: envelope)
             guard running.contains(instance.containerSlug) else {
-                cleared[id] = share
-                await tearDown(id)
+                // A request this coordinator has not answered yet gets a `down` status, so
+                // the client waiting on it learns why; an answered share just ends.
+                var answered = false
+                if let runtime = runtimes[id], runtime.desired.requestID == share.requestID {
+                    answered = runtime.phase == .live || (runtime.phase == .down && runtime.refusedSettings == nil)
+                }
+                if answered {
+                    cleared[id] = share
+                    await tearDown(id)
+                } else if await refuse(instance, desired: desired, share: share, error: .instanceNotRunning) {
+                    cleared[id] = share
+                }
                 continue
             }
-            let desired = Self.desired(for: instance, share: share, envelope: envelope)
             if instance.networkType.isSubdomain {
                 if await refuse(instance, desired: desired, share: share, error: .subdomainMultisite) {
                     cleared[id] = share
@@ -311,8 +321,9 @@ public actor ShareCoordinator {
         for id in Array(runtimes.keys) where !known.contains(id) {
             await tearDown(id)
         }
-        if !cleared.isEmpty { await clearDesired(cleared) }
+        // Published first, so a client that sees its share cleared also finds the reason.
         publish()
+        if !cleared.isEmpty { await clearDesired(cleared) }
     }
 
     private func reconcileActive(_ instance: any RunnableInstance, desired: Desired, routes: [String: HTTPSProxy.Route]) async {
@@ -643,11 +654,14 @@ public actor ShareCoordinator {
 
     // MARK: - Status file
 
-    /// Rewrites the status file when any published status changed.
+    /// Rewrites the status file when any published status changed or the file is missing.
+    /// The file is always present while this host serves, `[]` when nothing is shared, so
+    /// clients can tell a share-capable proxy host from an older one.
     private func publish() {
         let statuses = runtimes.compactMap { id, runtime in Self.status(id: id, runtime) }
             .sorted { ($0.slug, $0.instanceID.uuidString) < ($1.slug, $1.instanceID.uuidString) }
-        guard statuses != lastPublished else { return }
+        let fileExists = FileManager.default.fileExists(atPath: (statusFile ?? ProxyControl.sharesFileURL).path)
+        guard statuses != lastPublished || !fileExists else { return }
         lastPublished = statuses
         ProxyControl.writeShares(statuses, file: statusFile)
     }
@@ -695,7 +709,10 @@ public actor ShareCoordinator {
 
     private func performReap() async {
         halted = false
-        guard !hasReaped else { return }
+        guard !hasReaped else {
+            publish()
+            return
+        }
         hasReaped = true
 
         let recorded: [SharePIDRecord] = (try? Data(contentsOf: pidsFile))
@@ -785,11 +802,12 @@ public actor ShareCoordinator {
         }
     }
 
-    /// Starts cleanup of every recorded tunnel whose instance is gone, or whose instance
-    /// no longer wants that cloudflared hostname. A record stays while a share of its
-    /// instance still uses that tunnel, and while a deleted instance still has a share
-    /// being released; a later tick cleans it.
-    private func cleanUpTunnels(instances: [any RunnableInstance], envelope: StoreEnvelope) {
+    /// Starts cleanup of every recorded tunnel whose instance is gone, or whose instance's
+    /// hostname was cleared or changed. A provider change keeps the tunnel, so switching
+    /// back to cloudflared reuses it. A record stays while a share of its instance still
+    /// uses that tunnel, and while a deleted instance still has a share being released; a
+    /// later tick cleans it.
+    private func cleanUpTunnels(instances: [any RunnableInstance]) {
         guard let tunnels = makeTunnels() else { return }
         var byID: [UUID: any RunnableInstance] = [:]
         for instance in instances where byID[instance.instanceID] == nil {
@@ -802,7 +820,7 @@ public actor ShareCoordinator {
             if instance == nil, runtime != nil { continue }
             if let instance {
                 if let runtime, runtime.phase != .down, runtime.tunnelName == record.tunnelName { continue }
-                let wanted = Self.cloudflareHostname(of: instance, envelope: envelope)
+                let wanted = Self.normalizedHostname(instance.share?.hostname)
                 let isStale = wanted == nil || (record.hostname != nil && record.hostname != wanted)
                 guard isStale else { continue }
             }
@@ -824,11 +842,5 @@ public actor ShareCoordinator {
         guard let instanceID, !warnings.isEmpty, runtimes[instanceID] != nil else { return }
         runtimes[instanceID]?.warnings += warnings
         publish()
-    }
-
-    /// The fixed hostname the instance wants a named cloudflared tunnel for, if any.
-    private static func cloudflareHostname(of instance: any RunnableInstance, envelope: StoreEnvelope) -> String? {
-        guard envelope.effectiveProvider(for: instance.share) == "cloudflared" else { return nil }
-        return normalizedHostname(instance.share?.hostname)
     }
 }

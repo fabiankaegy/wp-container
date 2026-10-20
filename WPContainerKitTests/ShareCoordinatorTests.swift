@@ -449,6 +449,51 @@ final class ShareCoordinatorTests: XCTestCase {
         XCTAssertEqual(statuses(), [])
     }
 
+    func testReapPublishesAnEmptyStatusFileEveryTime() async throws {
+        let coordinator = makeCoordinator()
+        await coordinator.reapOrphans()
+        XCTAssertEqual(try String(contentsOf: statusFile, encoding: .utf8), "[]")
+
+        await coordinator.stopAll()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: statusFile.path))
+        await coordinator.reapOrphans()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: statusFile.path))
+    }
+
+    func testReconcileRestoresAMissingStatusFile() async throws {
+        try await save([makeSite("my-site", share: nil)])
+        let coordinator = makeCoordinator()
+        await coordinator.reapOrphans()
+        try FileManager.default.removeItem(at: statusFile)
+
+        try await reconcile(coordinator, running: [])
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: statusFile.path))
+    }
+
+    func testShareRequestedOnAStoppedInstanceIsReportedDown() async throws {
+        let request = UUID()
+        var share = activeShare(provider: "fixture")
+        share.requestID = request
+        let site = makeSite("my-site", share: share)
+        try await save([site])
+        let coordinator = makeCoordinator()
+
+        try await reconcile(coordinator, running: [])
+
+        let status = try XCTUnwrap(statuses().first)
+        XCTAssertEqual(status.state, .down)
+        XCTAssertEqual(status.requestID, request)
+        XCTAssertEqual(status.error, "The site isn't running.")
+        XCTAssertEqual(launcher.launches.count, 0)
+        let stored = try await persistence.load().sites.first?.share
+        XCTAssertEqual(stored?.active, false)
+
+        let control = ShareControl(persistence: persistence, statusFile: statusFile, proxyRunning: { true })
+        let answered = try await control.waitForStatus(instanceID: site.id, requestID: request, timeout: .seconds(2))
+        XCTAssertEqual(answered.state, .down)
+    }
+
     func testSubdomainMultisiteIsRefused() async throws {
         var share = activeShare(provider: "fixture")
         share.authDisabled = true
@@ -517,6 +562,45 @@ final class ShareCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(Set(cloudflaredCalls()), ["tunnel delete -f wpc-site-one", "tunnel delete -f wpc-site-two"])
         XCTAssertEqual(registry(), [records[2]])
+    }
+
+    func testProviderChangeKeepsTheTunnel() async throws {
+        // site-two follows the store default, ngrok.
+        let envelope = StoreEnvelope(sites: [
+            makeSite("site-one", port: 8881, share: inactiveShare(provider: "ngrok", hostname: "one.example.com")),
+            makeSite("site-two", port: 8882, share: inactiveShare(provider: nil, hostname: "two.example.com")),
+        ])
+        let records = [
+            CloudflareTunnelRecord(instanceID: envelope.sites[0].id, tunnelName: "wpc-site-one", hostname: "one.example.com"),
+            CloudflareTunnelRecord(instanceID: envelope.sites[1].id, tunnelName: "wpc-site-two", hostname: "two.example.com"),
+        ]
+        try JSONEncoder().encode(records).write(to: registryFile)
+        try await persistence.save(envelope)
+        let coordinator = makeCoordinator()
+
+        try await reconcile(coordinator, running: [])
+        try await reconcile(coordinator, running: [])
+
+        XCTAssertEqual(cloudflaredCalls(), [])
+        XCTAssertEqual(registry(), records)
+    }
+
+    func testReturningToAnEarlierHostnameOverwritesItsOwnDNSRecord() async throws {
+        let site = makeSite("my-site", share: activeShare(provider: "cloudflared", hostname: "a.example.com"))
+        launcher.urls = ["my-site": "https://a.example.com"]
+        try await save([site])
+        let coordinator = makeCoordinator()
+        try await reconcile(coordinator, running: ["my-site"])
+        launcher.urls = ["my-site": "https://b.example.com"]
+        try await setShare(site.id) { $0.hostname = "b.example.com" }
+        try await reconcile(coordinator, running: ["my-site"])
+
+        launcher.urls = ["my-site": "https://a.example.com"]
+        try await setShare(site.id) { $0.hostname = "a.example.com" }
+        try await reconcile(coordinator, running: ["my-site"])
+
+        XCTAssertEqual(statuses().first?.state, .live)
+        XCTAssertEqual(cloudflaredCalls().last, "tunnel route dns --overwrite-dns wpc-my-site a.example.com")
     }
 
     func testGateSettingsChangeUpdatesTheLiveListener() async throws {
@@ -709,7 +793,7 @@ final class ShareCoordinatorTests: XCTestCase {
         ShareSettings(provider: provider, hostname: hostname, username: "share", password: "secret-one", active: true)
     }
 
-    private func inactiveShare(provider: String, hostname: String?) -> ShareSettings {
+    private func inactiveShare(provider: String?, hostname: String?) -> ShareSettings {
         ShareSettings(provider: provider, hostname: hostname, username: "share", password: "secret-one")
     }
 
@@ -741,8 +825,7 @@ final class ShareCoordinatorTests: XCTestCase {
     }
 
     private func registry() -> [CloudflareTunnelRecord] {
-        guard let data = try? Data(contentsOf: registryFile) else { return [] }
-        return (try? JSONDecoder().decode([CloudflareTunnelRecord].self, from: data)) ?? []
+        CloudflaredTunnels(executable: cloudflared, registryFile: registryFile).records()
     }
 
     private func cloudflaredCalls() -> [String] {

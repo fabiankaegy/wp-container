@@ -239,6 +239,8 @@ public actor StorePersistence {
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(envelope)
         try data.write(to: fileURL, options: .atomic)
+        // The store holds share passwords, so only the user may read it.
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
     }
 
     /// Acquire an exclusive advisory lock for the duration of `body`.

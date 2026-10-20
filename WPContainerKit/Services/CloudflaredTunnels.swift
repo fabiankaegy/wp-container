@@ -17,8 +17,17 @@ public struct CloudflareTunnelRecord: Codable, Sendable, Equatable {
 ///
 /// Everything it creates is recorded in a registry file beside the proxy files, so a
 /// tunnel is still cleaned up after its instance is deleted from any surface, and only
-/// recorded tunnels are ever deleted.
+/// recorded tunnels are ever deleted. The registry also lists every hostname it routed:
+/// cloudflared cannot delete DNS records, so those CNAMEs outlive their tunnels, and only
+/// they may be pointed at a new tunnel.
 public struct CloudflaredTunnels: Sendable {
+    /// The registry file's contents.
+    private struct Registry: Codable {
+        var tunnels: [CloudflareTunnelRecord] = []
+        /// Hostnames whose DNS record WP Container created with `tunnel route dns`.
+        var routedHostnames: [String] = []
+    }
+
     private let executable: URL
     private let registryFile: URL
 
@@ -34,8 +43,8 @@ public struct CloudflaredTunnels: Sendable {
         "wpc-" + slug
     }
 
-    /// Creates the tunnel and its DNS route unless they are already recorded.
-    /// An existing DNS record for the hostname is never overwritten.
+    /// Creates the tunnel and its DNS route unless they are already recorded. An existing
+    /// DNS record for the hostname is overwritten only when WP Container routed it before.
     public func ensure(instanceID: UUID, tunnelName: String, hostname: String) async throws {
         try ShareProviders.validateTunnelName(tunnelName)
         guard ShareProviders.isValidDNSHost(hostname) else { throw ShareError.invalidShareHostname(hostname) }
@@ -55,30 +64,39 @@ public struct CloudflaredTunnels: Sendable {
             // A crash before this save leaves an unrecorded tunnel that WP Container never
             // deletes and that blocks the next create; the user removes it with
             // `cloudflared tunnel delete <tunnelName>`.
-            try update { all in
-                all.append(CloudflareTunnelRecord(instanceID: instanceID, tunnelName: tunnelName, hostname: nil))
+            try update { registry in
+                registry.tunnels.append(CloudflareTunnelRecord(instanceID: instanceID, tunnelName: tunnelName, hostname: nil))
             }
         } else if recorded?.hostname == hostname {
             return
         }
 
+        let ownsRecord = routedHostnames().contains(hostname)
+        let route = ownsRecord
+            ? ["tunnel", "route", "dns", "--overwrite-dns", tunnelName, hostname]
+            : ["tunnel", "route", "dns", tunnelName, hostname]
         do {
-            try await run(["tunnel", "route", "dns", tunnelName, hostname])
+            try await run(route)
         } catch ShareError.cloudflaredFailed(let command, let output) {
             let exists = output.contains("already exists")
             throw exists ? ShareError.dnsRecordExists(hostname) : ShareError.cloudflaredFailed(command: command, output: output)
         }
-        try update { all in
-            guard let i = all.firstIndex(where: { $0.instanceID == instanceID && $0.tunnelName == tunnelName }) else { return }
-            all[i].hostname = hostname
+        try update { registry in
+            if !registry.routedHostnames.contains(hostname) { registry.routedHostnames.append(hostname) }
+            guard let i = registry.tunnels.firstIndex(where: { $0.instanceID == instanceID && $0.tunnelName == tunnelName }) else {
+                return
+            }
+            registry.tunnels[i].hostname = hostname
         }
     }
 
     public func records() -> [CloudflareTunnelRecord] {
-        guard let data = try? Data(contentsOf: registryFile),
-              let decoded = try? JSONDecoder().decode([CloudflareTunnelRecord].self, from: data)
-        else { return [] }
-        return decoded
+        readRegistry().tunnels
+    }
+
+    /// Hostnames whose DNS record WP Container created, kept after their tunnels are deleted.
+    public func routedHostnames() -> [String] {
+        readRegistry().routedHostnames
     }
 
     /// Deletes a recorded tunnel and drops its record. cloudflared has no command that
@@ -94,7 +112,7 @@ public struct CloudflaredTunnels: Sendable {
             return ["Could not delete the Cloudflare tunnel \(record.tunnelName): \(error)"]
         }
         do {
-            try update { all in all.removeAll { $0 == record } }
+            try update { registry in registry.tunnels.removeAll { $0 == record } }
         } catch {
             return ["Deleted the Cloudflare tunnel \(record.tunnelName) but could not update the registry: \(error)"]
         }
@@ -112,12 +130,22 @@ public struct CloudflaredTunnels: Sendable {
         throw ShareError.cloudflaredFailed(command: arguments.prefix(while: { !$0.hasPrefix("-") }).joined(separator: " "), output: output)
     }
 
+    /// The registry, or an empty one when the file is missing or unreadable. A bare array
+    /// of tunnel records is read as a registry whose routed hostnames are theirs.
+    private func readRegistry() -> Registry {
+        guard let data = try? Data(contentsOf: registryFile) else { return Registry() }
+        let decoder = JSONDecoder()
+        if let registry = try? decoder.decode(Registry.self, from: data) { return registry }
+        guard let tunnels = try? decoder.decode([CloudflareTunnelRecord].self, from: data) else { return Registry() }
+        return Registry(tunnels: tunnels, routedHostnames: tunnels.compactMap(\.hostname))
+    }
+
     /// Applies `change` to a freshly read registry and writes it back atomically.
-    private func update(_ change: (inout [CloudflareTunnelRecord]) -> Void) throws {
-        var all = records()
-        change(&all)
+    private func update(_ change: (inout Registry) -> Void) throws {
+        var registry = readRegistry()
+        change(&registry)
         do {
-            let data = try JSONEncoder().encode(all)
+            let data = try JSONEncoder().encode(registry)
             try FileManager.default.createDirectory(at: registryFile.deletingLastPathComponent(), withIntermediateDirectories: true)
             try data.write(to: registryFile, options: .atomic)
         } catch {

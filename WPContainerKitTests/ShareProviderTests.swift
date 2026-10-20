@@ -131,6 +131,10 @@ final class ShareProviderTests: XCTestCase {
         XCTAssertNil(provider.publicURL(fromOutputLine: "starting"))
     }
 
+    func testScriptProviderURLsWithoutAHostnameAreTemporary() {
+        XCTAssertTrue(ScriptProvider(name: "custom", executable: dir).randomURLsAreTemporary)
+    }
+
     func testResolveCustomProviderByName() throws {
         let custom = dir.appendingPathComponent("custom-dir")
         try FileManager.default.createDirectory(at: custom, withIntermediateDirectories: true)
