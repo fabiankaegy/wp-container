@@ -109,8 +109,13 @@ public enum ShareProviders {
         let hasControl = text.unicodeScalars.contains { $0.properties.generalCategory == .control || $0.properties.isWhitespace }
         guard !hasControl, let parts = URLComponents(string: text) else { return nil }
         guard let scheme = parts.scheme?.lowercased(), schemes.contains(scheme) else { return nil }
-        guard parts.host?.isEmpty == false, let encodedHost = parts.percentEncodedHost, !encodedHost.contains("%") else { return nil }
-        let rawHost = encodedHost.lowercased()
+        guard parts.host?.isEmpty == false, !text.contains("%"), text.allSatisfy(\.isASCII) else { return nil }
+        // Foundation decodes punycode labels, so the host is read from the ASCII text itself.
+        let authority = text.drop { $0 != ":" }.dropFirst(3).prefix { !"/?#".contains($0) }
+        let hostAndPort = authority.hasPrefix("[")
+            ? authority.prefix { $0 != "]" } + "]"
+            : Substring(authority.prefix { $0 != ":" })
+        let rawHost = hostAndPort.lowercased()
         let host = rawHost.hasPrefix("[") && rawHost.hasSuffix("]") ? String(rawHost.dropFirst().dropLast()) : rawHost
         let isIPv6 = host.contains(":")
         let ipv6Chars = Set("0123456789abcdef:.")
