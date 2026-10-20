@@ -127,7 +127,7 @@ final class ShareProviderTests: XCTestCase {
             "WPC_SHARE_HOSTNAME": "",
             "WPC_SHARE_INSTANCE": "my-site",
         ])
-        XCTAssertEqual(provider.publicURL(fromOutputLine: "tunnel up at https://x.example.com/ now"), "https://x.example.com/")
+        XCTAssertEqual(provider.publicURL(fromOutputLine: "tunnel up at https://x.example.com/ now"), "https://x.example.com")
         XCTAssertNil(provider.publicURL(fromOutputLine: "starting"))
     }
 
