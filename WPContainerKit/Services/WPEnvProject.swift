@@ -44,12 +44,14 @@ public enum WPEnvSource: Sendable, Equatable {
     }
 
     /// The archive URL a `wp plugin|theme install` can fetch, or nil when the
-    /// source can't be installed from a single archive (a repo subfolder).
+    /// source can't be installed from a single archive (a repo subfolder). For
+    /// a `github.com/<owner>/<repo>/archive/` URL, wp-cli names the installed
+    /// folder `<repo>`.
     public var archiveURL: URL? {
         switch self {
         case .zip(let url): return url
         case .github(let owner, let repo, nil, let ref):
-            return URL(string: "https://codeload.github.com/\(owner)/\(repo)/zip/\(ref ?? "HEAD")")
+            return URL(string: "https://github.com/\(owner)/\(repo)/archive/\(ref ?? "HEAD").zip")
         default: return nil
         }
     }
@@ -170,10 +172,18 @@ public struct WPEnvPlan: Sendable {
     public var constants: [(name: String, value: String, raw: Bool)] = []
     public var warnings: [String] = []
 
+    /// Constants wp-container sets itself for the site's URL and database.
+    static let managedConstants: Set<String> = ["WP_HOME", "WP_SITEURL", "DB_NAME", "DB_USER", "DB_PASSWORD", "DB_HOST"]
+
     public init(project: WPEnvProject) {
         let root = SiteRecipe.wordpressContainerPath
         let fm = FileManager.default
         func exists(_ url: URL, _ label: String) -> Bool {
+            // A `:` would split the `-v host:container` mount argument.
+            guard !url.path.contains(":") else {
+                warnings.append("\(label) folder \(url.path) contains \":\", which can't be mounted; skipped.")
+                return false
+            }
             var isDirectory: ObjCBool = false
             if fm.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue { return true }
             warnings.append("\(label) folder \(url.path) doesn't exist; skipped.")
@@ -218,7 +228,12 @@ public struct WPEnvPlan: Sendable {
             }
         }
         for (path, raw) in project.mappings {
-            let clean = path.split(separator: "/").filter { $0 != ".." && $0 != "." }.joined(separator: "/")
+            let parts = path.split(separator: "/")
+            guard !parts.contains(".."), !path.contains(":") else {
+                warnings.append("mapping \"\(path)\" leaves the WordPress folder or contains \":\"; skipped.")
+                continue
+            }
+            let clean = parts.filter { $0 != "." }.joined(separator: "/")
             guard case .local(let url) = WPEnvSource.parse(raw, relativeTo: project.directory), !clean.isEmpty else {
                 warnings.append("mapping \"\(path)\" → \"\(raw)\" isn't a local folder; skipped.")
                 continue
@@ -226,7 +241,12 @@ public struct WPEnvPlan: Sendable {
             guard exists(url, "mapping") else { continue }
             mounts.append(Mount(hostPath: url.path, containerPath: "\(root)/\(clean)"))
         }
+        mounts = Self.ordered(mounts, warnings: &warnings)
         for (name, value) in project.config {
+            guard !Self.managedConstants.contains(name) else {
+                warnings.append("config \(name) is ignored: wp-container sets the site's URL and database itself.")
+                continue
+            }
             switch value {
             case .bool(let flag): constants.append((name, flag ? "true" : "false", true))
             case .number(let number): constants.append((name, number, true))
@@ -242,6 +262,27 @@ public struct WPEnvPlan: Sendable {
             default: warnings.append("\(key) is ignored: wp-container assigns ports itself.")
             }
         }
+    }
+
+    /// One mount per destination (the first wins), shallowest destination
+    /// first, so a folder mounted inside another mount lands on top of it.
+    static func ordered(_ mounts: [Mount], warnings: inout [String]) -> [Mount] {
+        var seen = Set<String>()
+        var unique: [Mount] = []
+        for mount in mounts {
+            guard seen.insert(mount.containerPath).inserted else {
+                warnings.append("\(mount.hostPath) maps to \(mount.containerPath), which is already mounted; skipped.")
+                continue
+            }
+            unique.append(mount)
+        }
+        return unique.enumerated()
+            .sorted { lhs, rhs in
+                let lhsDepth = lhs.element.containerPath.split(separator: "/").count
+                let rhsDepth = rhs.element.containerPath.split(separator: "/").count
+                return lhsDepth == rhsDepth ? lhs.offset < rhs.offset : lhsDepth < rhsDepth
+            }
+            .map(\.element)
     }
 
     /// `6.5.2` → `6.5`; `trunk`, `master` → nil.

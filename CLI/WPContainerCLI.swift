@@ -318,6 +318,7 @@ struct CreateCommand: AsyncParsableCommand {
             }) else {
                 throw CLIErrorJSON("no_free_port")
             }
+            let folderExisted = FileManager.default.fileExists(atPath: created.path.path)
             try SiteFolders.ensure(for: created)
             // Write the per-site wp-cli shim at <site>/wp (§2e).
             try? WPCLIShim.writeShim(for: created, siteRoot: created.path, slug: created.slug)
@@ -328,9 +329,21 @@ struct CreateCommand: AsyncParsableCommand {
                 return
             }
             if !output.json { emitLine("Created \(created.slug) at \(created.path.path) (port \(created.port)). Starting it to apply .wp-env.json…") }
-            try await ctx.ensureRunning(.site(created), envelope: updated)
-            guard let dbHost = try await ctx.cli.ipAddress(of: created.dbContainerName) else {
-                throw CLIErrorJSON("not_running", detail: "start \(created.slug) and re-create it")
+            // A site that doesn't start is removed, so re-running `create`
+            // reuses its name.
+            let dbHost: String
+            do {
+                try await ctx.ensureRunning(.site(created), envelope: updated)
+                guard let host = try await ctx.cli.ipAddress(of: created.dbContainerName) else {
+                    throw CLIErrorJSON("not_running", detail: "\(created.slug)'s database didn't come up")
+                }
+                dbHost = host
+            } catch {
+                await Self.discard(created, keepFolder: folderExisted, ctx: ctx)
+                if !output.json {
+                    FileHandle.standardError.write(Data("Removed \(created.slug): it didn't start, so .wp-env.json wasn't applied.\n".utf8))
+                }
+                throw error
             }
             let report = await WPEnvApplier.apply(plan, to: created, dbHost: dbHost, cli: ctx.cli)
             if output.json {
@@ -357,6 +370,15 @@ struct CreateCommand: AsyncParsableCommand {
 
     private static func expand(_ path: String) -> URL {
         URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
+    }
+
+    /// Removes a just-created site: its containers, store record, and
+    /// certificate hosts, and its folder unless that was on disk before.
+    private static func discard(_ site: Site, keepFolder: Bool, ctx: CLIContext) async {
+        await ctx.lifecycle.deleteContainers(site)
+        if !keepFolder { try? FileManager.default.trashItem(at: site.path, resultingItemURL: nil) }
+        _ = try? await ctx.persistence.mutate { store in store.sites.removeAll { $0.id == site.id } }
+        try? await CertificateAuthority().removeLeafCoverage(site.proxyHosts)
     }
 }
 

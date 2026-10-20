@@ -44,9 +44,9 @@ final class WPEnvProjectTests: XCTestCase {
 
     func testArchiveURLs() {
         XCTAssertEqual(WPEnvSource.github(owner: "example", repo: "plugin", path: nil, ref: nil).archiveURL?.absoluteString,
-                       "https://codeload.github.com/example/plugin/zip/HEAD")
+                       "https://github.com/example/plugin/archive/HEAD.zip")
         XCTAssertEqual(WPEnvSource.github(owner: "example", repo: "plugin", path: nil, ref: "v1.2").archiveURL?.absoluteString,
-                       "https://codeload.github.com/example/plugin/zip/v1.2")
+                       "https://github.com/example/plugin/archive/v1.2.zip")
         XCTAssertNil(WPEnvSource.github(owner: "example", repo: "mono", path: "plugins/one", ref: nil).archiveURL)
     }
 
@@ -92,24 +92,44 @@ final class WPEnvProjectTests: XCTestCase {
     func testLocalSourcesBecomeMounts() {
         let result = plan(["plugins": ["."], "themes": ["./mu-plugins"], "mappings": ["wp-content/mu-plugins": "./mu-plugins"]])
         XCTAssertEqual(result.mounts, [
+            Mount(hostPath: project.appendingPathComponent("mu-plugins").path, containerPath: "/var/www/html/wp-content/mu-plugins"),
             Mount(hostPath: project.path, containerPath: "/var/www/html/wp-content/plugins/example-plugin"),
             Mount(hostPath: project.appendingPathComponent("mu-plugins").path, containerPath: "/var/www/html/wp-content/themes/mu-plugins"),
-            Mount(hostPath: project.appendingPathComponent("mu-plugins").path, containerPath: "/var/www/html/wp-content/mu-plugins"),
         ])
         XCTAssertEqual(result.activatePlugins, ["example-plugin"])
     }
 
     func testMissingLocalFoldersAndEscapingMappingsAreSkipped() {
-        let result = plan(["plugins": ["./missing"], "mappings": ["../../etc": "./mu-plugins"]])
+        let result = plan(["plugins": ["./missing"],
+                           "mappings": ["../../etc": "./mu-plugins", "wp-content/../../etc": "./mu-plugins", "x:ro": "./mu-plugins"]])
         XCTAssertTrue(result.warnings.contains { $0.contains("missing") && $0.contains("doesn't exist") })
-        XCTAssertEqual(result.mounts.map(\.containerPath), ["/var/www/html/etc"])
+        XCTAssertEqual(result.warnings.filter { $0.contains("leaves the WordPress folder") }.count, 3)
+        XCTAssertEqual(result.mounts, [])
+    }
+
+    func testFoldersWithAColonAreSkipped() throws {
+        try FileManager.default.createDirectory(at: project.appendingPathComponent("a:b"), withIntermediateDirectories: true)
+        let result = plan(["plugins": ["./a:b"]])
+        XCTAssertEqual(result.mounts, [])
+        XCTAssertTrue(result.warnings.contains { $0.contains("can't be mounted") })
+    }
+
+    func testNestedMountsComeAfterTheirParentAndDuplicatesAreSkipped() throws {
+        try FileManager.default.createDirectory(at: project.appendingPathComponent("plugins"), withIntermediateDirectories: true)
+        let result = plan(["plugins": ["."],
+                           "mappings": ["wp-content/plugins": "./plugins", "wp-content/plugins/example-plugin": "./mu-plugins"]])
+        XCTAssertEqual(result.mounts, [
+            Mount(hostPath: project.appendingPathComponent("plugins").path, containerPath: "/var/www/html/wp-content/plugins"),
+            Mount(hostPath: project.path, containerPath: "/var/www/html/wp-content/plugins/example-plugin"),
+        ])
+        XCTAssertTrue(result.warnings.contains { $0.contains("already mounted") })
     }
 
     func testRemoteSourcesAreInstalled() {
         let result = plan(["plugins": ["example/plugin#v1", "https://example.com/two.zip", "example/mono/sub"],
                            "themes": ["https://example.com/theme.zip"]])
         XCTAssertEqual(result.installPlugins.map(\.absoluteString),
-                       ["https://codeload.github.com/example/plugin/zip/v1", "https://example.com/two.zip"])
+                       ["https://github.com/example/plugin/archive/v1.zip", "https://example.com/two.zip"])
         XCTAssertEqual(result.installThemes.map(\.absoluteString), ["https://example.com/theme.zip"])
         XCTAssertTrue(result.warnings.contains { $0.contains("example/mono/sub") })
     }
@@ -119,6 +139,13 @@ final class WPEnvProjectTests: XCTestCase {
         XCTAssertEqual(result.constants.map { "\($0.name)=\($0.value) raw:\($0.raw)" },
                        ["FLAG=true raw:true", "LEVEL=3 raw:true", "NAME=example raw:false"])
         XCTAssertTrue(result.warnings.contains { $0.contains("UNSET") })
+    }
+
+    func testURLAndDatabaseConstantsAreIgnored() {
+        let result = plan(["config": ["WP_HOME": "http://localhost:8888", "WP_SITEURL": "http://localhost:8888",
+                                      "DB_HOST": "mysql", "WP_DEBUG": true]])
+        XCTAssertEqual(result.constants.map(\.name), ["WP_DEBUG"])
+        XCTAssertEqual(result.warnings.filter { $0.contains("sets the site's URL and database") }.count, 3)
     }
 
     func testIgnoredKeysAreReported() {
