@@ -131,6 +131,10 @@ public enum ShareError: Error, Sendable, CustomStringConvertible {
     /// The provider's executable is not installed; `install` is the command that installs it.
     case providerMissingBinary(name: String, install: String)
     case ngrokNotAuthenticated
+    /// A fixed cloudflared hostname needs a named tunnel to route it.
+    case cloudflaredTunnelNameRequired
+    case invalidShareHostname(String)
+    case invalidTunnelName(String)
     /// The provider reported a public hostname other than the requested one.
     case hostnameMismatch(expected: String, got: String)
 
@@ -146,6 +150,12 @@ public enum ShareError: Error, Sendable, CustomStringConvertible {
             return "The share provider \(name) is not installed. Install it with: \(install)"
         case .ngrokNotAuthenticated:
             return "ngrok has no authtoken. Run: ngrok config add-authtoken <token>"
+        case .cloudflaredTunnelNameRequired:
+            return "A fixed cloudflared hostname needs a tunnel name: create the named tunnel first."
+        case .invalidShareHostname(let value):
+            return "Invalid share hostname \"\(value)\": use a bare DNS host name such as share.example.com."
+        case .invalidTunnelName(let value):
+            return "Invalid tunnel name \"\(value)\": use letters, digits, dots, underscores and hyphens, not starting with a hyphen."
         case .hostnameMismatch(let expected, let got):
             return "The share provider returned the hostname \(got) instead of the requested \(expected)."
         }

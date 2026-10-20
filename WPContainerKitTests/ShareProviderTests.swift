@@ -152,4 +152,81 @@ final class ShareProviderTests: XCTestCase {
             }
         }
     }
+
+    func testNgrokRejectsUnsafePublicURLs() {
+        let provider = NgrokProvider(searchPath: [])
+        let urls = [
+            "http://", "https://", "https://u:p@abc.ngrok-free.app", "tcp://0.tcp.ngrok.io:1234",
+            "http://abc.ngrok-free.app", "https://abc.ngrok-free.app/path", "https://abc.ngrok-free.app?x=1",
+            "https://abc.ngrok-free.app\\r\\nX-Evil: 1", "https://abc.ngrok-free.app\\t",
+        ]
+        for url in urls {
+            let line = #"{"msg":"started tunnel","url":""# + url + #""}"#
+            XCTAssertNil(provider.publicURL(fromOutputLine: line), url)
+        }
+        XCTAssertEqual(
+            provider.publicURL(fromOutputLine: #"{"msg":"started tunnel","url":"https://abc.ngrok-free.app/"}"#),
+            "https://abc.ngrok-free.app"
+        )
+    }
+
+    func testCloudflaredRejectsUnsafePublicURLs() {
+        let provider = CloudflaredProvider(searchPath: [])
+        let lines = [
+            "http://", "https://", "https://u:p@red-fox-12.trycloudflare.com", "http://red-fox-12.trycloudflare.com",
+            "https://red-fox-12.trycloudflare.com/path", "https://red-fox-12.trycloudflare.com?x=1",
+            "https://red-fox-12.trycloudflare.com:8443", "https://evil.example.com", "tcp://red-fox-12.trycloudflare.com",
+        ]
+        for line in lines {
+            XCTAssertNil(provider.publicURL(fromOutputLine: "| \(line) |"), line)
+        }
+    }
+
+    func testScriptProviderValidatesURLs() {
+        let provider = ScriptProvider(name: "custom", executable: dir)
+        XCTAssertEqual(provider.publicURL(fromOutputLine: "http://127.0.0.1:8123"), "http://127.0.0.1:8123")
+        XCTAssertNil(provider.publicURL(fromOutputLine: "http://"))
+        XCTAssertNil(provider.publicURL(fromOutputLine: "https://u:p@example.com"))
+        XCTAssertNil(provider.publicURL(fromOutputLine: "https://example.com/path"))
+        XCTAssertNil(provider.publicURL(fromOutputLine: "https://example.com?x=1"))
+        XCTAssertNil(provider.publicURL(fromOutputLine: "tcp://example.com"))
+    }
+
+    func testCloudflaredHostnameWithoutTunnelNameThrows() throws {
+        try makeScript("cloudflared", body: "exit 0")
+        let provider = CloudflaredProvider(searchPath: [dir])
+        XCTAssertThrowsError(try provider.launchSpec(upstream: upstream, hostname: "share.example.com", instanceSlug: "my-site", tunnelName: nil)) { error in
+            guard case ShareError.cloudflaredTunnelNameRequired = error else { return XCTFail("unexpected \(error)") }
+        }
+    }
+
+    func testLaunchSpecRejectsInvalidHostnameAndTunnelName() throws {
+        try makeScript("cloudflared", body: "exit 0")
+        try makeScript("ngrok", body: "exit 0")
+        let cf = CloudflaredProvider(searchPath: [dir])
+        let ng = NgrokProvider(searchPath: [dir])
+        let badHosts = ["https://share.example.com", "share.example.com:8080", "-a.example.com", "a-.example.com", "a..example.com", "a b.example.com", "", String(repeating: "a", count: 254)]
+        for host in badHosts where !host.isEmpty {
+            XCTAssertThrowsError(try ng.launchSpec(upstream: upstream, hostname: host, instanceSlug: "s", tunnelName: nil), host) { error in
+                guard case ShareError.invalidShareHostname(let value) = error else { return XCTFail("unexpected \(error)") }
+                XCTAssertEqual(value, host)
+            }
+            XCTAssertThrowsError(try cf.launchSpec(upstream: upstream, hostname: host, instanceSlug: "s", tunnelName: "wpc-s"), host)
+        }
+        for name in ["--evil", "-x", "a b", "a/b", "a\nb"] {
+            XCTAssertThrowsError(try cf.launchSpec(upstream: upstream, hostname: "share.example.com", instanceSlug: "s", tunnelName: name), name) { error in
+                guard case ShareError.invalidTunnelName(let value) = error else { return XCTFail("unexpected \(error)") }
+                XCTAssertEqual(value, name)
+            }
+        }
+    }
+
+    func testCustomDirectoryNeverShadowsBuiltIns() throws {
+        let custom = dir.appendingPathComponent("custom-dir")
+        try FileManager.default.createDirectory(at: custom, withIntermediateDirectories: true)
+        try makeScript("ngrok", body: "exit 0", in: custom)
+        try makeScript("cloudflared", body: "exit 0", in: custom)
+        XCTAssertTrue(try ShareProviders.resolve("ngrok", searchPath: [], customDirectory: custom) is NgrokProvider)
+        XCTAssertTrue(try ShareProviders.resolve("cloudflared", searchPath: [], customDirectory: custom) is CloudflaredProvider)
+    }
 }

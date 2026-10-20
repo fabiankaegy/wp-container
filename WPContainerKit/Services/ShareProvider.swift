@@ -93,12 +93,47 @@ public enum ShareProviders {
         return text
     }
 
-    static func firstURL(in line: String) -> String? {
+    static func firstURL(in line: String, schemes: Set<String>, hostSuffix: String? = nil, allowPort: Bool = true) -> String? {
         for token in line.split(whereSeparator: { $0.isWhitespace || $0 == "|" }) {
             let text = String(token)
-            if text.hasPrefix("https://") || text.hasPrefix("http://") { return text }
+            if text.hasPrefix("https://") || text.hasPrefix("http://") {
+                return validatedOrigin(text, schemes: schemes, hostSuffix: hostSuffix, allowPort: allowPort)
+            }
         }
         return nil
+    }
+
+    /// The normalized origin (`scheme://host[:port]`) of a bare public URL, or nil when the text
+    /// has control characters, credentials, a query, a fragment, a path, or no host.
+    static func validatedOrigin(_ text: String, schemes: Set<String>, hostSuffix: String? = nil, allowPort: Bool = true) -> String? {
+        let hasControl = text.unicodeScalars.contains { $0.properties.generalCategory == .control || $0.properties.isWhitespace }
+        guard !hasControl, let parts = URLComponents(string: text) else { return nil }
+        guard let scheme = parts.scheme?.lowercased(), schemes.contains(scheme) else { return nil }
+        guard let host = parts.host?.lowercased(), !host.isEmpty else { return nil }
+        guard parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil else { return nil }
+        guard parts.path.isEmpty || parts.path == "/" else { return nil }
+        if let hostSuffix, !host.hasSuffix(hostSuffix) { return nil }
+        if parts.port != nil && !allowPort { return nil }
+        let port = parts.port.map { ":\($0)" } ?? ""
+        return "\(scheme)://\(host)\(port)"
+    }
+
+    /// `https://<hostname>` for a bare DNS host name.
+    static func fixedURL(forHostname hostname: String) throws -> String {
+        let labels = hostname.split(separator: ".", omittingEmptySubsequences: false)
+        let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")
+        let valid = !hostname.isEmpty && hostname.count <= 253 && labels.allSatisfy { label in
+            !label.isEmpty && label.count <= 63 && !label.hasPrefix("-") && !label.hasSuffix("-")
+                && label.allSatisfy { allowed.contains($0) }
+        }
+        guard valid else { throw ShareError.invalidShareHostname(hostname) }
+        return "https://\(hostname)"
+    }
+
+    static func validateTunnelName(_ name: String) throws {
+        let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+        let valid = !name.isEmpty && !name.hasPrefix("-") && name.allSatisfy { allowed.contains($0) }
+        guard valid else { throw ShareError.invalidTunnelName(name) }
     }
 }
 
@@ -146,8 +181,7 @@ public struct NgrokProvider: ShareProvider {
         let binary = try executable()
         var arguments = ["http", ShareProviders.upstreamString(upstream), "--log", "stdout", "--log-format", "json"]
         if let hostname, !hostname.isEmpty {
-            let hasScheme = hostname.hasPrefix("https://") || hostname.hasPrefix("http://")
-            arguments += ["--url", hasScheme ? hostname : "https://\(hostname)"]
+            arguments += ["--url", try ShareProviders.fixedURL(forHostname: hostname)]
         }
         return ShareLaunchSpec(executable: binary, arguments: arguments)
     }
@@ -156,9 +190,9 @@ public struct NgrokProvider: ShareProvider {
         guard let data = line.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               object["msg"] as? String == "started tunnel",
-              let url = object["url"] as? String, !url.isEmpty
+              let url = object["url"] as? String
         else { return nil }
-        return url
+        return ShareProviders.validatedOrigin(url, schemes: ["https"])
     }
 
     private func executable() throws -> URL {
@@ -197,22 +231,22 @@ public struct CloudflaredProvider: ShareProvider {
     public func launchSpec(upstream: URL, hostname: String?, instanceSlug: String, tunnelName: String?) throws -> ShareLaunchSpec {
         let binary = try executable()
         let origin = ShareProviders.upstreamString(upstream)
-        guard let hostname, !hostname.isEmpty, let tunnelName, !tunnelName.isEmpty else {
+        guard let hostname, !hostname.isEmpty else {
             return ShareLaunchSpec(executable: binary, arguments: ["tunnel", "--url", origin])
         }
-        let hasScheme = hostname.hasPrefix("https://") || hostname.hasPrefix("http://")
+        let fixedURL = try ShareProviders.fixedURL(forHostname: hostname)
+        guard let tunnelName, !tunnelName.isEmpty else { throw ShareError.cloudflaredTunnelNameRequired }
+        try ShareProviders.validateTunnelName(tunnelName)
         return ShareLaunchSpec(
             executable: binary,
             arguments: ["tunnel", "run", "--url", origin, tunnelName],
-            fixedPublicURL: hasScheme ? hostname : "https://\(hostname)"
+            fixedPublicURL: fixedURL
         )
     }
 
     public func publicURL(fromOutputLine line: String) -> String? {
-        guard let url = ShareProviders.firstURL(in: line),
-              let host = URL(string: url)?.host,
-              host.hasSuffix(".trycloudflare.com"),
-              host != "api.trycloudflare.com"
+        guard let url = ShareProviders.firstURL(in: line, schemes: ["https"], hostSuffix: ".trycloudflare.com", allowPort: false),
+              URL(string: url)?.host != "api.trycloudflare.com"
         else { return nil }
         return url
     }
@@ -258,6 +292,6 @@ public struct ScriptProvider: ShareProvider {
     }
 
     public func publicURL(fromOutputLine line: String) -> String? {
-        ShareProviders.firstURL(in: line)
+        ShareProviders.firstURL(in: line, schemes: ["http", "https"])
     }
 }
