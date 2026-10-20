@@ -12,7 +12,8 @@ struct ExportCommand: AsyncParsableCommand {
         The archive holds the site's database, its wordpress/ folder (with \
         docroot mounts copied in), and its environment settings. `wpc import` \
         recreates the site from it on any Mac. If the site isn't running it is \
-        started first (pass --no-start to fail instead).
+        started first (pass --no-start to fail instead). Ctrl-C cancels the \
+        export and removes its partial files.
         """
     )
 
@@ -56,10 +57,13 @@ struct ExportCommand: AsyncParsableCommand {
             let excludes = (noDefaultExcludes ? [] : SiteArchiveService.defaultExcludes) + exclude
 
             let service = SiteArchiveService(cli: ctx.cli, lifecycle: ctx.lifecycle, persistence: ctx.persistence)
-            let summary = try await service.export(siteRecord, to: destination, excludes: excludes,
-                                                   overwrite: force) { phase in
-                guard !jsonMode else { return }
-                writeStderr("→ \(Self.progressLine(for: phase))")
+            let overwrite = force
+            let summary = try await runCancellingOnSignal(notice: "Export cancelled.", json: jsonMode) {
+                try await service.export(siteRecord, to: destination, excludes: excludes,
+                                         overwrite: overwrite) { phase in
+                    guard !jsonMode else { return }
+                    writeStderr("→ \(Self.progressLine(for: phase))")
+                }
             }
 
             if jsonMode {
@@ -69,6 +73,8 @@ struct ExportCommand: AsyncParsableCommand {
                 emitLine("Exported \(siteRecord.slug) to \(summary.archive.path) (\(size))")
                 for warning in summary.warnings { emitLine("! \(warning)") }
             }
+        } catch let code as ExitCode {
+            throw code
         } catch {
             throw failCommand(error, json: jsonMode)
         }
@@ -94,8 +100,8 @@ struct ImportCommand: AsyncParsableCommand {
         Creates the site folder and record, extracts the files, starts the site, \
         imports the database, and migrates its URLs to the new site's URL. \
         Users are kept as they were. The site keeps the archive's custom domain \
-        unless --domain or --no-domain is given. A failure removes the new site \
-        again before the error is reported.
+        unless --domain or --no-domain is given. A failure, or Ctrl-C, removes \
+        the new site again before the command exits.
         """
     )
 
@@ -144,9 +150,11 @@ struct ImportCommand: AsyncParsableCommand {
             let archiveURL = URL(fileURLWithPath: (archive as NSString).expandingTildeInPath).standardizedFileURL
 
             let service = SiteArchiveService(cli: ctx.cli, lifecycle: ctx.lifecycle, persistence: ctx.persistence)
-            let result = try await service.importSite(archive: archiveURL, options: options) { phase in
-                guard !jsonMode else { return }
-                writeStderr("→ \(Self.progressLine(for: phase))")
+            let result = try await runCancellingOnSignal(notice: "Import cancelled.", json: jsonMode) {
+                try await service.importSite(archive: archiveURL, options: options) { phase in
+                    guard !jsonMode else { return }
+                    writeStderr("→ \(Self.progressLine(for: phase))")
+                }
             }
 
             var site = result.site
@@ -162,6 +170,8 @@ struct ImportCommand: AsyncParsableCommand {
                 emitLine("Imported \(site.slug) at \(site.url.absoluteString)")
                 for warning in result.warnings { emitLine("! \(warning)") }
             }
+        } catch let code as ExitCode {
+            throw code
         } catch {
             throw failCommand(error, json: jsonMode)
         }
@@ -198,6 +208,33 @@ func archiveDestination(_ path: String, fileName: String) -> URL {
         destination.appendPathComponent(fileName)
     }
     return destination
+}
+
+/// Runs `work` in a task that SIGINT and SIGTERM cancel, so its cleanup runs
+/// before the process exits. When a signal ends the work early, prints
+/// `notice` to stderr and throws exit code 130.
+func runCancellingOnSignal<T: Sendable>(
+    notice: String,
+    json: Bool,
+    _ work: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    let task = Task { try await work() }
+    let sources = [SIGINT, SIGTERM].map { signalNumber -> DispatchSourceSignal in
+        signal(signalNumber, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .global())
+        source.setEventHandler { task.cancel() }
+        source.resume()
+        return source
+    }
+    defer { sources.forEach { $0.cancel() } }
+
+    let result = await task.result
+    if case .failure = result, task.isCancelled {
+        let line = json ? CLIJSON.string(CLIErrorJSON("cancelled", detail: notice)) : notice
+        writeStderr(line)
+        throw ExitCode(130)
+    }
+    return try result.get()
 }
 
 private func writeStderr(_ text: String) {
