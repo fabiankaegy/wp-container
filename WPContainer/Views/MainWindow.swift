@@ -56,6 +56,14 @@ struct MainWindow: View {
                 ImportDatabaseSheet(site: site, initialDump: vm.pendingImportDump)
             }
         }
+        .sheet(isPresented: $vm.presentingExportSite, onDismiss: { vm.exportSiteTarget = nil }) {
+            if let site = vm.exportSiteTarget {
+                ExportSiteSheet(site: site)
+            }
+        }
+        .sheet(isPresented: $vm.presentingImportSite, onDismiss: { vm.pendingImportArchive = nil }) {
+            ImportSiteSheet(initialArchive: vm.pendingImportArchive)
+        }
         .sheet(isPresented: $vm.presentingCLIInstallOffer) {
             CLIInstallOfferSheet()
         }

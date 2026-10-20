@@ -116,6 +116,12 @@ private struct AppCommands: Commands {
             Button("New Branch Environment…") { vm.presentingNewEnv = true }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
                 .disabled(vm.selectedSite == nil)
+            Divider()
+            Button("Import Site…") {
+                vm.pendingImportArchive = nil
+                vm.presentingImportSite = true
+            }
+            .keyboardShortcut("i", modifiers: [.command, .shift])
         }
         CommandMenu("Site") {
             Button("Start") { if let s = vm.selectedSite { vm.startSite(s) } }
@@ -131,6 +137,12 @@ private struct AppCommands: Commands {
             Button("Open WP Admin") { if let s = vm.selectedSite { SystemActions.openInBrowser(s.adminURL) } }
                 .disabled(!(vm.selectedSite?.status.isRunning ?? false))
             Button("Reveal in Finder") { if let s = vm.selectedSite { SystemActions.revealInFinder(s.path) } }
+            Divider()
+            Button("Export…") {
+                vm.exportSiteTarget = vm.selectedSite
+                vm.presentingExportSite = true
+            }
+            .disabled(vm.selectedSite == nil)
         }
     }
 }

@@ -37,8 +37,14 @@ struct SiteDetailView: View {
             }
         }
         // Drop a .sql/.sql.gz dump anywhere on the pane to open the import
-        // sheet pre-filled with it (PLAN.md §2m).
+        // sheet pre-filled with it (PLAN.md §2m). A .zip site export opens
+        // the Import Site sheet instead.
         .dropDestination(for: URL.self) { urls, _ in
+            if let archive = urls.first(where: { $0.pathExtension.lowercased() == "zip" }) {
+                vm.pendingImportArchive = archive
+                vm.presentingImportSite = true
+                return true
+            }
             guard let dump = urls.first(where: DumpFile.isDumpFile) else { return false }
             vm.selection = site.id
             vm.pendingImportDump = dump
@@ -177,6 +183,10 @@ struct SiteDetailView: View {
             actionButton("Import DB", "cylinder.split.1x2") {
                 vm.pendingImportDump = nil
                 vm.presentingImportDB = true
+            }
+            actionButton("Export", "square.and.arrow.up") {
+                vm.exportSiteTarget = site
+                vm.presentingExportSite = true
             }
             Spacer()
         }

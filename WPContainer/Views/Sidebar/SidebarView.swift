@@ -182,13 +182,20 @@ struct SidebarView: View {
     // MARK: Add button
 
     private var addButton: some View {
-        Button {
-            vm.presentingAddSite = true
+        Menu {
+            Button("New Site…", systemImage: "plus") { vm.presentingAddSite = true }
+            Button("Import Site…", systemImage: "square.and.arrow.down") {
+                vm.pendingImportArchive = nil
+                vm.presentingImportSite = true
+            }
         } label: {
             Label("Add Site", systemImage: "plus")
                 .font(.body.weight(.semibold))
                 .frame(maxWidth: .infinity)
+        } primaryAction: {
+            vm.presentingAddSite = true
         }
+        .menuStyle(.button)
         .controlSize(.large)
         .buttonStyle(.borderedProminent)
         .tint(Theme.accent)
@@ -369,6 +376,10 @@ struct SidebarSiteRow: View {
             vm.selection = site.id
             vm.pendingImportDump = nil
             vm.presentingImportDB = true
+        }
+        Button("Export Site…", systemImage: "square.and.arrow.up") {
+            vm.exportSiteTarget = site
+            vm.presentingExportSite = true
         }
 
         Divider()
