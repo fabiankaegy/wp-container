@@ -97,6 +97,42 @@ final class SiteArchiveImportTests: XCTestCase {
         XCTAssertTrue(fm.fileExists(atPath: folder.appendingPathComponent("wpc-site.json").path))
     }
 
+    func testExtractDropsDanglingSymlinkChain() async throws {
+        try write(try makeManifest().encoded(), to: "wpc-site.json")
+        try write("-- example dump\n", to: "database.sql")
+        try write("<?php // index\n", to: "wordpress/index.php")
+        let fm = FileManager.default
+        let wordpressSource = source.appendingPathComponent("wordpress")
+        try fm.createSymbolicLink(atPath: wordpressSource.appendingPathComponent("b").path, withDestinationPath: ".")
+        try fm.createSymbolicLink(atPath: wordpressSource.appendingPathComponent("c").path,
+                                  withDestinationPath: Self.danglingChainTarget)
+        let archive = try await makeZip()
+        let folder = tempRoot.appendingPathComponent("extracted", isDirectory: true)
+
+        try await SiteArchiveService.extract(archive: archive, into: folder)
+
+        let wordpress = folder.appendingPathComponent("wordpress")
+        XCTAssertNil(try? fm.destinationOfSymbolicLink(atPath: wordpress.appendingPathComponent("c").path))
+        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: wordpress.appendingPathComponent("b").path), ".")
+        XCTAssertTrue(fm.fileExists(atPath: wordpress.appendingPathComponent("index.php").path))
+    }
+
+    func testExtractDropsTopLevelDatabaseSymlink() async throws {
+        try write(try makeManifest().encoded(), to: "wpc-site.json")
+        try write("<?php // index\n", to: "wordpress/index.php")
+        try FileManager.default.createSymbolicLink(atPath: source.appendingPathComponent("database.sql").path,
+                                                   withDestinationPath: "/etc/hosts")
+        let archive = try await makeZip()
+        let folder = tempRoot.appendingPathComponent("extracted", isDirectory: true)
+
+        try await SiteArchiveService.extract(archive: archive, into: folder)
+
+        let database = folder.appendingPathComponent("database.sql")
+        XCTAssertNil(try? FileManager.default.destinationOfSymbolicLink(atPath: database.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: database.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appendingPathComponent("wordpress/index.php").path))
+    }
+
     // MARK: - importSite (checks that run before any container work)
 
     func testImportRejectsArchiveDomainThatDoesNotNormalize() async throws {
@@ -121,6 +157,10 @@ final class SiteArchiveImportTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    /// Twelve hops into `b -> .` and twelve back up, ending at a path that does not exist.
+    private static let danglingChainTarget =
+        (Array(repeating: "b", count: 12) + Array(repeating: "..", count: 12) + ["nonexist", "dir"]).joined(separator: "/")
 
     private func write(_ text: String, to relativePath: String) throws {
         try write(Data(text.utf8), to: relativePath)

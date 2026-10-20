@@ -163,7 +163,7 @@ final class SiteArchivePackageTests: XCTestCase {
         }
     }
 
-    // MARK: - externalSymlinks
+    // MARK: - unsafeSymlinks
 
     func testExternalSymlinksAreReported() throws {
         let fm = FileManager.default
@@ -181,9 +181,26 @@ final class SiteArchivePackageTests: XCTestCase {
         try fm.createSymbolicLink(atPath: wordpress.appendingPathComponent("abs-index.php").path,
                                   withDestinationPath: wordpress.appendingPathComponent("index.php").path)
 
-        let links = SiteArchiveService.externalSymlinks(in: wordpress).sorted()
+        let links = SiteArchiveService.unsafeSymlinks(in: wordpress)
 
-        XCTAssertEqual(links, ["wp-content/plugins/linked", "wp-content/plugins/outside", "wp-content/plugins/up"])
+        XCTAssertEqual(links.map(\.path).sorted(),
+                       ["wp-content/plugins/linked", "wp-content/plugins/outside", "wp-content/plugins/up"])
+        let reasons = Dictionary(uniqueKeysWithValues: links.map { ($0.path, $0.reason) })
+        XCTAssertEqual(reasons["wp-content/plugins/outside"], .leavesTree)
+        XCTAssertEqual(reasons["wp-content/plugins/up"], .unresolvable)
+    }
+
+    func testDanglingSymlinkChainIsReported() throws {
+        // `b -> .` lets a chain of `b/` hops be undone lexically while the kernel walks up past the root.
+        let fm = FileManager.default
+        let chain = (Array(repeating: "b", count: 12) + Array(repeating: "..", count: 12) + ["nonexist", "dir"])
+            .joined(separator: "/")
+        try fm.createSymbolicLink(atPath: wordpress.appendingPathComponent("b").path, withDestinationPath: ".")
+        try fm.createSymbolicLink(atPath: wordpress.appendingPathComponent("c").path, withDestinationPath: chain)
+
+        let links = SiteArchiveService.unsafeSymlinks(in: wordpress)
+
+        XCTAssertEqual(links, [SiteArchiveService.UnsafeSymlink(path: "c", reason: .unresolvable)])
     }
 
     // MARK: - wordpressVersion

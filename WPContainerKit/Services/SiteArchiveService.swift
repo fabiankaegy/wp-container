@@ -168,8 +168,13 @@ public actor SiteArchiveService {
         warnings += try await Self.package(
             wordpressFolder: site.wordpressFolder, stagingFolder: staging, destination: destination,
             manifest: manifest, excludes: excludes, mounts: inlined, overwrite: overwrite)
-        warnings += Self.externalSymlinks(in: site.wordpressFolder).map {
-            "Symlink wordpress/\($0) points outside the site folder; the imported site will not have its target."
+        warnings += Self.unsafeSymlinks(in: site.wordpressFolder).map { link in
+            switch link.reason {
+            case .leavesTree:
+                return "Symlink wordpress/\(link.path) points outside the site folder; the imported site will not have its target."
+            case .unresolvable:
+                return "Symlink wordpress/\(link.path) does not resolve; the imported site will not have it."
+            }
         }
         if !WPConfigService.dbHostFollowsEnvironment(wordpressFolder: site.wordpressFolder) {
             warnings.append("wp-config.php hardcodes DB_HOST; the imported site may not reach its database")
@@ -372,7 +377,7 @@ public actor SiteArchiveService {
     }
 
     /// Unzips `archive` into `folder`, then deletes top-level symlinks and every
-    /// symlink under `folder/wordpress` whose resolved target lies outside it.
+    /// symlink under `folder/wordpress` that resolves outside it or does not resolve.
     public static func extract(archive: URL, into folder: URL) async throws {
         let fm = FileManager.default
         try fm.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -386,8 +391,8 @@ public actor SiteArchiveService {
             }
         }
         let wordpress = folder.appendingPathComponent(SiteArchiveLayout.wordpressFolder, isDirectory: true)
-        for relative in externalSymlinks(in: wordpress) {
-            try fm.removeItem(at: wordpress.appendingPathComponent(relative))
+        for link in unsafeSymlinks(in: wordpress) {
+            try fm.removeItem(at: wordpress.appendingPathComponent(link.path))
         }
     }
 
@@ -402,6 +407,25 @@ public actor SiteArchiveService {
         public init(hostPath: String, relativePath: String) {
             self.hostPath = hostPath
             self.relativePath = relativePath
+        }
+    }
+
+    /// A symlink under `wordpress/` that import drops.
+    public struct UnsafeSymlink: Equatable, Sendable {
+        public enum Reason: Equatable, Sendable {
+            /// The link resolves to a path outside the `wordpress/` folder.
+            case leavesTree
+            /// The link is dangling or part of a loop.
+            case unresolvable
+        }
+
+        /// Path relative to the `wordpress/` folder.
+        public let path: String
+        public let reason: Reason
+
+        public init(path: String, reason: Reason) {
+            self.path = path
+            self.reason = reason
         }
     }
 
@@ -537,20 +561,24 @@ public actor SiteArchiveService {
         return warnings
     }
 
-    /// Paths, relative to `wordpressFolder`, of symlinks whose target lies outside it.
-    public static func externalSymlinks(in wordpressFolder: URL) -> [String] {
+    /// Symlinks under `wordpressFolder` that resolve outside it or do not resolve.
+    /// Each link is resolved by the kernel, so `..` after a symlinked folder
+    /// counts from that folder's target.
+    public static func unsafeSymlinks(in wordpressFolder: URL) -> [UnsafeSymlink] {
         let fm = FileManager.default
-        let root = realPath(wordpressFolder.path)
+        let root = realPath(wordpressFolder.path) ?? wordpressFolder.path
         guard let enumerator = fm.enumerator(atPath: wordpressFolder.path) else { return [] }
-        var links: [String] = []
+        var links: [UnsafeSymlink] = []
         while let relative = enumerator.nextObject() as? String {
             let link = wordpressFolder.appendingPathComponent(relative)
-            guard let destination = try? fm.destinationOfSymbolicLink(atPath: link.path) else { continue }
-            let base = realPath(link.deletingLastPathComponent().path)
-            let absolute = destination.hasPrefix("/") ? destination : base + "/" + destination
-            let target = realPath(URL(fileURLWithPath: absolute).standardizedFileURL.path)
+            let isSymlink = (try? fm.destinationOfSymbolicLink(atPath: link.path)) != nil
+            guard isSymlink else { continue }
+            guard let target = realPath(link.path) else {
+                links.append(UnsafeSymlink(path: relative, reason: .unresolvable))
+                continue
+            }
             if target != root, !target.hasPrefix(root + "/") {
-                links.append(relative)
+                links.append(UnsafeSymlink(path: relative, reason: .leavesTree))
             }
         }
         return links
@@ -591,7 +619,6 @@ public actor SiteArchiveService {
         return components.joined(separator: "/")
     }
 
-    /// `path` with symlinks resolved, or `path` itself when it does not exist.
     /// Throws `.outputExists` for a directory at `destination`, or for a file
     /// there unless `overwrite` is set.
     private static func refuseExistingOutput(_ destination: URL, overwrite: Bool) throws {
@@ -602,8 +629,10 @@ public actor SiteArchiveService {
         }
     }
 
-    private static func realPath(_ path: String) -> String {
-        guard let resolved = realpath(path, nil) else { return path }
+    /// `path` with every symlink resolved by `realpath(3)`, or nil when it is
+    /// missing, dangling, or loops.
+    private static func realPath(_ path: String) -> String? {
+        guard let resolved = realpath(path, nil) else { return nil }
         defer { free(resolved) }
         return String(cString: resolved)
     }
