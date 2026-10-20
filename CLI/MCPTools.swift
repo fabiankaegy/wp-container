@@ -148,5 +148,19 @@ enum MCPTools {
                 "create_admin": bool("Create/reset the local admin/password login after import (default true)."),
                 "source_url": str("Trust this URL as the dump's source instead of the detected `home` option."),
              ], required: ["file"])),
+        Tool(name: "share_start",
+             description: "Share a site or worktree environment on a public URL through a tunnel provider (ngrok by default, cloudflared, or a custom provider). WARNING: the link exposes the site to the public internet; it is protected by a username and password, which this tool returns and the user must be told to pass on only to intended visitors. Auto-starts the instance. The WP Container app or `wp-container proxy serve` must be running. Turning the password off and adding password exceptions are human-only actions (`wp-container share` CLI or the app); this tool cannot do either. A provider failure is returned as an error with the provider's message. Returns {url, temporary, provider, username, password, instance, allow, state}.",
+             inputSchema: obj([
+                "slug": str("Site or environment slug (defaults to the scoped site)."),
+                "provider": str("Tunnel provider: ngrok, cloudflared, or a custom provider name. Omit for the configured default."),
+                "hostname": str("Fixed public hostname, when the provider supports one."),
+                "reset_password": bool("Generate a new password for the share."),
+             ])),
+        Tool(name: "share_stop",
+             description: "Stop sharing a site or worktree environment; the public URL stops working. Its saved credentials are kept for the next share_start. Returns {ok, instance}.",
+             inputSchema: obj(["slug": str("Site or environment slug (defaults to the scoped site).")])),
+        Tool(name: "share_status",
+             description: "Show whether a site or environment is shared publicly and on which URL. Without `slug`, lists every site and environment that has share settings. The password is never included; share_start returns it. Returns a list of {instance, state, url, provider, temporary, error}.",
+             inputSchema: obj(["slug": str("Site or environment slug. Omit to list all shares.")])),
     ]
 }
