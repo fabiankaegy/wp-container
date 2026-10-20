@@ -174,14 +174,7 @@ public actor SiteArchiveService {
         warnings += try await Self.package(
             wordpressFolder: site.wordpressFolder, stagingFolder: staging, destination: destination,
             manifest: manifest, excludes: excludes, mounts: inlined, overwrite: overwrite)
-        warnings += Self.unsafeSymlinks(in: site.wordpressFolder).map { link in
-            switch link.reason {
-            case .leavesTree:
-                return "Symlink wordpress/\(link.path) points outside the site folder; the imported site will not have its target."
-            case .unresolvable:
-                return "Symlink wordpress/\(link.path) does not resolve; the imported site will not have it."
-            }
-        }
+        warnings += Self.unsafeSymlinks(in: site.wordpressFolder).map(Self.symlinkWarning)
         if !WPConfigService.dbHostFollowsEnvironment(wordpressFolder: site.wordpressFolder) {
             warnings.append("wp-config.php hardcodes DB_HOST; the imported site may not reach its database")
         }
@@ -562,8 +555,14 @@ public actor SiteArchiveService {
         for mount in safeMounts {
             let target = stagingFolder.appendingPathComponent(root, isDirectory: true)
                 .appendingPathComponent(mount.relativePath, isDirectory: true)
+            // A nested mount replaces whatever the outer mount holds at its path.
+            try? fm.removeItem(at: target)
             try fm.createDirectory(at: target, withIntermediateDirectories: true)
             try await runTool(rsyncPath, args: ["-a"] + rsyncExcludes + [mount.hostPath + "/", target.path + "/"], cwd: nil)
+            warnings += mountSymlinks(
+                in: target, mountPath: mount.relativePath,
+                stagedWordpress: stagingFolder.appendingPathComponent(root, isDirectory: true),
+                hostWordpress: wordpressFolder).map(symlinkWarning)
         }
 
         var stagingArgs = ["-r", "-y", "-q", "-X", partial.path, SiteArchiveLayout.manifestName, SiteArchiveLayout.databaseName]
@@ -651,6 +650,63 @@ public actor SiteArchiveService {
             .filter { $0 != "." }
         if components.isEmpty || components.contains("..") { return nil }
         return components.joined(separator: "/")
+    }
+
+    /// The export warning for a symlink that import drops.
+    private static func symlinkWarning(_ link: UnsafeSymlink) -> String {
+        switch link.reason {
+        case .leavesTree:
+            return "Symlink wordpress/\(link.path) points outside the site folder; the imported site will not have its target."
+        case .unresolvable:
+            return "Symlink wordpress/\(link.path) does not resolve; the imported site will not have it."
+        }
+    }
+
+    /// Symlinks under the staged mount folder `mountFolder` that import would drop.
+    /// An absolute destination leaves the tree. A relative one is joined lexically
+    /// with the link's folder; it leaves the tree when it climbs above `wordpress/`
+    /// and does not resolve when it exists in neither `stagedWordpress` nor `hostWordpress`.
+    private static func mountSymlinks(
+        in mountFolder: URL, mountPath: String, stagedWordpress: URL, hostWordpress: URL
+    ) -> [UnsafeSymlink] {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(atPath: mountFolder.path) else { return [] }
+        let mountComponents = mountPath.split(separator: "/").map(String.init)
+        var links: [UnsafeSymlink] = []
+        while let inMount = enumerator.nextObject() as? String {
+            let linkPath = mountFolder.appendingPathComponent(inMount).path
+            guard let destination = try? fm.destinationOfSymbolicLink(atPath: linkPath) else { continue }
+            let path = (mountComponents + inMount.split(separator: "/").map(String.init)).joined(separator: "/")
+            if destination.hasPrefix("/") {
+                links.append(UnsafeSymlink(path: path, reason: .leavesTree))
+                continue
+            }
+            var resolved = mountComponents + inMount.split(separator: "/").dropLast().map(String.init)
+            var climbs = false
+            for component in destination.split(separator: "/").map(String.init) {
+                switch component {
+                case ".", "":
+                    break
+                case "..":
+                    if resolved.isEmpty { climbs = true } else { resolved.removeLast() }
+                default:
+                    resolved.append(component)
+                }
+                if climbs { break }
+            }
+            if climbs {
+                links.append(UnsafeSymlink(path: path, reason: .leavesTree))
+                continue
+            }
+            let relative = resolved.joined(separator: "/")
+            let staged = stagedWordpress.appendingPathComponent(relative).path
+            let host = hostWordpress.appendingPathComponent(relative).path
+            let exists = fm.fileExists(atPath: staged) || fm.fileExists(atPath: host)
+            if !exists {
+                links.append(UnsafeSymlink(path: path, reason: .unresolvable))
+            }
+        }
+        return links
     }
 
     /// Throws `.outputExists` for a directory at `destination`, or for a file

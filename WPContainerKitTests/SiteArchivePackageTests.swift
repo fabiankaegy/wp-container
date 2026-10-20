@@ -92,6 +92,60 @@ final class SiteArchivePackageTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: tempRoot.appendingPathComponent("site/escape").path))
     }
 
+    func testWarnsForSymlinksInsideMountedFolders() async throws {
+        let fm = FileManager.default
+        try write("<?php // base\n", to: "wp-content/themes/base/style.css")
+        let host = tempRoot.appendingPathComponent("host/acme", isDirectory: true)
+        try fm.createDirectory(at: host, withIntermediateDirectories: true)
+        try "<?php // acme\n".write(to: host.appendingPathComponent("acme.php"), atomically: true, encoding: .utf8)
+        let links = [
+            "abs": "/tmp/elsewhere",
+            "up": "../../../../outside",
+            "gone": "missing.txt",
+            "ok": "acme.php",
+            "theme": "../../themes/base",
+        ]
+        for (name, destination) in links {
+            try fm.createSymbolicLink(atPath: host.appendingPathComponent(name).path, withDestinationPath: destination)
+        }
+        let destination = outputFolder.appendingPathComponent("example.zip")
+        let mounts = [SiteArchiveService.InlinedMount(hostPath: host.path, relativePath: "wp-content/plugins/acme")]
+
+        let warnings = try await SiteArchiveService.package(
+            wordpressFolder: wordpress, stagingFolder: staging, destination: destination,
+            manifest: makeManifest(), excludes: [], mounts: mounts, overwrite: false)
+
+        let base = "wordpress/wp-content/plugins/acme"
+        let outside = "points outside the site folder"
+        XCTAssertEqual(warnings.count, 3, "\(warnings)")
+        XCTAssertTrue(warnings.contains { $0.contains("\(base)/abs ") && $0.contains(outside) }, "\(warnings)")
+        XCTAssertTrue(warnings.contains { $0.contains("\(base)/up ") && $0.contains(outside) }, "\(warnings)")
+        XCTAssertTrue(warnings.contains { $0.contains("\(base)/gone ") && $0.contains("does not resolve") }, "\(warnings)")
+    }
+
+    func testNestedMountReplacesOuterContentAtItsPath() async throws {
+        let fm = FileManager.default
+        let outer = tempRoot.appendingPathComponent("host/outer", isDirectory: true)
+        let inner = tempRoot.appendingPathComponent("host/inner", isDirectory: true)
+        try fm.createDirectory(at: outer.appendingPathComponent("inner"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: inner, withIntermediateDirectories: true)
+        try "hidden\n".write(to: outer.appendingPathComponent("inner/hidden.txt"), atomically: true, encoding: .utf8)
+        try "real\n".write(to: inner.appendingPathComponent("real.txt"), atomically: true, encoding: .utf8)
+        let destination = outputFolder.appendingPathComponent("example.zip")
+        let mounts = [
+            SiteArchiveService.InlinedMount(hostPath: outer.path, relativePath: "wp-content/plugins/outer"),
+            SiteArchiveService.InlinedMount(hostPath: inner.path, relativePath: "wp-content/plugins/outer/inner"),
+        ]
+
+        _ = try await SiteArchiveService.package(
+            wordpressFolder: wordpress, stagingFolder: staging, destination: destination,
+            manifest: makeManifest(), excludes: [], mounts: mounts, overwrite: false)
+
+        let entries = try await zipEntries(destination)
+        XCTAssertTrue(entries.contains("wordpress/wp-content/plugins/outer/inner/real.txt"), "\(entries)")
+        XCTAssertFalse(entries.contains { $0.hasSuffix("inner/hidden.txt") }, "\(entries)")
+    }
+
     func testRefusesExistingDestinationWithoutOverwrite() async throws {
         let destination = outputFolder.appendingPathComponent("example.zip")
         try "existing".write(to: destination, atomically: true, encoding: .utf8)
