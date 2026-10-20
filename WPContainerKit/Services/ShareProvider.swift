@@ -109,25 +109,37 @@ public enum ShareProviders {
         let hasControl = text.unicodeScalars.contains { $0.properties.generalCategory == .control || $0.properties.isWhitespace }
         guard !hasControl, let parts = URLComponents(string: text) else { return nil }
         guard let scheme = parts.scheme?.lowercased(), schemes.contains(scheme) else { return nil }
-        guard let host = parts.host?.lowercased(), !host.isEmpty else { return nil }
+        guard let rawHost = parts.host?.lowercased(), !rawHost.isEmpty else { return nil }
+        let encodedHost = parts.percentEncodedHost ?? ""
+        guard !encodedHost.contains("%") else { return nil }
+        let host = rawHost.hasPrefix("[") && rawHost.hasSuffix("]") ? String(rawHost.dropFirst().dropLast()) : rawHost
+        let isIPv6 = host.contains(":")
+        let ipv6Chars = Set("0123456789abcdef:.")
+        let hostIsValid = isIPv6 ? host.allSatisfy { ipv6Chars.contains($0) } : isValidDNSHost(host)
+        guard hostIsValid else { return nil }
         guard parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil else { return nil }
         guard parts.path.isEmpty || parts.path == "/" else { return nil }
         if let hostSuffix, !host.hasSuffix(hostSuffix) { return nil }
         if parts.port != nil && !allowPort { return nil }
         let port = parts.port.map { ":\($0)" } ?? ""
-        return "\(scheme)://\(host)\(port)"
+        let shownHost = isIPv6 ? "[\(host)]" : host
+        return "\(scheme)://\(shownHost)\(port)"
     }
 
     /// `https://<hostname>` for a bare DNS host name.
     static func fixedURL(forHostname hostname: String) throws -> String {
+        guard isValidDNSHost(hostname) else { throw ShareError.invalidShareHostname(hostname) }
+        return "https://\(hostname)"
+    }
+
+    /// ASCII DNS labels (letters, digits, hyphens; IDN only as `xn--` punycode) joined by dots.
+    static func isValidDNSHost(_ hostname: String) -> Bool {
         let labels = hostname.split(separator: ".", omittingEmptySubsequences: false)
         let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")
-        let valid = !hostname.isEmpty && hostname.count <= 253 && labels.allSatisfy { label in
+        return !hostname.isEmpty && hostname.count <= 253 && labels.allSatisfy { label in
             !label.isEmpty && label.count <= 63 && !label.hasPrefix("-") && !label.hasSuffix("-")
                 && label.allSatisfy { allowed.contains($0) }
         }
-        guard valid else { throw ShareError.invalidShareHostname(hostname) }
-        return "https://\(hostname)"
     }
 
     static func validateTunnelName(_ name: String) throws {

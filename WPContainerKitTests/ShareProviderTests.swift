@@ -229,4 +229,22 @@ final class ShareProviderTests: XCTestCase {
         XCTAssertTrue(try ShareProviders.resolve("ngrok", searchPath: [], customDirectory: custom) is NgrokProvider)
         XCTAssertTrue(try ShareProviders.resolve("cloudflared", searchPath: [], customDirectory: custom) is CloudflaredProvider)
     }
+
+    func testPublicURLRejectsPercentEncodedAndNonAsciiHosts() {
+        let ngrok = NgrokProvider(searchPath: [])
+        for host in ["abc.ngrok-free.app%0d%0aX-Evil:1", "a%0d%0ab.ngrok-free.app", "a%2fb.example.com", "b\u{fc}cher.ngrok-free.app"] {
+            let line = #"{"msg":"started tunnel","url":"https://"# + host + #""}"#
+            XCTAssertNil(ngrok.publicURL(fromOutputLine: line), host)
+        }
+        XCTAssertEqual(
+            ngrok.publicURL(fromOutputLine: #"{"msg":"started tunnel","url":"https://xn--bcher-kva.ngrok-free.app"}"#),
+            "https://xn--bcher-kva.ngrok-free.app"
+        )
+        let cloudflared = CloudflaredProvider(searchPath: [])
+        XCTAssertNil(cloudflared.publicURL(fromOutputLine: "https://evil%0d%0ax.trycloudflare.com"))
+        XCTAssertNil(cloudflared.publicURL(fromOutputLine: "https://b\u{fc}cher.trycloudflare.com"))
+        let script = ScriptProvider(name: "custom", executable: dir)
+        XCTAssertNil(script.publicURL(fromOutputLine: "https://a%0d%0ab.example.com"))
+        XCTAssertEqual(script.publicURL(fromOutputLine: "http://[::1]:8123"), "http://[::1]:8123")
+    }
 }
