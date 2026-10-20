@@ -196,7 +196,9 @@ public actor SiteArchiveService {
 
     /// Creates a new site from an archive: its folder, store record, containers,
     /// and database. A failure or cancellation after the store record exists
-    /// removes the site again before the error is rethrown.
+    /// removes the site, and a group the import created, before the error is
+    /// rethrown. Work folders that earlier interrupted imports left in the
+    /// parent folder are swept first.
     public func importSite(
         archive: URL,
         options: SiteImportOptions,
@@ -247,14 +249,16 @@ public actor SiteArchiveService {
             settings.apply(to: &site)
             site.customDomain = domain
             site.imageTag = imageTag
-            Self.assignGroup(named: groupName, to: &site, in: &env)
+            let createdGroupID = Self.assignGroup(named: groupName, to: &site, in: &env)
             env.sites.append(site)
-            return .created(site)
+            return .created(site, createdGroupID: createdGroupID)
         })
         let created: Site
+        let createdGroupID: UUID?
         switch allocation?.value {
-        case .created(let site):
+        case .created(let site, let groupID):
             created = site
+            createdGroupID = groupID
         case .domainInUse(let taken):
             throw SiteArchiveError.domainInUse(taken)
         case nil:
@@ -329,6 +333,13 @@ public actor SiteArchiveService {
             let persistence = self.persistence
             await Task {
                 await SiteDiscard.discard(discarded, keepFolder: false, lifecycle: lifecycle, persistence: persistence)
+                if let createdGroupID {
+                    _ = try? await persistence.mutateIfChanged { store in
+                        guard !store.sites.contains(where: { $0.groupID == createdGroupID }) else { return false }
+                        store.groups.removeAll { $0.id == createdGroupID }
+                        return true
+                    }
+                }
             }.value
             try? fm.removeItem(at: workFolder)
             throw error
@@ -621,7 +632,8 @@ public actor SiteArchiveService {
 
     /// The outcome of recording an imported site in the store.
     private enum SiteReservation: Sendable {
-        case created(Site)
+        /// `createdGroupID` names the group this import added, if any.
+        case created(Site, createdGroupID: UUID?)
         case domainInUse(String)
     }
 
@@ -714,15 +726,17 @@ public actor SiteArchiveService {
 
     /// Puts `site` in the group named `groupName`, matched case-insensitively,
     /// adding the group to `envelope` when none matches. A blank name leaves the site ungrouped.
-    private static func assignGroup(named groupName: String?, to site: inout Site, in envelope: inout StoreEnvelope) {
-        guard let groupName, !groupName.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+    /// Returns the id of the added group, or nil when none was added.
+    private static func assignGroup(named groupName: String?, to site: inout Site, in envelope: inout StoreEnvelope) -> UUID? {
+        guard let groupName, !groupName.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
         if let existing = envelope.groups.first(where: { $0.name.caseInsensitiveCompare(groupName) == .orderedSame }) {
             site.groupID = existing.id
-        } else {
-            let group = SiteGroup(name: groupName, sortOrder: (envelope.groups.map(\.sortOrder).max() ?? -1) + 1)
-            envelope.groups.append(group)
-            site.groupID = group.id
+            return nil
         }
+        let group = SiteGroup(name: groupName, sortOrder: (envelope.groups.map(\.sortOrder).max() ?? -1) + 1)
+        envelope.groups.append(group)
+        site.groupID = group.id
+        return group.id
     }
 
     /// Imports `dump` with `wp db import` from a staging folder inside the
