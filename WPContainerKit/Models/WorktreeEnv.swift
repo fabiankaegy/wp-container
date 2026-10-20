@@ -51,6 +51,8 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
     /// what makes idle tracking usable for an AGENT-driven env, whose whole
     /// workflow can happen over wp-cli and MCP without a single proxied request.
     public var lastActivityAt: Date?
+    /// Public-sharing settings; nil until sharing has been configured.
+    public var share: ShareSettings?
     /// Whether this env lives as an extra SCHEMA on the parent site's MariaDB
     /// container instead of running one of its own (issue #17). The default for
     /// newly created envs; `--isolated-db` opts out. Records written before
@@ -95,7 +97,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
              xdebugEnabled, elasticsearchEnabled, cpuLimit, memoryLimitMB,
              idleStopMinutes, lastActivityAt,
              mailpitEnabled, mailpitPort, redisEnabled, sharedDatabase, databaseSchema,
-             usesDomainURL, httpsEnabled, settledAt, inheritedMounts
+             usesDomainURL, httpsEnabled, settledAt, inheritedMounts, share
     }
 
     public init(
@@ -126,6 +128,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         httpsEnabled: Bool = false,
         settledAt: Date? = nil,
         inheritedMounts: [Mount] = [],
+        share: ShareSettings? = nil,
         status: SiteStatus = .stopped
     ) {
         self.id = id
@@ -156,6 +159,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         self.httpsEnabled = httpsEnabled
         self.inheritedMounts = inheritedMounts
         self.settledAt = settledAt
+        self.share = share
         self.status = status
     }
 
@@ -189,6 +193,8 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         // clock sees browser traffic to it, and the next request wakes it.
         self.idleStopMinutes = try? c.decodeIfPresent(Int.self, forKey: .idleStopMinutes)
         self.lastActivityAt = try? c.decodeIfPresent(Date.self, forKey: .lastActivityAt)
+        // Absent in envs written before site sharing.
+        self.share = try? c.decodeIfPresent(ShareSettings.self, forKey: .share)
         // Absent in envs written before issue #17 — they keep their own DB
         // container, so the default MUST be false/nil.
         let schema = try? c.decodeIfPresent(String.self, forKey: .databaseSchema)
