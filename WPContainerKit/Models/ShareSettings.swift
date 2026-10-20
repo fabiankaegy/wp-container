@@ -147,6 +147,10 @@ public enum ShareError: Error, Sendable, CustomStringConvertible {
     case dnsRecordExists(String)
     /// A cloudflared tunnel command failed; `output` is its trimmed error text.
     case cloudflaredFailed(command: String, output: String)
+    /// The tunnel is already routed to another hostname; clean it up before routing a new one.
+    case cloudflaredHostnameChanged(tunnel: String, recorded: String, requested: String)
+    /// The tunnel registry could not be written.
+    case cloudflaredRegistryWriteFailed(String)
 
     public var description: String {
         switch self {
@@ -172,6 +176,10 @@ public enum ShareError: Error, Sendable, CustomStringConvertible {
             return "\(hostname) already has a DNS record. Remove it in the Cloudflare dashboard or choose another hostname."
         case .cloudflaredFailed(let command, let output):
             return "cloudflared \(command) failed: \(output)"
+        case .cloudflaredHostnameChanged(let tunnel, let recorded, let requested):
+            return "The tunnel \(tunnel) is routed to \(recorded), not \(requested). Stop sharing to clean it up before using a new hostname."
+        case .cloudflaredRegistryWriteFailed(let detail):
+            return "Could not save the Cloudflare tunnel registry: \(detail)"
         case .hostnameMismatch(let expected, let got):
             return "The share provider returned the hostname \(got) instead of the requested \(expected)."
         case .providerTimedOut(let tail):

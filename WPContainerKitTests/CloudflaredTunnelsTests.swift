@@ -128,6 +128,57 @@ final class CloudflaredTunnelsTests: XCTestCase {
         XCTAssertEqual(failing.records().count, 1)
     }
 
+    func testGenericRouteFailureKeepsRecordWithoutHostname() async throws {
+        let t = try tunnels(["route": (1, "some network error")])
+        do {
+            try await t.ensure(instanceID: id, tunnelName: tunnel, hostname: host)
+            XCTFail("expected cloudflaredFailed")
+        } catch ShareError.cloudflaredFailed(_, let output) {
+            XCTAssertTrue(output.contains("some network error"))
+        }
+        XCTAssertEqual(t.records(), [CloudflareTunnelRecord(instanceID: id, tunnelName: tunnel, hostname: nil)])
+    }
+
+    func testChangedHostnameIsRefusedWithoutRunningCloudflared() async throws {
+        let t = try tunnels()
+        try await t.ensure(instanceID: id, tunnelName: tunnel, hostname: host)
+        try? FileManager.default.removeItem(at: log)
+        do {
+            try await t.ensure(instanceID: id, tunnelName: tunnel, hostname: "other.example.com")
+            XCTFail("expected cloudflaredHostnameChanged")
+        } catch ShareError.cloudflaredHostnameChanged(_, let recorded, let requested) {
+            XCTAssertEqual(recorded, host)
+            XCTAssertEqual(requested, "other.example.com")
+        }
+        XCTAssertEqual(calls(), [])
+        XCTAssertEqual(t.records().first?.hostname, host)
+    }
+
+    func testRegistryWriteFailureSurfaces() async throws {
+        let locked = dir.appendingPathComponent("locked")
+        try FileManager.default.createDirectory(at: locked, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: locked.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: locked.path) }
+        let exe = try tunnels()
+        _ = exe
+        let t = CloudflaredTunnels(executable: dir.appendingPathComponent("cloudflared"),
+                                   registryFile: locked.appendingPathComponent("sub/share-cloudflare.json"))
+        do {
+            try await t.ensure(instanceID: id, tunnelName: tunnel, hostname: host)
+            XCTFail("expected cloudflaredRegistryWriteFailed")
+        } catch ShareError.cloudflaredRegistryWriteFailed {}
+    }
+
+    func testExistingTunnelNameMentionsDeleteCommand() async throws {
+        let t = try tunnels(["create": (1, "tunnel with name wpc-my-site already exists")])
+        do {
+            try await t.ensure(instanceID: id, tunnelName: tunnel, hostname: host)
+            XCTFail("expected cloudflaredFailed")
+        } catch ShareError.cloudflaredFailed(_, let output) {
+            XCTAssertTrue(output.contains("cloudflared tunnel delete wpc-my-site"))
+        }
+    }
+
     func testMissingOrCorruptRegistryReadsEmpty() throws {
         let t = try tunnels()
         XCTAssertEqual(t.records(), [])

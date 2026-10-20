@@ -40,16 +40,27 @@ public struct CloudflaredTunnels: Sendable {
         try ShareProviders.validateTunnelName(tunnelName)
         guard ShareProviders.isValidDNSHost(hostname) else { throw ShareError.invalidShareHostname(hostname) }
 
-        var all = records()
-        var index = all.firstIndex { $0.instanceID == instanceID && $0.tunnelName == tunnelName }
-        if index == nil {
-            try await run(["tunnel", "create", tunnelName])
-            all.append(CloudflareTunnelRecord(instanceID: instanceID, tunnelName: tunnelName, hostname: nil))
-            index = all.count - 1
-            save(all)
+        let recorded = records().first { $0.instanceID == instanceID && $0.tunnelName == tunnelName }
+        if let recorded, let routed = recorded.hostname, routed != hostname {
+            throw ShareError.cloudflaredHostnameChanged(tunnel: tunnelName, recorded: routed, requested: hostname)
         }
-        guard let index else { return }
-        guard all[index].hostname != hostname else { return }
+
+        if recorded == nil {
+            do {
+                try await run(["tunnel", "create", tunnelName])
+            } catch ShareError.cloudflaredFailed(let command, let output) where output.contains("already exists") {
+                let hint = "Delete the leftover tunnel with: cloudflared tunnel delete \(tunnelName)"
+                throw ShareError.cloudflaredFailed(command: command, output: output + "\n" + hint)
+            }
+            // A crash before this save leaves an unrecorded tunnel that WP Container never
+            // deletes and that blocks the next create; the user removes it with
+            // `cloudflared tunnel delete <tunnelName>`.
+            try update { all in
+                all.append(CloudflareTunnelRecord(instanceID: instanceID, tunnelName: tunnelName, hostname: nil))
+            }
+        } else if recorded?.hostname == hostname {
+            return
+        }
 
         do {
             try await run(["tunnel", "route", "dns", tunnelName, hostname])
@@ -57,8 +68,10 @@ public struct CloudflaredTunnels: Sendable {
             let exists = output.contains("already exists")
             throw exists ? ShareError.dnsRecordExists(hostname) : ShareError.cloudflaredFailed(command: command, output: output)
         }
-        all[index].hostname = hostname
-        save(all)
+        try update { all in
+            guard let i = all.firstIndex(where: { $0.instanceID == instanceID && $0.tunnelName == tunnelName }) else { return }
+            all[i].hostname = hostname
+        }
     }
 
     public func records() -> [CloudflareTunnelRecord] {
@@ -71,8 +84,7 @@ public struct CloudflaredTunnels: Sendable {
     /// Deletes a recorded tunnel and drops its record. cloudflared has no command that
     /// removes DNS records, so the CNAME is left for the user and reported as a warning.
     public func cleanup(_ record: CloudflareTunnelRecord) async -> [String] {
-        var all = records()
-        guard all.contains(record) else {
+        guard records().contains(record) else {
             return ["Skipped \(record.tunnelName): it is not a tunnel WP Container created."]
         }
         do {
@@ -81,8 +93,11 @@ public struct CloudflaredTunnels: Sendable {
         } catch {
             return ["Could not delete the Cloudflare tunnel \(record.tunnelName): \(error)"]
         }
-        all.removeAll { $0 == record }
-        save(all)
+        do {
+            try update { all in all.removeAll { $0 == record } }
+        } catch {
+            return ["Deleted the Cloudflare tunnel \(record.tunnelName) but could not update the registry: \(error)"]
+        }
         guard let hostname = record.hostname else { return [] }
         return ["cloudflared cannot delete DNS records: remove the CNAME for \(hostname) in the Cloudflare dashboard."]
     }
@@ -97,9 +112,16 @@ public struct CloudflaredTunnels: Sendable {
         throw ShareError.cloudflaredFailed(command: arguments.prefix(while: { !$0.hasPrefix("-") }).joined(separator: " "), output: output)
     }
 
-    private func save(_ records: [CloudflareTunnelRecord]) {
-        guard let data = try? JSONEncoder().encode(records) else { return }
-        try? FileManager.default.createDirectory(at: registryFile.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: registryFile, options: .atomic)
+    /// Applies `change` to a freshly read registry and writes it back atomically.
+    private func update(_ change: (inout [CloudflareTunnelRecord]) -> Void) throws {
+        var all = records()
+        change(&all)
+        do {
+            let data = try JSONEncoder().encode(all)
+            try FileManager.default.createDirectory(at: registryFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: registryFile, options: .atomic)
+        } catch {
+            throw ShareError.cloudflaredRegistryWriteFailed("\(registryFile.path): \(error.localizedDescription)")
+        }
     }
 }
