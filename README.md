@@ -175,10 +175,15 @@ Sites are provisioned automatically (no install wizard) and log in with
   fixed `--hostname` uses a named tunnel after `cloudflared tunnel login`), or
   your own executable in `~/Library/Application Support/WPContainer/share-providers/`.
   `--allow /wp-json/wc/v3/webhooks` or `--allow '?wc-api'` lets payment and
-  webhook callbacks through without the password. Links are rewritten to the
-  public URL on the fly, edits saved through a share keep local URLs, and every
-  response carries `X-Robots-Tag: noindex, nofollow`. A proxy host (the app or
-  `wp-container proxy serve`) must be running. Limits: the free ngrok plan
+  webhook callbacks through without the password. A `?key` exception applies on
+  every path, and requests that skip the password reach the site without
+  cookies, as a logged-out visitor; `/wp-login.php` and `/xmlrpc.php` always ask
+  for it. Links are rewritten to the public URL on the fly, edits saved through
+  a share keep local URLs, and every response carries
+  `X-Robots-Tag: noindex, nofollow`. A proxy host (the app or
+  `wp-container proxy serve`) from a build with sharing must be running; an
+  older app also drops share settings whenever it saves the store. A share that
+  goes down keeps its site exempt from idle-stop until it is stopped. Limits: the free ngrok plan
   allows one share at a time and shows ngrok's own warning page to browser
   visitors; subdomain multisite is not supported; application-password and
   Basic-auth REST requests do not pass through a share; static CSS/JS files are

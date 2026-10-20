@@ -574,10 +574,15 @@ Any site or branch environment can be put on a public URL behind a password.
 - **CLI**: `wp-container share [start] <site|env> [--provider P] [--hostname H]
   [--clear-hostname] [--allow <entry>]... [--clear-allow] [--reset-password]
   [--no-auth] [--json]`, `share stop <target>`, `share list`, `share default
-  [<provider>]`. Starting a share starts a stopped target first and prints the
-  URL, whether it is temporary, and the credentials. A proxy host (the app or
-  `wp-container proxy serve`) must be running; it owns the share listeners
-  (bound to `127.0.0.1`) and the provider processes.
+  [<provider> | --clear]`. Starting a share checks its settings and the proxy
+  host, starts a stopped target, and prints the URL, whether it is temporary,
+  and the credentials. A proxy host (the app or `wp-container proxy serve`) must
+  be running; it owns the share listeners (bound to `127.0.0.1`) and the
+  provider processes. A share-capable proxy host keeps `proxy-shares.json`
+  present while it runs (`[]` when nothing is shared); when a proxy host runs
+  without it, `share` fails at once because that host was built without
+  sharing. While no proxy host runs, `share list` and `share_status` report
+  active shares as down.
 - **MCP**: `share_start`, `share_stop`, `share_status`. Agents cannot turn the
   password off or change exceptions.
 - **App**: a Share card on the site and env detail pages, a default-provider
@@ -592,9 +597,13 @@ Any site or branch environment can be put on a public URL behind a password.
 - **cloudflared**: without `--hostname` it opens a quick tunnel on a temporary
   `*.trycloudflare.com` URL and needs no account. With `--hostname` it creates a
   named tunnel (`wpc-<slug>`) and a DNS route, after `cloudflared tunnel login`.
-  An existing DNS record is never overwritten. cloudflared cannot delete DNS
-  records, so after a hostname is cleared or a site is deleted, remove the CNAME
-  in the Cloudflare dashboard; the CLI and app warn with the record name.
+  The registry (`share-cloudflare.json`) records the tunnels and every hostname
+  WP Container routed. A DNS record it did not create is never overwritten; a
+  hostname it routed before is pointed at the new tunnel. The tunnel is deleted
+  when the hostname is cleared or changed, or the site is deleted; switching
+  provider keeps it. cloudflared cannot delete DNS records, so after a hostname
+  is cleared or a site is deleted, remove the CNAME in the Cloudflare dashboard;
+  the CLI and app warn with the record name.
 - **Custom**: an executable named `<name>` in
   `~/Library/Application Support/WPContainer/share-providers/`, selected with
   `--provider <name>`.
@@ -605,15 +614,17 @@ Any site or branch environment can be put on a public URL behind a password.
   `http://127.0.0.1:PORT`), `WPC_SHARE_HOSTNAME` (the requested public host,
   empty when none), `WPC_SHARE_INSTANCE` (the site or env slug).
 - The script stays in the foreground while the tunnel is up.
-- The first `http://` or `https://` URL printed on stdout or stderr is the public
-  URL: origin only, with no path, query or credentials. When `WPC_SHARE_HOSTNAME`
-  is set, the URL's host must match it.
+- The first valid origin URL printed on stdout or stderr is the public URL: an
+  `http://` or `https://` origin with no path, query or credentials. When
+  `WPC_SHARE_HOSTNAME` is set, the URL's host must match it. Without a hostname
+  the URL is labelled temporary.
 - The script is stopped with SIGTERM, then SIGKILL; it should `exec` its tunnel
   so the signal reaches it.
 
 ```bash
 #!/bin/sh
 # share-providers/mytunnel
+# my-tunnel-tool must print its public URL, e.g. https://abc.example.com.
 exec my-tunnel-tool --to "$WPC_SHARE_UPSTREAM" ${WPC_SHARE_HOSTNAME:+--host "$WPC_SHARE_HOSTNAME"}
 ```
 
@@ -626,10 +637,17 @@ exec my-tunnel-tool --to "$WPC_SHARE_UPSTREAM" ${WPC_SHARE_HOSTNAME:+--host "$WP
 - 10 wrong passwords within 60 seconds lock the share for 30 seconds (HTTP 429).
 - **Exceptions** (`--allow`, repeatable, saved per site; `--clear-allow` removes
   them): a path prefix (`/wp-json/wc/v3/webhooks`) or a query parameter
-  (`?wc-api`, `?wc-api=wc_stripe`). Query exceptions match on any path. A
-  path-prefix exception does not apply to a request carrying `rest_route`, which
-  would reach any REST endpoint. Anyone with the link can reach listed addresses
-  without the password.
+  (`?wc-api`, `?wc-api=wc_stripe`). A query exception applies on every path, so
+  `?wc-api` also matches `/wp-admin/?wc-api=1`. A path-prefix exception does not
+  apply to a request carrying `rest_route` in its query, and a request that
+  skipped the password with a POST `rest_route` is refused with 401 by the share
+  PHP handler; either would reach any REST endpoint. `/wp-login.php` and
+  `/xmlrpc.php` are never exempt, under any prefix or with path info. Anyone
+  with the link can reach listed addresses without the password.
+- A request that skips the password through an exception reaches the site
+  without its `Cookie` header, as a logged-out visitor, and carries
+  `X-WPC-Share-Exempt: 1`. Valid share credentials on the same request keep the
+  cookies.
 
 ### URL handling
 
@@ -650,7 +668,13 @@ exec my-tunnel-tool --to "$WPC_SHARE_UPSTREAM" ${WPC_SHARE_HOSTNAME:+--host "$WP
 - Shares reopen after the app or proxy host restarts if the site is still
   running.
 - An open share keeps its site from idle-stop and its env from being suggested
-  for settling.
+  for settling. A share that is down stays open until it is stopped, so it keeps
+  that exemption.
+- A share requested for an instance that stopped before the share started is
+  reported down with "The site isn't running."
+- Share settings live in `sites.json`, which is written with mode 0600 because it
+  holds share passwords. An older app build that saves the store drops share
+  settings and the default provider.
 
 ### Limits
 
@@ -662,7 +686,8 @@ exec my-tunnel-tool --to "$WPC_SHARE_UPSTREAM" ${WPC_SHARE_HOSTNAME:+--host "$WP
 ### Validation
 
 `scripts/validate-share.sh` drives a disposable site through a fixture provider
-and asserts the gate, exceptions, robots header, link rewriting, saved-URL
+and asserts the gate, exceptions (including that `/wp-login.php`, `/xmlrpc.php`
+and a POST `rest_route` stay behind the password), robots header, link rewriting, saved-URL
 handling and passthrough of gzip/binary responses. It needs a proxy host running
 the current build.
 

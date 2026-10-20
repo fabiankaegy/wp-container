@@ -149,10 +149,10 @@ enum MCPTools {
                 "source_url": str("Trust this URL as the dump's source instead of the detected `home` option."),
              ], required: ["file"])),
         Tool(name: "share_start",
-             description: "Share a site or worktree environment on a public URL through a tunnel provider (ngrok by default, cloudflared, or a custom provider). WARNING: the link exposes the site to the public internet; it is protected by a username and password, which this tool returns and the user must be told to pass on only to intended visitors. Auto-starts the instance. The WP Container app or `wp-container proxy serve` must be running. Turning the password off and adding password exceptions are human-only actions (`wp-container share` CLI or the app); this tool cannot do either. A provider failure is returned as an error with the provider's message. Returns {url, temporary, provider, username, password, instance, allow, state}.",
+             description: "Share a site or worktree environment on a public URL through a tunnel provider: ngrok, cloudflared, or a custom provider. Without `provider`, the instance's saved provider is used, or else the default provider (ngrok unless changed). WARNING: the link exposes the site to the public internet; it is protected by a username and password, which this tool returns and the user must be told to pass on only to intended visitors. Auto-starts the instance. The WP Container app or `wp-container proxy serve` must be running. Turning the password off and changing password exceptions are human-only actions (`wp-container share` CLI or the app); this tool cannot do either. Exceptions saved earlier stay in force and are listed in `allow`. A share that was opened without a password is reopened with the password on. A provider failure is returned as an error with the provider's message. Returns {url, temporary, provider, username, password, instance, allow, state}.",
              inputSchema: obj([
                 "slug": str("Site or environment slug (defaults to the scoped site)."),
-                "provider": str("Tunnel provider: ngrok, cloudflared, or a custom provider name. Omit for the configured default."),
+                "provider": str("Tunnel provider: ngrok, cloudflared, or a custom provider name. Omit to keep the instance's saved provider or the default."),
                 "hostname": str("Fixed public hostname, when the provider supports one."),
                 "reset_password": bool("Generate a new password for the share."),
              ])),

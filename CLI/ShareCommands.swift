@@ -43,8 +43,6 @@ struct ShareStart: AsyncParsableCommand {
             let envelope = try await ctx.load()
             guard let resolved = resolveTarget(target, in: envelope) else { throw CLIErrorJSON("not_found", detail: target) }
             let inst = resolved.instance
-            await ctx.persistence.recordActivity(instanceID: inst.instanceID)
-            try await ctx.ensureRunning(resolved, envelope: envelope)
 
             var hostnameChange: String?? = nil
             if clearHostname {
@@ -55,6 +53,10 @@ struct ShareStart: AsyncParsableCommand {
             let request = ShareRequest(provider: provider, hostname: hostnameChange, addAllow: allow,
                                        clearAllow: clearAllow, resetPassword: resetPassword, noAuth: noAuth)
             let control = ShareControl(persistence: ctx.persistence)
+            try await control.validate(instanceID: inst.instanceID, request)
+
+            await ctx.persistence.recordActivity(instanceID: inst.instanceID)
+            try await ctx.ensureRunning(resolved, envelope: envelope)
             let settings = try await control.request(instanceID: inst.instanceID, request)
             let status = try await control.waitForStatus(instanceID: inst.instanceID, requestID: settings.requestID)
 
@@ -123,19 +125,18 @@ struct ShareList: AsyncParsableCommand {
         let ctx = CLIContext()
         do {
             let envelope = try await ctx.load()
-            let rows = try await ShareControl(persistence: ctx.persistence).list().map { entry -> ShareListRow in
+            let control = ShareControl(persistence: ctx.persistence)
+            let entries = try await control.list()
+            let proxyRunning = control.isProxyRunning()
+            let rows = entries.map { entry -> ShareListRow in
                 let status = entry.status
-                let state: String
-                switch (entry.settings.active, status?.state) {
-                case (false, _): state = "inactive"
-                case (true, .some(let s)): state = s.rawValue
-                case (true, nil): state = "starting"
-                }
-                return ShareListRow(instance: entry.instance.containerSlug, state: state,
+                let listed = ShareControl.listedState(active: entry.settings.active, status: status,
+                                                      proxyRunning: proxyRunning)
+                return ShareListRow(instance: entry.instance.containerSlug, state: listed.state,
                                     url: status?.url,
                                     provider: status?.provider ?? envelope.effectiveProvider(for: entry.settings),
                                     temporary: status?.temporary,
-                                    error: status?.error)
+                                    error: listed.error)
             }
             if output.json {
                 emitLine(CLIJSON.string(rows))
@@ -162,12 +163,18 @@ struct ShareDefault: AsyncParsableCommand {
         abstract: "Show or set the provider used by shares that name none."
     )
     @Argument(help: "Provider to use by default; omit to show the current one.") var provider: String?
+    @Flag(name: .long, help: "Return to the built-in default provider, ngrok.") var clear = false
     @OptionGroup var output: JSONOptions
 
     func run() async throws {
         let ctx = CLIContext()
         do {
-            if let provider {
+            if provider != nil && clear {
+                throw CLIErrorJSON("bad_args", detail: "a provider and --clear cannot be combined")
+            }
+            if clear {
+                try await ShareControl(persistence: ctx.persistence).setDefaultProvider(nil)
+            } else if let provider {
                 try await ShareControl(persistence: ctx.persistence).setDefaultProvider(provider)
             }
             let envelope = try await ctx.load()

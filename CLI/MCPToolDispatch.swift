@@ -125,8 +125,6 @@ enum MCPToolDispatch {
             throw ToolError("not_found", "No site or environment with slug \(target).")
         }
         let instanceID = resolved.instance.instanceID
-        await ctx.persistence.recordActivity(instanceID: instanceID)
-        try await ctx.ensureRunning(resolved, envelope: envelope)
 
         var hostnameChange: String?? = nil
         if let hostname = args["hostname"]?.stringValue {
@@ -136,6 +134,10 @@ enum MCPToolDispatch {
                                    addAllow: [], clearAllow: false,
                                    resetPassword: args["reset_password"]?.boolValue ?? false, noAuth: false)
         let control = ShareControl(persistence: ctx.persistence)
+        try await control.validate(instanceID: instanceID, request)
+
+        await ctx.persistence.recordActivity(instanceID: instanceID)
+        try await ctx.ensureRunning(resolved, envelope: envelope)
         let settings = try await control.request(instanceID: instanceID, request)
         let status = try await control.waitForStatus(instanceID: instanceID, requestID: settings.requestID)
         if status.state == .down {
@@ -172,24 +174,22 @@ enum MCPToolDispatch {
             }
             onlyID = resolved.instance.instanceID
         }
-        let entries = try await ShareControl(persistence: ctx.persistence).list()
+        let control = ShareControl(persistence: ctx.persistence)
+        let entries = try await control.list()
+        let proxyRunning = control.isProxyRunning()
         let rows: [[String: Any]] = entries
             .filter { onlyID == nil || $0.instance.instanceID == onlyID }
             .map { entry in
                 let status = entry.status
-                let state: String
-                switch (entry.settings.active, status?.state) {
-                case (false, _): state = "inactive"
-                case (true, .some(let s)): state = s.rawValue
-                case (true, nil): state = "starting"
-                }
+                let listed = ShareControl.listedState(active: entry.settings.active, status: status,
+                                                      proxyRunning: proxyRunning)
                 return [
                     "instance": entry.instance.containerSlug,
-                    "state": state,
+                    "state": listed.state,
                     "url": status?.url as Any? ?? NSNull(),
                     "provider": status?.provider ?? envelope.effectiveProvider(for: entry.settings),
                     "temporary": status?.temporary as Any? ?? NSNull(),
-                    "error": status?.error as Any? ?? NSNull(),
+                    "error": listed.error as Any? ?? NSNull(),
                 ]
             }
         return MCPResult.json(rows)

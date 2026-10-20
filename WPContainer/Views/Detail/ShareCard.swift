@@ -208,7 +208,7 @@ struct ShareCard: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Open without password").font(.callout.weight(.medium))
-                Text("Requests that skip the password: a path prefix such as /feed or a query such as ?preview=1.")
+                Text("Requests that skip the password: a path prefix such as /wp-json/wc/v3/webhooks or a query such as ?wc-api=wc_stripe. A query applies on every path, and these requests reach the site without cookies.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 ForEach(allow, id: \.self) { rule in
