@@ -141,6 +141,12 @@ public enum ShareError: Error, Sendable, CustomStringConvertible {
     case providerTimedOut(stderrTail: [String])
     /// The provider exited before reporting a public URL.
     case providerExited(status: Int32, stderrTail: [String])
+    /// cloudflared has no origin certificate, so it cannot manage tunnels or DNS.
+    case cloudflaredNotLoggedIn
+    /// The hostname already has a DNS record that WP Container did not create.
+    case dnsRecordExists(String)
+    /// A cloudflared tunnel command failed; `output` is its trimmed error text.
+    case cloudflaredFailed(command: String, output: String)
 
     public var description: String {
         switch self {
@@ -160,6 +166,12 @@ public enum ShareError: Error, Sendable, CustomStringConvertible {
             return "Invalid share hostname \"\(value)\": use a bare DNS host name such as share.example.com."
         case .invalidTunnelName(let value):
             return "Invalid tunnel name \"\(value)\": use letters, digits, dots, underscores and hyphens, not starting with a hyphen."
+        case .cloudflaredNotLoggedIn:
+            return "cloudflared is not logged in. Run: cloudflared tunnel login"
+        case .dnsRecordExists(let hostname):
+            return "\(hostname) already has a DNS record. Remove it in the Cloudflare dashboard or choose another hostname."
+        case .cloudflaredFailed(let command, let output):
+            return "cloudflared \(command) failed: \(output)"
         case .hostnameMismatch(let expected, let got):
             return "The share provider returned the hostname \(got) instead of the requested \(expected)."
         case .providerTimedOut(let tail):
