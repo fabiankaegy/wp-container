@@ -9,7 +9,8 @@
 # Creates a disposable single site, exports it, imports the archive as a
 # second site, and checks the copy's content, URLs, login, and HTTP response.
 # Repeats the round trip for a subdirectory multisite network, then checks
-# that a corrupt archive is refused without creating a site. No site gets a
+# that a corrupt archive is refused without creating a site and that a failed
+# database import removes the partly imported site. No site gets a
 # custom domain, so /etc/hosts is never touched. Always deletes the
 # disposable sites (containers + folders) on exit.
 #
@@ -389,6 +390,58 @@ if [[ "$BEFORE" == "$AFTER" ]]; then
   pass "no site was added by the failed import"
 else
   fail "the failed import changed the site list: $(diff <(echo "$BEFORE") <(echo "$AFTER") | tr '\n' ' ')"
+fi
+
+# ----------------------------------------------------------------------------
+# 6. Failed database import
+# ----------------------------------------------------------------------------
+step "6. A failed database import removes the partly imported site"
+"$BIN" delete "$SLUG_B" >/dev/null
+if site_slugs | grep -qx "$SLUG_B"; then
+  fail "$SLUG_B is still in the store after delete"
+  exit 1
+fi
+pass "deleted $SLUG_B so its slug is free again"
+
+mkdir -p "$TMP/badsql" "$TMP/parent"
+cp "$TMP/a.zip" "$TMP/badsql.zip"
+echo "This archive's dump is plain text, not SQL." >"$TMP/badsql/database.sql"
+(cd "$TMP/badsql" && zip -q "$TMP/badsql.zip" database.sql)
+if [[ "$(unzip -p "$TMP/badsql.zip" database.sql)" == "This archive's dump is plain text, not SQL." ]]; then
+  pass "built $TMP/badsql.zip with a non-SQL database.sql"
+else
+  fail "could not replace database.sql in $TMP/badsql.zip"
+  exit 1
+fi
+
+BEFORE=$(site_slugs | sort)
+set +e
+ROLLBACK_ERR=$("$BIN" import "$TMP/badsql.zip" --name "$SLUG_B" --no-domain --path "$TMP/parent" --json 2>&1 1>/dev/null)
+ROLLBACK_EXIT=$?
+set -e
+echo "$ROLLBACK_ERR"
+if [[ "$ROLLBACK_EXIT" -ne 0 ]] && grep -q "wp db import" <<<"$ROLLBACK_ERR"; then
+  pass "import with a non-SQL dump fails at wp db import (exit $ROLLBACK_EXIT)"
+else
+  fail "import with a non-SQL dump did not fail at wp db import (exit $ROLLBACK_EXIT)"
+fi
+AFTER=$(site_slugs | sort)
+if [[ "$BEFORE" == "$AFTER" ]] && ! grep -qx "$SLUG_B" <<<"$AFTER"; then
+  pass "the store has no $SLUG_B after the rollback"
+else
+  fail "the failed import changed the site list: $(diff <(echo "$BEFORE") <(echo "$AFTER") | tr '\n' ' ')"
+fi
+LEFT_FOLDERS=$(ls -A "$TMP/parent" | grep -E "^$SLUG_B|^\.wpc-import-" || true)
+if [[ -z "$LEFT_FOLDERS" ]]; then
+  pass "no $SLUG_B folder or .wpc-import-* folder left in $TMP/parent"
+else
+  fail "the rollback left folders behind: $(tr '\n' ' ' <<<"$LEFT_FOLDERS")"
+fi
+LEFT_CONTAINERS=$(/usr/local/bin/container list --all 2>/dev/null | grep -E "wpc-$SLUG_B-(wp|db)" || true)
+if [[ -z "$LEFT_CONTAINERS" ]]; then
+  pass "no $SLUG_B containers left"
+else
+  fail "the rollback left containers behind: $(tr '\n' ' ' <<<"$LEFT_CONTAINERS")"
 fi
 
 echo
