@@ -126,6 +126,13 @@ public enum ShareError: Error, Sendable, CustomStringConvertible {
     case invalidException(String)
     /// A share origin or upstream host carrying a line break, which would inject request headers.
     case invalidGateConfig(String)
+    /// No built-in or custom provider has this name.
+    case providerNotFound(String)
+    /// The provider's executable is not installed; `install` is the command that installs it.
+    case providerMissingBinary(name: String, install: String)
+    case ngrokNotAuthenticated
+    /// The provider reported a public hostname other than the requested one.
+    case hostnameMismatch(expected: String, got: String)
 
     public var description: String {
         switch self {
@@ -133,6 +140,14 @@ public enum ShareError: Error, Sendable, CustomStringConvertible {
             return "Invalid share exception \"\(text)\": use /path-prefix or ?query-key[=value]."
         case .invalidGateConfig(let field):
             return "Invalid share configuration: \(field) must not contain line breaks."
+        case .providerNotFound(let name):
+            return "Unknown share provider \"\(name)\": use ngrok, cloudflared, or an executable in the share-providers directory."
+        case .providerMissingBinary(let name, let install):
+            return "The share provider \(name) is not installed. Install it with: \(install)"
+        case .ngrokNotAuthenticated:
+            return "ngrok has no authtoken. Run: ngrok config add-authtoken <token>"
+        case .hostnameMismatch(let expected, let got):
+            return "The share provider returned the hostname \(got) instead of the requested \(expected)."
         }
     }
 }
