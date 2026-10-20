@@ -21,7 +21,15 @@ struct ShareCard: View {
     @State private var revealPassword = false
     @State private var customProviders: [String] = []
     @State private var seeded = false
+    @State private var seededSnapshot = Snapshot()
 
+    private struct Snapshot: Equatable {
+        var provider: String?
+        var hostname = ""
+        var allow: [String] = []
+    }
+
+    private var current: Snapshot { Snapshot(provider: provider, hostname: hostname, allow: allow) }
     private var status: ShareStatus? { vm.shareStatus(for: instanceID) }
     private var isStarting: Bool { vm.sharesStarting.contains(instanceID) || status?.state == .starting }
     private var isLive: Bool { share?.active == true && status?.state == .live }
@@ -40,6 +48,9 @@ struct ShareCard: View {
             } else {
                 content
             }
+        }
+        .onChange(of: share) {
+            if current == seededSnapshot { applySaved() }
         }
         .task {
             customProviders = vm.customShareProviders()
@@ -88,12 +99,14 @@ struct ShareCard: View {
 
     @ViewBuilder
     private var actionButton: some View {
-        if isLive {
+        if isStarting {
+            Button("Cancel") { Task { await vm.stopShare(instanceID) } }
+        } else if isLive {
             Button("Stop sharing") { Task { await vm.stopShare(instanceID) } }
         } else {
             Button("Start sharing") { Task { await vm.startShare(instanceID, request: request()) } }
                 .buttonStyle(.borderedProminent)
-                .disabled(isStarting)
+                .disabled(!seeded)
         }
     }
 
@@ -238,10 +251,15 @@ struct ShareCard: View {
 
     private func seed() {
         guard !seeded else { return }
+        applySaved()
         seeded = true
+    }
+
+    private func applySaved() {
         provider = share?.provider
         hostname = share?.hostname ?? ""
         allow = share?.allow.map(\.description) ?? []
+        seededSnapshot = current
     }
 
     private func addAllow() {
@@ -265,11 +283,7 @@ struct ShareCard: View {
         } else if share?.hostname != nil {
             hostnameChange = .some(nil)
         }
-        var chosenProvider = provider
-        if chosenProvider == nil, share?.provider != nil {
-            chosenProvider = vm.shareDefaultProvider ?? ShareSettings.defaultProvider
-        }
-        return ShareRequest(provider: chosenProvider, hostname: hostnameChange, addAllow: allow,
+        return ShareRequest(provider: provider, clearProvider: provider == nil, hostname: hostnameChange, addAllow: allow,
                             clearAllow: true, noAuth: noAuth)
     }
 }

@@ -166,6 +166,8 @@ public enum ShareError: Error, Sendable, CustomStringConvertible {
     case proxyNotRunning
     /// The share did not reach `live` or `down` before the wait timeout.
     case timedOut
+    /// The share was stopped before it reached `live` or `down`.
+    case cancelled
     /// No site or worktree env has this id.
     case instanceNotFound(UUID)
 
@@ -207,6 +209,8 @@ public enum ShareError: Error, Sendable, CustomStringConvertible {
             return "Sharing needs the proxy running. Start the WP Container app or run: wp-container proxy serve"
         case .timedOut:
             return "The share did not report a status in time. Check its state with: wp-container share list"
+        case .cancelled:
+            return "Sharing was stopped."
         case .instanceNotFound(let id):
             return "No site or environment with id \(id.uuidString) exists."
         case .providerStopped(let status, let tail):

@@ -3,6 +3,8 @@ import Foundation
 /// A change to an instance's share settings. Unset fields leave the current value as it is.
 public struct ShareRequest: Sendable {
     public var provider: String?
+    /// Removes the instance's own provider so it follows the store default. Wins over `provider`.
+    public var clearProvider: Bool
     /// Outer nil leaves the hostname unchanged; `.some(nil)` clears it.
     public var hostname: String??
     public var addAllow: [String]
@@ -10,9 +12,10 @@ public struct ShareRequest: Sendable {
     public var resetPassword: Bool
     public var noAuth: Bool
 
-    public init(provider: String? = nil, hostname: String?? = nil, addAllow: [String] = [],
+    public init(provider: String? = nil, clearProvider: Bool = false, hostname: String?? = nil, addAllow: [String] = [],
                 clearAllow: Bool = false, resetPassword: Bool = false, noAuth: Bool = false) {
         self.provider = provider
+        self.clearProvider = clearProvider
         self.hostname = hostname
         self.addAllow = addAllow
         self.clearAllow = clearAllow
@@ -51,7 +54,7 @@ public struct ShareControl: Sendable {
         guard networkType != .subdomain else { throw ShareError.subdomainMultisite }
         guard proxyRunning() else { throw ShareError.proxyNotRunning }
 
-        if let provider = req.provider { _ = try ShareProviders.resolve(provider) }
+        if !req.clearProvider, let provider = req.provider { _ = try ShareProviders.resolve(provider) }
         if let hostname = req.hostname, let value = hostname {
             _ = try ShareProviders.fixedURL(forHostname: value)
         }
@@ -69,7 +72,8 @@ public struct ShareControl: Sendable {
     }
 
     /// Polls until the instance publishes a `live` or `down` status for `requestID`, the id
-    /// `request` returned in its settings. Statuses of earlier requests are ignored.
+    /// `request` returned in its settings. Statuses of earlier requests are ignored. Throws
+    /// `ShareError.cancelled` when the share is stopped while waiting.
     public func waitForStatus(instanceID: UUID, requestID: UUID?,
                               timeout: Duration = .seconds(45)) async throws -> ShareStatus {
         let clock = ContinuousClock()
@@ -81,6 +85,9 @@ public struct ShareControl: Sendable {
                 return status
             }
             guard proxyRunning() else { throw ShareError.proxyNotRunning }
+            let envelope = try await persistence.load()
+            let stillActive = Self.instances(in: envelope).first { $0.instanceID == instanceID }?.share?.active
+            if stillActive == false { throw ShareError.cancelled }
             guard clock.now < deadline else { throw ShareError.timedOut }
             try await Task.sleep(for: .milliseconds(250))
         }
@@ -141,7 +148,11 @@ public struct ShareControl: Sendable {
         if settings.password.isEmpty || req.resetPassword {
             settings.password = ShareSettings.generated().password
         }
-        if let provider = req.provider { settings.provider = provider }
+        if req.clearProvider {
+            settings.provider = nil
+        } else if let provider = req.provider {
+            settings.provider = provider
+        }
         if let hostname = req.hostname { settings.hostname = hostname }
         if req.clearAllow { settings.allow = [] }
         for exception in allow where !settings.allow.contains(exception) {

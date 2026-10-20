@@ -268,6 +268,47 @@ final class ShareControlTests: XCTestCase {
         }
     }
 
+    func testClearProviderRestoresTheStoreDefault() async throws {
+        let site = try await seed("my-site")
+        let control = makeControl()
+        let pinned = try await control.request(instanceID: site.id, ShareRequest(provider: "cloudflared"))
+        XCTAssertEqual(pinned.provider, "cloudflared")
+        try await control.setDefaultProvider("ngrok")
+        let cleared = try await control.request(instanceID: site.id, ShareRequest(clearProvider: true))
+        XCTAssertNil(cleared.provider)
+        let envelope = try await persistence.load()
+        XCTAssertEqual(envelope.effectiveProvider(for: envelope.sites[0].share), "ngrok")
+        try await control.setDefaultProvider("cloudflared")
+        let followed = try await persistence.load()
+        XCTAssertEqual(followed.effectiveProvider(for: followed.sites[0].share), "cloudflared")
+    }
+
+    func testClearProviderWinsOverProvider() async throws {
+        let site = try await seed("my-site")
+        let control = makeControl()
+        _ = try await control.request(instanceID: site.id, ShareRequest(provider: "cloudflared"))
+        let saved = try await control.request(instanceID: site.id,
+                                              ShareRequest(provider: "ngrok", clearProvider: true))
+        XCTAssertNil(saved.provider)
+    }
+
+    func testWaitThrowsCancelledWhenShareIsStopped() async throws {
+        let site = try await seed("my-site")
+        let control = makeControl()
+        let settings = try await control.request(instanceID: site.id, ShareRequest())
+        let stopper = Task {
+            try await Task.sleep(for: .milliseconds(300))
+            try await control.stop(instanceID: site.id)
+        }
+        do {
+            _ = try await control.waitForStatus(instanceID: site.id, requestID: settings.requestID,
+                                                timeout: .seconds(10))
+            XCTFail("expected cancelled")
+        } catch ShareError.cancelled {
+        }
+        try await stopper.value
+    }
+
     // MARK: - Helpers
 
     private func makeControl(running: Bool = true) -> ShareControl {

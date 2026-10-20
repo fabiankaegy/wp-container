@@ -54,6 +54,8 @@ public final class AppViewModel {
     /// The store-wide default share provider; nil means the built-in default.
     public private(set) var shareDefaultProvider: String?
 
+    /// Instances whose pending share start was stopped by the user.
+    @ObservationIgnored private var shareCancelled: Set<UUID> = []
     @ObservationIgnored private let shareControl = ShareControl(persistence: StorePersistence())
 
     public var selection: UUID?
@@ -798,22 +800,37 @@ public final class AppViewModel {
         shareStatuses[instanceID]
     }
 
+    /// Whether the instance's share is live and still wanted, which keeps a status the proxy
+    /// has not yet withdrawn from showing after a stop.
+    public func isShareLive(_ instanceID: UUID) -> Bool {
+        guard shareStatuses[instanceID]?.state == .live else { return false }
+        let share = store.site(id: instanceID)?.share ?? store.env(id: instanceID)?.share
+        return share?.active == true
+    }
+
     /// Starts the instance when it is stopped, requests the share and waits for the
     /// provider to report `live` or `down`.
     public func startShare(_ instanceID: UUID, request: ShareRequest) async {
         guard !sharesStarting.contains(instanceID) else { return }
         sharesStarting.insert(instanceID)
         shareErrors[instanceID] = nil
-        defer { sharesStarting.remove(instanceID) }
+        shareCancelled.remove(instanceID)
+        defer {
+            sharesStarting.remove(instanceID)
+            shareCancelled.remove(instanceID)
+        }
         do {
             try await startInstanceForShare(instanceID)
             await ensureProxyRunning()
+            guard !shareCancelled.contains(instanceID) else { throw ShareError.cancelled }
             let settings = try await shareControl.request(instanceID: instanceID, request)
             let status = try await shareControl.waitForStatus(instanceID: instanceID, requestID: settings.requestID)
             shareStatuses[instanceID] = status
             if status.state == .down {
                 shareErrors[instanceID] = status.error ?? "The share could not start."
             }
+        } catch ShareError.cancelled {
+            shareErrors[instanceID] = nil
         } catch {
             shareErrors[instanceID] = "\(error)"
         }
@@ -821,6 +838,7 @@ public final class AppViewModel {
     }
 
     public func stopShare(_ instanceID: UUID) async {
+        if sharesStarting.contains(instanceID) { shareCancelled.insert(instanceID) }
         do {
             try await shareControl.stop(instanceID: instanceID)
             shareStatuses[instanceID] = nil
@@ -866,11 +884,11 @@ public final class AppViewModel {
 
     private func startInstanceForShare(_ instanceID: UUID) async throws {
         if let site = store.site(id: instanceID) {
-            guard !site.status.isRunning else { return }
-            startSite(site)
+            if site.status.isRunning { return }
+            if !site.status.isTransitional { startSite(site) }
         } else if let env = store.env(id: instanceID) {
-            guard !env.status.isRunning else { return }
-            startEnv(env)
+            if env.status.isRunning { return }
+            if !env.status.isTransitional { startEnv(env) }
         } else {
             throw ShareError.instanceNotFound(instanceID)
         }
@@ -878,6 +896,7 @@ public final class AppViewModel {
         let deadline = clock.now.advanced(by: .seconds(180))
         while clock.now < deadline {
             try await Task.sleep(for: .milliseconds(500))
+            if shareCancelled.contains(instanceID) { throw ShareError.cancelled }
             let status = store.site(id: instanceID)?.status ?? store.env(id: instanceID)?.status
             guard let status else { throw ShareError.instanceNotFound(instanceID) }
             if status.isRunning { return }

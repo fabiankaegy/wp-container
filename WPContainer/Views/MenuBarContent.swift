@@ -175,7 +175,7 @@ private struct SiteMenuRow: View {
                     .font(.caption2).foregroundStyle(.secondary)
             }
             Spacer(minLength: 6)
-            if vm.shareStatus(for: site.id)?.state == .live {
+            if vm.isShareLive(site.id) {
                 Image(systemName: "link")
                     .font(.caption).foregroundStyle(.secondary)
                     .accessibilityLabel("Shared")
@@ -216,7 +216,7 @@ private struct EnvMenuRow: View {
                     .font(.caption2).foregroundStyle(.secondary)
             }
             Spacer(minLength: 6)
-            if vm.shareStatus(for: env.id)?.state == .live {
+            if vm.isShareLive(env.id) {
                 Image(systemName: "link")
                     .font(.caption).foregroundStyle(.secondary)
                     .accessibilityLabel("Shared")
