@@ -51,8 +51,13 @@ struct ExportCommand: AsyncParsableCommand {
             try await ctx.ensureRunning(resolved, envelope: envelope, noStart: noStart)
 
             let fileName = SiteArchiveService.defaultFileName(slug: siteRecord.slug, date: Date())
-            let destination = URL(fileURLWithPath: (output.map { ($0 as NSString).expandingTildeInPath } ?? fileName))
+            var destination = URL(fileURLWithPath: (output.map { ($0 as NSString).expandingTildeInPath } ?? fileName))
                 .standardizedFileURL
+            // An existing directory receives the archive under its default name.
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: destination.path, isDirectory: &isDirectory), isDirectory.boolValue {
+                destination.appendPathComponent(fileName)
+            }
             let excludes = (noDefaultExcludes ? [] : SiteArchiveService.defaultExcludes) + exclude
 
             let service = SiteArchiveService(cli: ctx.cli, lifecycle: ctx.lifecycle, persistence: ctx.persistence)

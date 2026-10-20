@@ -94,7 +94,7 @@ replacement_count() {
   # search-replace finds across all tables.
   local out
   out=$(wp_out "$1" search-replace "$2" x --all-tables --dry-run || true)
-  echo "$out" | sed -nE 's/.*Success: ([0-9]+) replacements? to be made.*/\1/p' | tail -n 1
+  sed -nE 's/.*Success: ([0-9]+) replacements? to be made.*/\1/p' <<<"$out" | tail -n 1
 }
 
 assert_no_staging() {
@@ -251,7 +251,7 @@ pass "added probe plugin with node_modules/ and .git/"
 
 EXPORT_OUT=$("$BIN" export "$SLUG_A" -o "$TMP/a.zip")
 echo "$EXPORT_OUT"
-if [[ -f "$TMP/a.zip" ]] && echo "$EXPORT_OUT" | grep -q "^Exported $SLUG_A to $TMP/a.zip ("; then
+if [[ -f "$TMP/a.zip" ]] && grep -q "^Exported $SLUG_A to $TMP/a.zip (" <<<"$EXPORT_OUT"; then
   pass "export wrote $TMP/a.zip and reported it"
 else
   fail "export did not write or report $TMP/a.zip"
@@ -259,12 +259,13 @@ else
 fi
 
 ENTRIES=$(zipinfo -1 "$TMP/a.zip")
-if echo "$ENTRIES" | grep -qE '(^|/)node_modules(/|$)|(^|/)\.git(/|$)|\.wpc-'; then
-  fail "archive contains excluded entries: $(echo "$ENTRIES" | grep -E '(^|/)node_modules(/|$)|(^|/)\.git(/|$)|\.wpc-' | head -n 3 | tr '\n' ' ')"
-else
+EXCLUDED=$(grep -E '(^|/)node_modules(/|$)|(^|/)\.git(/|$)|\.wpc-' <<<"$ENTRIES" || true)
+if [[ -z "$EXCLUDED" ]]; then
   pass "archive has no node_modules, .git, or .wpc- entries"
+else
+  fail "archive contains excluded entries: $(head -n 3 <<<"$EXCLUDED" | tr '\n' ' ')"
 fi
-if echo "$ENTRIES" | grep -qx "wordpress/wp-content/plugins/probe/probe.php"; then
+if grep -qx "wordpress/wp-content/plugins/probe/probe.php" <<<"$ENTRIES"; then
   pass "archive keeps the probe plugin's own files"
 else
   fail "archive is missing wordpress/wp-content/plugins/probe/probe.php"
@@ -287,6 +288,15 @@ if [[ "$(echo "$FORCE_JSON" | json_field manifest.source.slug)" == "$SLUG_A" ]];
   pass "export --force --json overwrites and reports the manifest"
 else
   fail "export --force --json output unexpected: $FORCE_JSON"
+fi
+
+mkdir -p "$TMP/outdir"
+DIR_ZIP="$TMP/outdir/$SLUG_A-$(date +%Y%m%d).zip"
+"$BIN" export "$SLUG_A" -o "$TMP/outdir" >/dev/null
+if [[ -d "$TMP/outdir" && -f "$DIR_ZIP" ]]; then
+  pass "export -o <existing directory> writes $DIR_ZIP"
+else
+  fail "export -o <existing directory> did not write $DIR_ZIP"
 fi
 
 # ----------------------------------------------------------------------------
@@ -344,7 +354,7 @@ assert_round_trip "$SLUG_MS_B" "$MS_B_URL" "$MS_URL" "$MS_LOCAL"
 
 SITE_URLS=$(wp_out "$SLUG_MS_B" site list --field=url)
 echo "$SITE_URLS"
-if [[ -n "$SITE_URLS" ]] && ! echo "$SITE_URLS" | grep -qv "^$MS_B_URL/"; then
+if [[ -n "$SITE_URLS" ]] && ! grep -qv "^$MS_B_URL/" <<<"$SITE_URLS"; then
   pass "every network site URL is under $MS_B_URL"
 else
   fail "network site URLs are not all under $MS_B_URL"
