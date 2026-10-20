@@ -208,38 +208,48 @@ public actor SiteArchiveService {
             throw SiteArchiveError.insufficientDiskSpace(needed: needed, available: available)
         }
 
-        let envelope = try await persistence.load()
         let name = options.name ?? manifest.source.name
-        let slug = Self.resolveSlug(name: name, existingSlugs: Set(envelope.sites.map(\.slug)),
-                                    parentFolder: options.parentFolder)
         let domain: String?
         switch options.domain {
         case .keep:
-            domain = settings.customDomain.flatMap { $0.isEmpty ? nil : $0 }
+            domain = try Self.normalizedDomain(settings.customDomain)
         case .set(let raw):
             guard let normalized = DomainService.normalize(raw) else { throw SiteArchiveError.invalidDomain(raw) }
             domain = normalized
         case .none:
             domain = nil
         }
-        if let domain, envelope.sites.contains(where: { $0.customDomain == domain }) {
-            throw SiteArchiveError.domainInUse(domain)
-        }
 
+        // The slug and domain are checked inside the locked store write that
+        // records the site, so concurrent imports never claim the same ones.
         try enter(.creatingSite)
-        let sitePath = options.parentFolder.appendingPathComponent(slug, isDirectory: true)
+        let parentFolder = options.parentFolder
         let imageTag = options.imageOverride ?? settings.imageTag
         let groupName = options.groupName
-        let allocation = try await persistence.allocatePort(reserve: { port, env in
+        let allocation = try await persistence.allocatePort(reserve: { port, env -> SiteReservation in
+            if let domain, env.sites.contains(where: { $0.customDomain == domain }) {
+                return .domainInUse(domain)
+            }
+            let slug = Self.resolveSlug(name: name, existingSlugs: Set(env.sites.map(\.slug)),
+                                        parentFolder: parentFolder)
+            let sitePath = parentFolder.appendingPathComponent(slug, isDirectory: true)
             var site = Site(name: name, slug: slug, path: sitePath, port: port, imageTag: imageTag)
             settings.apply(to: &site)
             site.customDomain = domain
             site.imageTag = imageTag
             Self.assignGroup(named: groupName, to: &site, in: &env)
             env.sites.append(site)
-            return site
+            return .created(site)
         })
-        guard let created = allocation?.value else { throw SiteArchiveError.noFreePort }
+        let created: Site
+        switch allocation?.value {
+        case .created(let site):
+            created = site
+        case .domainInUse(let taken):
+            throw SiteArchiveError.domainInUse(taken)
+        case nil:
+            throw SiteArchiveError.noFreePort
+        }
 
         var site = created
         var warnings: [String] = []
@@ -339,9 +349,17 @@ public actor SiteArchiveService {
         }
 
         let manifestOutput = try await runTool(unzipPath, args: ["-p", archive.path, SiteArchiveLayout.manifestName], cwd: nil)
+        let manifestData = Data(manifestOutput.stdout.utf8)
+        // The version is read on its own first, so a newer schema with
+        // different fields still reports `.unsupportedSchema`.
+        let probe = try? JSONDecoder().decode(SchemaVersionProbe.self, from: manifestData)
+        guard let schemaVersion = probe?.schemaVersion else { throw SiteArchiveError.notAWPCExport }
+        if schemaVersion > SiteArchiveLayout.schemaVersion {
+            throw SiteArchiveError.unsupportedSchema(schemaVersion)
+        }
         let manifest: SiteArchiveManifest
         do {
-            manifest = try SiteArchiveManifest.decode(Data(manifestOutput.stdout.utf8))
+            manifest = try SiteArchiveManifest.decode(manifestData)
         } catch let error as SiteArchiveError {
             throw error
         } catch {
@@ -555,6 +573,17 @@ public actor SiteArchiveService {
 
     // MARK: - Private
 
+    /// The outcome of recording an imported site in the store.
+    private enum SiteReservation: Sendable {
+        case created(Site)
+        case domainInUse(String)
+    }
+
+    /// The part of a manifest every schema version shares.
+    private struct SchemaVersionProbe: Decodable {
+        let schemaVersion: Int
+    }
+
     /// `relativePath` without empty or `.` components, or nil when it is
     /// absolute, empty, or has a `..` component.
     private static func safeRelativePath(_ relativePath: String) -> String? {
@@ -589,6 +618,14 @@ public actor SiteArchiveService {
             throw SiteArchiveError.toolFailed(tool: tool, detail: "exit \(result.exitCode): \(detail)")
         }
         return result
+    }
+
+    /// `raw` normalized like `create --domain`, or nil when it is nil or empty.
+    /// Throws `.invalidDomain` for a non-empty value that does not normalize.
+    private static func normalizedDomain(_ raw: String?) throws -> String? {
+        guard let raw, !raw.isEmpty else { return nil }
+        guard let normalized = DomainService.normalize(raw) else { throw SiteArchiveError.invalidDomain(raw) }
+        return normalized
     }
 
     /// Bytes available for important data on the volume holding `folder`, or

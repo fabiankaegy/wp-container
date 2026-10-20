@@ -55,6 +55,18 @@ final class SiteArchiveImportTests: XCTestCase {
         await assertInspectThrows(archive, .unsupportedSchema(2))
     }
 
+    func testInspectRejectsFutureSchemaWithChangedFields() async throws {
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: makeManifest().encoded()) as? [String: Any])
+        object["schemaVersion"] = 2
+        object.removeValue(forKey: "source")
+        try write(try JSONSerialization.data(withJSONObject: object), to: "wpc-site.json")
+        try write("-- example dump\n", to: "database.sql")
+        try write("<?php // index\n", to: "wordpress/index.php")
+        let archive = try await makeZip()
+
+        await assertInspectThrows(archive, .unsupportedSchema(2))
+    }
+
     func testInspectRejectsNonZip() async throws {
         let archive = tempRoot.appendingPathComponent("x.zip")
         try "not a zip archive\n".write(to: archive, atomically: true, encoding: .utf8)
@@ -85,6 +97,29 @@ final class SiteArchiveImportTests: XCTestCase {
         XCTAssertTrue(fm.fileExists(atPath: folder.appendingPathComponent("wpc-site.json").path))
     }
 
+    // MARK: - importSite (checks that run before any container work)
+
+    func testImportRejectsArchiveDomainThatDoesNotNormalize() async throws {
+        let archive = try await makeArchive(customDomain: "not a domain!")
+        let persistence = StorePersistence(fileURL: tempRoot.appendingPathComponent("sites.json"))
+
+        await assertImportThrows(archive, persistence: persistence, .invalidDomain("not a domain!"))
+        let sites = try await persistence.load().sites
+        XCTAssertTrue(sites.isEmpty)
+    }
+
+    func testImportReportsDomainInUseFromLockedStoreWrite() async throws {
+        let archive = try await makeArchive(customDomain: "Example.TEST")
+        let persistence = StorePersistence(fileURL: tempRoot.appendingPathComponent("sites.json"))
+        let existing = Site(name: "Other", slug: "other", path: tempRoot.appendingPathComponent("sites/other"),
+                            port: 8200, imageTag: "wordpress:latest", customDomain: "example.test")
+        _ = try await persistence.mutate { $0.sites.append(existing) }
+
+        await assertImportThrows(archive, persistence: persistence, .domainInUse("example.test"))
+        let slugs = try await persistence.load().sites.map(\.slug)
+        XCTAssertEqual(slugs, ["other"])
+    }
+
     // MARK: - Helpers
 
     private func write(_ text: String, to relativePath: String) throws {
@@ -112,6 +147,29 @@ final class SiteArchiveImportTests: XCTestCase {
         return SiteArchiveManifest(
             source: .init(name: "Example", slug: "example", url: "http://example.test", localURL: "http://127.0.0.1:8100"),
             settings: SiteArchiveSettings(site: site))
+    }
+
+    /// A complete archive whose settings carry `customDomain`.
+    private func makeArchive(customDomain: String) async throws -> URL {
+        var manifest = makeManifest()
+        manifest.settings.customDomain = customDomain
+        try write(try manifest.encoded(), to: "wpc-site.json")
+        try write("-- example dump\n", to: "database.sql")
+        try write("<?php // index\n", to: "wordpress/index.php")
+        return try await makeZip()
+    }
+
+    private func assertImportThrows(_ archive: URL, persistence: StorePersistence, _ expected: SiteArchiveError,
+                                    file: StaticString = #filePath, line: UInt = #line) async {
+        let cli = ContainerCLI(binaryPath: "/nonexistent/container")
+        let service = SiteArchiveService(cli: cli, lifecycle: SiteLifecycle(cli: cli), persistence: persistence)
+        let options = SiteImportOptions(parentFolder: tempRoot.appendingPathComponent("sites", isDirectory: true))
+        do {
+            _ = try await service.importSite(archive: archive, options: options, progress: { _ in })
+            XCTFail("Expected \(expected)", file: file, line: line)
+        } catch {
+            XCTAssertEqual(error as? SiteArchiveError, expected, "\(error)", file: file, line: line)
+        }
     }
 
     private func assertInspectThrows(_ archive: URL, _ expected: SiteArchiveError,
