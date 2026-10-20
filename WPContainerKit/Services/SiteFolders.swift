@@ -23,12 +23,22 @@ public enum SiteFolders {
             .appendingPathComponent("WP Container Sites", isDirectory: true)
     }
 
+    /// The preferences domain the app saves its settings in.
+    static let appPreferencesDomain = "com.fabiankaegy.wpcontainer"
+
     /// Default root for new sites: the user's override from Settings (PLAN.md
     /// §2l, `UserDefaults` key `defaultSitesRoot`) when set, else the built-in
     /// `~/WP Container Sites`. Both the app's Add Site guide and the CLI honor it.
     public static var defaultSitesRoot: URL {
-        if let override = UserDefaults.standard.string(forKey: "defaultSitesRoot"),
-           !override.isEmpty {
+        defaultSitesRoot(preferencesDomain: appPreferencesDomain)
+    }
+
+    /// Reads the override from `preferencesDomain` by name, so the CLI sees the
+    /// app's setting when it runs through the `wpc` symlink or as an installed
+    /// copy, where the process has no bundle identifier of its own.
+    static func defaultSitesRoot(preferencesDomain: String) -> URL {
+        let override = CFPreferencesCopyAppValue("defaultSitesRoot" as CFString, preferencesDomain as CFString) as? String
+        if let override, !override.isEmpty {
             return URL(fileURLWithPath: override, isDirectory: true)
         }
         return builtInDefaultSitesRoot
