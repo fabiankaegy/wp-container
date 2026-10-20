@@ -109,9 +109,8 @@ public enum ShareProviders {
         let hasControl = text.unicodeScalars.contains { $0.properties.generalCategory == .control || $0.properties.isWhitespace }
         guard !hasControl, let parts = URLComponents(string: text) else { return nil }
         guard let scheme = parts.scheme?.lowercased(), schemes.contains(scheme) else { return nil }
-        guard let rawHost = parts.host?.lowercased(), !rawHost.isEmpty else { return nil }
-        let encodedHost = parts.percentEncodedHost ?? ""
-        guard !encodedHost.contains("%") else { return nil }
+        guard parts.host?.isEmpty == false, let encodedHost = parts.percentEncodedHost, !encodedHost.contains("%") else { return nil }
+        let rawHost = encodedHost.lowercased()
         let host = rawHost.hasPrefix("[") && rawHost.hasSuffix("]") ? String(rawHost.dropFirst().dropLast()) : rawHost
         let isIPv6 = host.contains(":")
         let ipv6Chars = Set("0123456789abcdef:.")
