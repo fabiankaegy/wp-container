@@ -32,6 +32,8 @@ struct WPContainerCLI: AsyncParsableCommand {
             MailpitCommand.self,
             RedisCommand.self,
             DBCommand.self,
+            ExportCommand.self,
+            ImportCommand.self,
             LimitsCommand.self,
             IdleCommand.self,
             DomainCommand.self,
@@ -156,7 +158,10 @@ func emitLine(_ text: String) {
 
 /// Print an error (JSON on stderr when `--json`) and exit non-zero.
 func failCommand(_ error: Error, json: Bool) -> ExitCode {
-    let cliError = (error as? CLIErrorJSON) ?? (error as? SiteMounts.Failure)?.cliError ?? CLIErrorJSON(humanText(error))
+    let cliError = (error as? CLIErrorJSON)
+        ?? (error as? SiteMounts.Failure)?.cliError
+        ?? errorCode(error).map { CLIErrorJSON($0, detail: humanText(error)) }
+        ?? CLIErrorJSON(humanText(error))
     if json {
         FileHandle.standardError.write(Data((CLIJSON.string(cliError) + "\n").utf8))
     } else {
@@ -174,7 +179,25 @@ private func humanText(_ error: Error) -> String {
     if let e = error as? WorktreeError { return e.description }
     if let e = error as? MagicLoginError { return e.description }
     if let e = error as? ImageUnavailableError { return e.description }
+    if let e = error as? SiteArchiveError { return e.description }
     return "\(error)"
+}
+
+/// The stable `error` code for typed errors that carry one.
+private func errorCode(_ error: Error) -> String? {
+    guard let archiveError = error as? SiteArchiveError else { return nil }
+    switch archiveError {
+    case .unsupportedSchema: return "unsupported_schema"
+    case .notAWPCExport: return "not_a_wpc_export"
+    case .unsafeEntry: return "unsafe_entry"
+    case .insufficientDiskSpace: return "insufficient_disk_space"
+    case .siteNotRunning: return "not_running"
+    case .outputExists: return "output_exists"
+    case .toolFailed: return "tool_failed"
+    case .domainInUse: return "domain_in_use"
+    case .invalidDomain: return "invalid_domain"
+    case .noFreePort: return "no_free_port"
+    }
 }
 
 // MARK: - list
