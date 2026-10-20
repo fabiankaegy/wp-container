@@ -91,9 +91,12 @@ share_curl() {
   curl -sS -m 60 -u "${SHARE_USER}:${SHARE_PASS}" "$@"
 }
 
-# Prints the HTTP status of a request; extra arguments go to curl.
+# Prints the HTTP status of a request (000 on a transport error); extra
+# arguments go to curl.
 http_code() {
-  curl -s -m 60 -o /dev/null -w '%{http_code}' "$@" 2>/dev/null || echo "000"
+  local code
+  code="$(curl -s -m 60 -o /dev/null -w '%{http_code}' "$@" 2>/dev/null || true)"
+  printf '%s' "${code:-000}"
 }
 
 # Prints the value of response header $2 from the dump file $1, CR stripped.
@@ -245,7 +248,11 @@ cleanup() {
     "$BIN" share stop "$SLUG" >/dev/null 2>&1
   fi
   if [[ "$SITE_CREATED" -eq 1 ]]; then
-    "$BIN" delete "$SLUG" >/dev/null 2>&1 && info "Deleted site $SLUG"
+    if "$BIN" delete "$SLUG" --keep-folder >/dev/null 2>&1; then
+      info "Deleted site $SLUG"
+    else
+      echo "[WARN] Could not delete site $SLUG. Remove it manually: $BIN delete $SLUG" >&2
+    fi
   fi
   if [[ "$PROVIDER_INSTALLED" -eq 1 ]]; then
     rm -f "$PROVIDER_FILE" && info "Removed fixture provider $PROVIDER"
@@ -298,7 +305,10 @@ if "$BIN" share list --json >/dev/null 2>&1; then
 else
   precondition_exit "'$BIN share list --json' failed; is the app store readable?"
 fi
-if "$BIN" list --json 2>/dev/null | jq -e --arg slug "$SLUG" '[.. | objects | select(.slug? == $slug)] | length > 0' >/dev/null 2>&1; then
+if ! LIST_JSON="$("$BIN" list --json 2>/dev/null)"; then
+  precondition_exit "'$BIN list --json' failed; cannot check for an existing '$SLUG' site"
+fi
+if printf '%s' "$LIST_JSON" | jq -e --arg slug "$SLUG" '[.. | objects | select(.slug? == $slug)] | length > 0' >/dev/null 2>&1; then
   precondition_exit "a site named '$SLUG' already exists; delete it with '$BIN delete $SLUG' and re-run"
 fi
 if [[ -e "$PROVIDER_FILE" ]]; then
@@ -324,20 +334,24 @@ PROVIDER_INSTALLED=1
 pass "fixture provider installed"
 
 step "2. Create and start the disposable site ($SLUG)"
+CREATE_JSON="$("$BIN" create "$SLUG" --path "$SITES_DIR" --json)" || { fail "site creation failed"; exit 1; }
+CREATED_SLUG="$(printf '%s' "$CREATE_JSON" | jq -r '.slug // empty')"
+if [[ "$CREATED_SLUG" != "$SLUG" ]]; then
+  fail "create returned slug '${CREATED_SLUG}', expected '${SLUG}'; not touching it"
+  exit 1
+fi
 SITE_CREATED=1
-CREATE_JSON="$("$BIN" create "$SLUG" --path "$SITES_DIR" --json)"
 SITE_DIR="$(printf '%s' "$CREATE_JSON" | jq -r '.path')"
 WP_DIR="${SITE_DIR}/wordpress"
 pass "site created at $SITE_DIR"
 
 # The first wp-cli call starts and provisions the site.
-LOCAL_ORIGIN="$(wpcli option get home)"
-LOCAL_ORIGIN="${LOCAL_ORIGIN%/}"
-LOCAL_SITEURL="$(wpcli option get siteurl)"
-if [[ -z "$LOCAL_ORIGIN" ]]; then
-  fail "could not read the site's home option"
+if ! LOCAL_ORIGIN="$(wpcli option get home)" || [[ -z "$LOCAL_ORIGIN" ]]; then
+  fail "wp-cli could not read the home option; the site did not start or provision ('$BIN wp $SLUG -- option get home' shows the error)"
   exit 1
 fi
+LOCAL_ORIGIN="${LOCAL_ORIGIN%/}"
+LOCAL_SITEURL="$(wpcli option get siteurl || true)"
 LOCAL_HOST="${LOCAL_ORIGIN#*://}"
 pass "site provisioned; local origin $LOCAL_ORIGIN"
 
@@ -521,12 +535,12 @@ if [[ "$LOGGED_IN" -eq 1 ]]; then
       --data-urlencode "post_status=publish" \
       --data-urlencode "publish=Publish" \
       "${ORIGIN}/wp-admin/post.php"
-    POST_ID="$(wpcli post list --post_type=post --post_status=publish --title="Share E2E Post" --field=ID | head -n 1)"
+    POST_ID="$(wpcli post list --post_type=post --post_status=publish --title="Share E2E Post" --field=ID | head -n 1 || true)"
     if [[ -z "$POST_ID" ]]; then
       fail "post saved through the share was not found"
     else
       pass "post $POST_ID created through the share"
-      stored="$(wpcli post get "$POST_ID" --field=post_content)"
+      stored="$(wpcli post get "$POST_ID" --field=post_content || true)"
       expect_contains "post_content stores the local origin" "$stored" "${LOCAL_ORIGIN}/sample-page/"
       expect_lacks "post_content has no share origin" "$stored" "$ORIGIN"
     fi
@@ -543,12 +557,12 @@ if [[ "$LOGGED_IN" -eq 1 ]]; then
       -H "X-WP-Nonce: ${NONCE}" -H 'Content-Type: application/json' \
       -d "$opt_body" "${ORIGIN}/?rest_route=/wp/v2/settings"
 
-    opt="$(wpcli option get wpc_e2e_opt)"
+    opt="$(wpcli option get wpc_e2e_opt || true)"
     expect_eq "option stores the local origin" "See ${LOCAL_ORIGIN}/option-page/" "$opt"
-    opt_arr="$(wpcli option get wpc_e2e_opt_arr --format=json)"
+    opt_arr="$(wpcli option get wpc_e2e_opt_arr --format=json || true)"
     expect_eq "serialized array option: first item local" "Item ${LOCAL_ORIGIN}/a/" "$(printf '%s' "$opt_arr" | jq -r '.[0]')"
     expect_eq "serialized array option: second item local" "${LOCAL_ORIGIN}/b/?x=1" "$(printf '%s' "$opt_arr" | jq -r '.[1]')"
-    raw_opt="$(wpcli eval 'global $wpdb; echo $wpdb->get_var( "SELECT option_value FROM {$wpdb->options} WHERE option_name = '"'"'wpc_e2e_opt_arr'"'"'" );')"
+    raw_opt="$(wpcli eval 'global $wpdb; echo $wpdb->get_var( "SELECT option_value FROM {$wpdb->options} WHERE option_name = '"'"'wpc_e2e_opt_arr'"'"'" );' || true)"
     if [[ "$raw_opt" == a:2:* ]]; then
       pass "array option is stored serialized"
       expect_lacks "serialized option has no share origin" "$raw_opt" "$ORIGIN"
@@ -563,12 +577,12 @@ if [[ "$LOGGED_IN" -eq 1 ]]; then
         -H "X-WP-Nonce: ${NONCE}" -H 'Content-Type: application/json' \
         -d "$meta_body" "${ORIGIN}/?rest_route=/wp/v2/posts/${POST_ID}"
 
-      meta="$(wpcli post meta get "$POST_ID" wpc_e2e_meta)"
+      meta="$(wpcli post meta get "$POST_ID" wpc_e2e_meta || true)"
       expect_eq "post meta stores the local origin" "Meta ${LOCAL_ORIGIN}/meta/" "$meta"
-      meta_list="$(wpcli post meta get "$POST_ID" wpc_e2e_list --format=json)"
+      meta_list="$(wpcli post meta get "$POST_ID" wpc_e2e_list --format=json || true)"
       expect_eq "serialized array meta: first item local" "Entry ${LOCAL_ORIGIN}/m1/" "$(printf '%s' "$meta_list" | jq -r '.[0]')"
       expect_eq "serialized array meta: second item local" "${LOCAL_ORIGIN}/m2/" "$(printf '%s' "$meta_list" | jq -r '.[1]')"
-      raw_meta="$(wpcli eval 'global $wpdb; echo $wpdb->get_var( $wpdb->prepare( "SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id = %d AND meta_key = %s", '"$POST_ID"', "wpc_e2e_list" ) );')"
+      raw_meta="$(wpcli eval 'global $wpdb; echo $wpdb->get_var( $wpdb->prepare( "SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id = %d AND meta_key = %s", '"$POST_ID"', "wpc_e2e_list" ) );' || true)"
       if [[ "$raw_meta" == a:2:* ]]; then
         pass "array meta is stored serialized"
         expect_lacks "serialized meta has no share origin" "$raw_meta" "$ORIGIN"
@@ -592,9 +606,9 @@ if [[ "$LOGGED_IN" -eq 1 ]]; then
       --data-urlencode "siteurl=${ORIGIN}" \
       --data-urlencode "home=${ORIGIN}" \
       "${ORIGIN}/wp-admin/options.php"
-    expect_eq "blogname saved (the form submit took effect)" "ACME Share E2E" "$(wpcli option get blogname)"
-    expect_eq "home unchanged" "$LOCAL_ORIGIN" "$(wpcli option get home)"
-    expect_eq "siteurl unchanged" "$LOCAL_SITEURL" "$(wpcli option get siteurl)"
+    expect_eq "blogname saved (the form submit took effect)" "ACME Share E2E" "$(wpcli option get blogname || true)"
+    expect_eq "home unchanged" "$LOCAL_ORIGIN" "$(wpcli option get home || true)"
+    expect_eq "siteurl unchanged" "$LOCAL_SITEURL" "$(wpcli option get siteurl || true)"
   fi
 else
   info "skipping steps 8-10 (not logged in)"
@@ -614,8 +628,15 @@ else
 fi
 
 step "12. Binary and attachment passthrough"
+# The share path reports its scheme to PHP; direct requests carry the same
+# scheme hint when the local origin is https so both responses embed an
+# identical home URL.
+DIRECT_PROTO=()
+if [[ "$LOCAL_ORIGIN" == https://* ]]; then
+  DIRECT_PROTO=(-H 'X-Forwarded-Proto: https')
+fi
 share_curl -D "${SCRATCH_ROOT}/bin.hdr" -o "${SCRATCH_ROOT}/bin.share" "${ORIGIN}/?bin=1"
-curl -sS -k -m 60 -o "${SCRATCH_ROOT}/bin.direct" "${LOCAL_ORIGIN}/?bin=1"
+curl -sS -k -m 60 ${DIRECT_PROTO[@]+"${DIRECT_PROTO[@]}"} -o "${SCRATCH_ROOT}/bin.direct" "${LOCAL_ORIGIN}/?bin=1"
 expect_eq "binary Content-Type preserved" "application/octet-stream" "$(header_value "${SCRATCH_ROOT}/bin.hdr" "Content-Type")"
 if grep -aqF "$LOCAL_ORIGIN" "${SCRATCH_ROOT}/bin.share"; then
   pass "binary body still contains the local origin"
@@ -629,7 +650,7 @@ else
 fi
 
 share_curl -D "${SCRATCH_ROOT}/dl.hdr" -o "${SCRATCH_ROOT}/dl.share" "${ORIGIN}/?dl=1"
-curl -sS -k -m 60 -o "${SCRATCH_ROOT}/dl.direct" "${LOCAL_ORIGIN}/?dl=1"
+curl -sS -k -m 60 ${DIRECT_PROTO[@]+"${DIRECT_PROTO[@]}"} -o "${SCRATCH_ROOT}/dl.direct" "${LOCAL_ORIGIN}/?dl=1"
 if cmp -s "${SCRATCH_ROOT}/dl.share" "${SCRATCH_ROOT}/dl.direct" && grep -qF "$LOCAL_ORIGIN" "${SCRATCH_ROOT}/dl.share"; then
   pass "attachment body unchanged through the share"
 else
