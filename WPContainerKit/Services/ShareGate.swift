@@ -53,7 +53,14 @@ public enum ShareGate {
         let parts = withoutFragment.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
         let path = parts.first.map(String.init) ?? "/"
         let query = parts.count > 1 ? String(parts[1]) : nil
-        if config.allow.contains(where: { $0.matches(path: path, query: query) }) { return .pass }
+        // WordPress serves `rest_route` from the query string whatever the path, so a
+        // path-prefix exception cannot cover a request that carries it.
+        let overridesRoute = hasRestRoute(query)
+        let exempt = config.allow.contains { exception in
+            if overridesRoute && exception.description.hasPrefix("/") { return false }
+            return exception.matches(path: path, query: query)
+        }
+        if exempt { return .pass }
 
         guard let value = headerValue("authorization", in: headerLines) else { return .challenge }
         let pieces = value.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
@@ -100,7 +107,7 @@ public enum ShareGate {
             if rewritten.contains(name) {
                 var updated = line
                 for origin in origins {
-                    updated = updated.replacingOccurrences(of: origin, with: config.publicOrigin)
+                    updated = replaceOrigin(origin, with: config.publicOrigin, in: updated)
                 }
                 out.append(updated)
             } else {
@@ -127,6 +134,32 @@ public enum ShareGate {
             guard let name = headerName(line) else { return true }
             return !name.hasPrefix(shareHeaderPrefix)
         }
+    }
+
+    private static func hasRestRoute(_ query: String?) -> Bool {
+        guard let query else { return false }
+        return query.split(separator: "&").contains { part in
+            let key = part.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
+            return key.removingPercentEncoding == "rest_route"
+        }
+    }
+
+    /// Replaces `origin` only where it ends at a delimiter, so longer hosts and ports are left alone.
+    private static func replaceOrigin(_ origin: String, with replacement: String, in text: String) -> String {
+        let delimiters = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "/?#>\"',;"))
+        var result = ""
+        var rest = text[...]
+        while let range = rest.range(of: origin) {
+            result += rest[..<range.lowerBound]
+            let next = rest[range.upperBound...].unicodeScalars.first
+            if next == nil || delimiters.contains(next!) {
+                result += replacement
+            } else {
+                result += origin
+            }
+            rest = rest[range.upperBound...]
+        }
+        return result + rest
     }
 
     private static func headerName(_ line: String) -> String? {

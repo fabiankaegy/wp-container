@@ -115,4 +115,50 @@ final class ShareGateTests: XCTestCase {
         for i in 0..<20 { throttle.recordFailure(now: start.addingTimeInterval(Double(i) * 7)) }
         XCTAssertFalse(throttle.isLocked(now: start.addingTimeInterval(140)))
     }
+
+    private func decide(_ requestLine: String, _ headers: [String] = [], allow: [String] = []) throws -> ShareGateDecision {
+        ShareGate.authorize(requestLine: requestLine, headerLines: headers, config: try config(allow: allow))
+    }
+
+    func testPathExceptionRefusesRestRouteOverride() throws {
+        XCTAssertEqual(try decide("GET /wp-json/wc/?rest_route=/wp/v2/posts HTTP/1.1", allow: ["/wp-json/wc/"]), .challenge)
+        XCTAssertEqual(try decide("GET /wp-json/wc/?a=1&rest%5Froute=/wp/v2/posts HTTP/1.1", allow: ["/wp-json/wc/"]), .challenge)
+        XCTAssertEqual(try decide("GET /wp-json/wc/?rest_route HTTP/1.1", allow: ["/wp-json/wc/"]), .challenge)
+    }
+
+    func testPathExceptionStillPassesWithoutRestRoute() throws {
+        XCTAssertEqual(try decide("GET /wp-json/wc/v3/orders?x=rest_route HTTP/1.1", allow: ["/wp-json/wc/"]), .pass)
+        XCTAssertEqual(try decide("GET /anything?rest_route=/x HTTP/1.1", allow: ["?rest_route"]), .pass)
+        XCTAssertEqual(try decide("GET /wp-json/wc/?Rest_Route=/x HTTP/1.1", allow: ["/wp-json/wc/"]), .pass)
+    }
+
+    func testResponseHeaderOriginReplacementRespectsBoundaries() throws {
+        let cfg = try config()
+        let longer = "HTTP/1.1 302 Found\r\nLocation: http://my-site.localhost.example.org/\r\n\r\n"
+        XCTAssertTrue(ShareGate.rewriteResponseHeader(longer, config: cfg).contains("Location: http://my-site.localhost.example.org/\r\n"))
+        let port = "HTTP/1.1 302 Found\r\nLocation: http://my-site.localhost:8080/x\r\n\r\n"
+        XCTAssertTrue(ShareGate.rewriteResponseHeader(port, config: cfg).contains("Location: http://my-site.localhost:8080/x\r\n"))
+        let normal = "HTTP/1.1 302 Found\r\nLocation: http://my-site.localhost/a\r\n\r\n"
+        XCTAssertTrue(ShareGate.rewriteResponseHeader(normal, config: cfg).contains("Location: https://abc.example.com/a\r\n"))
+        let bare = "HTTP/1.1 302 Found\r\nLocation: http://my-site.localhost\r\n\r\n"
+        XCTAssertTrue(ShareGate.rewriteResponseHeader(bare, config: cfg).contains("Location: https://abc.example.com\r\n"))
+    }
+
+    func testAuthorizeSecurityEdgeCases() throws {
+        func header(_ credentials: String) -> [String] { [basic(credentials)] }
+        XCTAssertEqual(try decide("GET / HTTP/1.1", ["authorization: basic " + Data("share:pw".utf8).base64EncodedString()]), .pass)
+        XCTAssertEqual(try decide("GET / HTTP/1.1", ["Authorization: Basic !!!not-base64"]), .challenge)
+        XCTAssertEqual(try decide("GET / HTTP/1.1", header("sharepw")), .challenge)
+        XCTAssertEqual(try decide("GET / HTTP/1.1", header("other:pw")), .challenge)
+
+        let colon = ShareGateConfig(publicOrigin: "https://abc.example.com", upstreamHost: "my-site.localhost",
+                                    localOrigins: [], username: "share", password: "p:w:x", authDisabled: false, allow: [])
+        XCTAssertEqual(ShareGate.authorize(requestLine: "GET / HTTP/1.1", headerLines: header("share:p:w:x"), config: colon), .pass)
+
+        XCTAssertEqual(try decide("GET /wc-webhook/order HTTP/1.1", allow: ["/wc-webhook"]), .pass)
+        XCTAssertEqual(try decide("GET /wp-admin/ HTTP/1.1", allow: ["/wc-webhook"]), .challenge)
+        XCTAssertEqual(try decide("GET /wc-webhook/../wp-admin/ HTTP/1.1", allow: ["/wc-webhook"]), .challenge)
+        XCTAssertEqual(try decide("GET /?hook=a HTTP/1.1", allow: ["?hook=a"]), .pass)
+        XCTAssertEqual(try decide("GET /?hook=b HTTP/1.1", allow: ["?hook=a"]), .challenge)
+    }
 }
