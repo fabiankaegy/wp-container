@@ -133,9 +133,7 @@ public actor SiteArchiveService {
         progress(.preflight)
         let address = try await cli.ipAddress(of: site.dbContainerName)
         guard let dbHost = address, !dbHost.isEmpty else { throw SiteArchiveError.siteNotRunning }
-        if fm.fileExists(atPath: destination.path), !overwrite {
-            throw SiteArchiveError.outputExists(destination.path)
-        }
+        try Self.refuseExistingOutput(destination, overwrite: overwrite)
         try await lifecycle.waitForDatabaseReady(site, dbHost: dbHost)
 
         let staging = site.path.appendingPathComponent(".wpc-export", isDirectory: true)
@@ -490,9 +488,7 @@ public actor SiteArchiveService {
         overwrite: Bool
     ) async throws -> [String] {
         let fm = FileManager.default
-        if fm.fileExists(atPath: destination.path), !overwrite {
-            throw SiteArchiveError.outputExists(destination.path)
-        }
+        try refuseExistingOutput(destination, overwrite: overwrite)
 
         var warnings: [String] = []
         var safeMounts: [InlinedMount] = []
@@ -596,6 +592,16 @@ public actor SiteArchiveService {
     }
 
     /// `path` with symlinks resolved, or `path` itself when it does not exist.
+    /// Throws `.outputExists` for a directory at `destination`, or for a file
+    /// there unless `overwrite` is set.
+    private static func refuseExistingOutput(_ destination: URL, overwrite: Bool) throws {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: destination.path, isDirectory: &isDirectory) else { return }
+        if isDirectory.boolValue || !overwrite {
+            throw SiteArchiveError.outputExists(destination.path)
+        }
+    }
+
     private static func realPath(_ path: String) -> String {
         guard let resolved = realpath(path, nil) else { return path }
         defer { free(resolved) }

@@ -107,6 +107,26 @@ final class SiteArchivePackageTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "existing")
     }
 
+    func testRefusesDirectoryDestinationEvenWithOverwrite() async throws {
+        let destination = outputFolder.appendingPathComponent("existing-folder", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        let keep = destination.appendingPathComponent("keep.txt")
+        try "keep".write(to: keep, atomically: true, encoding: .utf8)
+
+        do {
+            _ = try await SiteArchiveService.package(
+                wordpressFolder: wordpress, stagingFolder: staging, destination: destination,
+                manifest: makeManifest(), excludes: [], mounts: [], overwrite: true)
+            XCTFail("expected outputExists")
+        } catch let error as SiteArchiveError {
+            XCTAssertEqual(error, .outputExists(destination.path))
+        }
+        var isDirectory: ObjCBool = false
+        XCTAssertTrue(FileManager.default.fileExists(atPath: destination.path, isDirectory: &isDirectory))
+        XCTAssertTrue(isDirectory.boolValue)
+        XCTAssertEqual(try String(contentsOf: keep, encoding: .utf8), "keep")
+    }
+
     func testOverwriteReplacesExistingDestination() async throws {
         let destination = outputFolder.appendingPathComponent("example.zip")
         try "existing".write(to: destination, atomically: true, encoding: .utf8)
