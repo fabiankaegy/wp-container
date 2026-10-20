@@ -82,6 +82,9 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
     /// while active. Restoring clears it and re-acquires a port. See
     /// `EnvSettlement` for the suggestion and auto-purge windows.
     public var settledAt: Date?
+    /// The parent site's mounts at creation (`Site.mounts`), so the env sees the
+    /// same mounted plugins, themes, and folders.
+    public var inheritedMounts: [Mount]
 
     /// Runtime-derived; NOT persisted.
     public var status: SiteStatus = .stopped
@@ -92,7 +95,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
              xdebugEnabled, elasticsearchEnabled, cpuLimit, memoryLimitMB,
              idleStopMinutes, lastActivityAt,
              mailpitEnabled, mailpitPort, redisEnabled, sharedDatabase, databaseSchema,
-             usesDomainURL, httpsEnabled, settledAt
+             usesDomainURL, httpsEnabled, settledAt, inheritedMounts
     }
 
     public init(
@@ -122,6 +125,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         usesDomainURL: Bool = false,
         httpsEnabled: Bool = false,
         settledAt: Date? = nil,
+        inheritedMounts: [Mount] = [],
         status: SiteStatus = .stopped
     ) {
         self.id = id
@@ -150,6 +154,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         self.sharedDatabase = sharedDatabase && databaseSchema != nil
         self.usesDomainURL = usesDomainURL
         self.httpsEnabled = httpsEnabled
+        self.inheritedMounts = inheritedMounts
         self.settledAt = settledAt
         self.status = status
     }
@@ -193,6 +198,8 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         // holds `127.0.0.1:<port>`, so they must keep advertising it.
         self.usesDomainURL = (try? c.decode(Bool.self, forKey: .usesDomainURL)) ?? false
         self.httpsEnabled = (try? c.decode(Bool.self, forKey: .httpsEnabled)) ?? false
+        // Absent in envs written before site mounts.
+        self.inheritedMounts = ((try? c.decodeIfPresent([Mount].self, forKey: .inheritedMounts)) ?? []) ?? []
         // Absent in envs written before settling: they are active.
         self.settledAt = try? c.decodeIfPresent(Date.self, forKey: .settledAt)
     }
@@ -326,8 +333,9 @@ extension WorktreeEnv: RunnableInstance {
     public var ownsDatabaseContainer: Bool { !sharedDatabase }
     /// The worktree checkout shadows the primary checkout inside the env container.
     /// Mount construction is isolated in `SiteRecipe` so integration can adjust it.
+    /// The parent's mounts first, then the checkout, which shadows its repo path.
     public var extraMounts: [Mount] {
-        [SiteRecipe.shadowMount(worktreePath: worktreePath, repoRelPath: repoRelPath)]
+        inheritedMounts + [SiteRecipe.shadowMount(worktreePath: worktreePath, repoRelPath: repoRelPath)]
     }
     /// The env's proxy hostname, so WordPress loopback requests (wp-cron, Site
     /// Health, REST self-calls) to its domain URL reach the host proxy.

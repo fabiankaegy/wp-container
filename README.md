@@ -137,6 +137,11 @@ Sites are provisioned automatically (no install wizard) and log in with
   test library for the site's version downloaded once and exposed as
   `WP_TESTS_DIR`. Run it from the project folder or pass `--path`; the MCP
   `run_tests` tool returns pass/fail counts to agents.
+- **Sites from `.wp-env.json`** — `wp-container create <name> --wp-env <project>`
+  builds a site from a project's `.wp-env.json` (with `.wp-env.override.json` and
+  `env.development`): WordPress and PHP version, multisite, and `config`
+  constants. Local plugins, themes, and mappings are mounted live, remote ones
+  (GitHub `owner/repo#ref`, zip URLs) installed, and plugins activated.
 - **Dev-ready by default** — every site gets `WP_DEVELOPMENT_MODE=all` /
   `WP_ENVIRONMENT_TYPE=local`, with live `WP_DEBUG`-family switches in
   Settings → Development.

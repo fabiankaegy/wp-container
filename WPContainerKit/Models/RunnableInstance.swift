@@ -1,7 +1,7 @@
 import Foundation
 
 /// A single host→container bind mount.
-public struct Mount: Sendable, Equatable, Hashable {
+public struct Mount: Sendable, Equatable, Hashable, Codable {
     public let hostPath: String
     public let containerPath: String
     public init(hostPath: String, containerPath: String) {

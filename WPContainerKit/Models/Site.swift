@@ -87,6 +87,11 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     /// Reaped by `WorktreeEnvService.create` on the shared path, where the server
     /// is guaranteed up; entries are cleared once their DROP actually succeeds.
     public var pendingSchemaDrops: [String] = []
+    /// Host folders bind-mounted into the site's WordPress tree, such as a
+    /// project mounted as a plugin by `create --wp-env` (`.wp-env.json`'s local
+    /// plugins, themes, and mappings). Edits in those folders reach the site
+    /// live.
+    public var mounts: [Mount] = []
 
     /// Runtime-derived; NOT persisted.
     public var status: SiteStatus = .stopped
@@ -101,6 +106,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         case redisEnabled
         case lastImportSourceURL
         case pendingSchemaDrops
+        case mounts
     }
 
     public init(
@@ -130,6 +136,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         agentToolsDoc: String? = nil,
         lastImportSourceURL: String? = nil,
         pendingSchemaDrops: [String] = [],
+        mounts: [Mount] = [],
         status: SiteStatus = .stopped
     ) {
         self.id = id
@@ -158,6 +165,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.agentToolsDoc = agentToolsDoc
         self.lastImportSourceURL = lastImportSourceURL
         self.pendingSchemaDrops = pendingSchemaDrops
+        self.mounts = mounts
         self.status = status
     }
 
@@ -204,6 +212,8 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         // store can't widen the blast radius because every drop re-checks.
         self.pendingSchemaDrops = ((try? c.decodeIfPresent([String].self, forKey: .pendingSchemaDrops)) ?? [])
             ?? []
+        // Absent in stores written before `create --wp-env`.
+        self.mounts = ((try? c.decodeIfPresent([Mount].self, forKey: .mounts)) ?? []) ?? []
     }
 
     // MARK: Derived paths
@@ -261,7 +271,7 @@ extension Site: RunnableInstance {
     public var envLabel: String? { nil }
     public var displayName: String { name }
     public var isProvisioned: Bool { provisioned }
-    public var extraMounts: [Mount] { [] }
+    public var extraMounts: [Mount] { mounts }
     /// `<slug>.localhost` plus any custom domain. Subdomain-multisite wildcards
     /// are omitted — /etc/hosts can't express them; subsite loopbacks would
     /// need per-subsite entries (acceptable gap, matches the proxy SAN story).
