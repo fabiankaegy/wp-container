@@ -176,6 +176,7 @@ Sites are provisioned automatically (no install wizard) and log in with
 git clone https://github.com/fabiankaegy/wp-container.git
 cd wp-container
 make build            # xcodegen + xcodebuild (app + CLI)
+make test             # unit tests (kit + hosts helper)
 open build/Build/Products/Debug/WPContainer.app
 make install-cli      # optional: /usr/local/bin/wp-container + wpc
 ```
