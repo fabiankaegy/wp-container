@@ -551,18 +551,43 @@ struct WorktreeCommand: AsyncParsableCommand {
 }
 
 struct WorktreeCreate: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "create", abstract: "Create a branch environment for a repo under a site's wp-content.")
+    static let configuration = CommandConfiguration(
+        commandName: "create",
+        abstract: "Create a branch environment for a repo under a site's wp-content.",
+        discussion: """
+        The env starts with a clone of the parent's database. `--import <dump>` then \
+        imports a .sql/.sql.gz dump into the env's own database, with the same \
+        pipeline and options as `wp-container db import` (backup, URL migration to \
+        the env's URL, scrub, media, local admin, rollback on failure). If the \
+        import fails, the env is kept, rolled back to the parent's data, and the \
+        command exits non-zero.
+        """
+    )
     @Option(name: .long, help: "Parent site slug.") var site: String
     @Option(name: .long, help: "Repo path relative to wordpress/ (e.g. wp-content/plugins/my-plugin).") var repo: String
     @Option(name: .long, help: "Branch name.") var branch: String
     @Option(name: .long, help: "Base ref for a new branch.") var from: String?
     @Flag(name: .long, help: "Skip seeding the worktree with the parent's gitignored runtime deps (vendor/, built assets, provisioned plugins); leaves a bare checkout.") var noProvision: Bool = false
     @Flag(name: .long, help: "Give the environment its own MariaDB container instead of a schema on the parent site's server. Costs ~470 MB of memory; worth it only for a very large database, where cloning the parent's data directory beats a logical dump+restore.") var isolatedDb: Bool = false
+    @Option(name: .customLong("import"), help: "Import this .sql/.sql.gz dump into the new env's database.") var importDump: String?
+    @OptionGroup var importFlags: DBImportFlags
     @OptionGroup var output: JSONOptions
 
     func run() async throws {
         let ctx = CLIContext()
         do {
+            // Check the dump before creating anything, so a typo can't leave a
+            // half-wanted env behind.
+            let dumpURL = importDump.map(DBImportFlags.expandPath)
+            let importOptions = try dumpURL.map { _ in try importFlags.importOptions() }
+            if let dumpURL {
+                guard FileManager.default.fileExists(atPath: dumpURL.path) else {
+                    throw CLIErrorJSON("dump_not_found", detail: dumpURL.path)
+                }
+                guard ["sql", "gz"].contains(dumpURL.pathExtension.lowercased()) else {
+                    throw CLIErrorJSON("bad_args", detail: DatabaseImportError.invalidDumpExtension(dumpURL.lastPathComponent).description)
+                }
+            }
             let envelope = try await ctx.load()
             guard let parent = envelope.sites.first(where: { $0.slug == site }) else { throw CLIErrorJSON("site_not_found", detail: site) }
             guard WorktreeEnvService.isValidRepoRelPath(repo) else {
@@ -581,12 +606,13 @@ struct WorktreeCreate: AsyncParsableCommand {
                                                       branch: branchArg, port: port, into: &store)
             }) else { throw CLIErrorJSON("no_free_port") }
 
+            let env: WorktreeEnv
             do {
                 let outcome = try await ctx.worktrees.create(parent: parent, parentIsRunning: parentRunning,
                                                             repoRelPath: repo, branch: branch, from: from,
                                                             port: reserved.port, reserved: reserved,
                                                             provision: !noProvision, isolatedDB: isolatedDb)
-                let env = outcome.env
+                env = outcome.env
                 let reaped = outcome.reapedSchemas
                 _ = try await ctx.persistence.mutate { store in
                     store.envs.removeAll { $0.id == env.id }
@@ -605,8 +631,6 @@ struct WorktreeCreate: AsyncParsableCommand {
                 if let warning = ProxyControl.envProxyWarning(port: env.port) {
                     FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
                 }
-                if output.json { emitLine(CLIJSON.string(WorktreeDescriptor(from: env))) }
-                else { emitLine("Created env \(env.envSlug) at \(env.url.absoluteString) (worktree: \(env.worktreePath.path)).") }
             } catch {
                 // Creation rolled back its containers/folders; also release the
                 // reserved store record (and with it, the port).
@@ -615,8 +639,52 @@ struct WorktreeCreate: AsyncParsableCommand {
                 }
                 throw error
             }
+            guard let dumpURL, let importOptions else {
+                if output.json { emitLine(CLIJSON.string(WorktreeDescriptor(from: env))) }
+                else { emitLine("Created env \(env.envSlug) at \(env.url.absoluteString) (worktree: \(env.worktreePath.path)).") }
+                return
+            }
+            if !output.json {
+                emitLine("Created env \(env.envSlug) at \(env.url.absoluteString) (worktree: \(env.worktreePath.path)). Importing \(dumpURL.lastPathComponent)…")
+            }
+            try await importDump(dumpURL, into: env, options: importOptions, ctx: ctx)
+        } catch let code as ExitCode {
+            throw code
         } catch {
             throw failCommand(error, json: output.json)
+        }
+    }
+
+    /// Import into the just-created env. A failed import keeps the env and exits
+    /// non-zero; `--json` still prints `{env, import}`, with the import's error.
+    private func importDump(_ dump: URL, into env: WorktreeEnv, options: DBImportOptions, ctx: CLIContext) async throws {
+        let importer = DatabaseImportService(cli: ctx.cli, lifecycle: ctx.lifecycle)
+        let jsonMode = output.json
+        do {
+            let summary = try await importer.importDatabase(into: env, publicURL: env.url, dump: dump, options: options) { phase in
+                guard !jsonMode else { return }
+                emitLine("→ \(DBImportCommand.progressLine(for: phase))")
+            }
+            if jsonMode {
+                struct CreatedWithImport: Encodable { let env: WorktreeDescriptor; let `import`: DBImportResultJSON }
+                emitLine(CLIJSON.string(CreatedWithImport(env: WorktreeDescriptor(from: env),
+                                                          import: DBImportResultJSON(from: summary, site: env.envSlug))))
+            } else {
+                emitLine(DBImportCommand.summaryText(summary, site: env.envSlug))
+            }
+        } catch {
+            let failure = DBImportFailureJSON(error)
+            if jsonMode {
+                struct CreatedWithFailedImport: Encodable { let env: WorktreeDescriptor; let `import`: DBImportFailureJSON }
+                emitLine(CLIJSON.string(CreatedWithFailedImport(env: WorktreeDescriptor(from: env), import: failure)))
+            } else {
+                let note = failure.databaseIntact
+                    ? "Env \(env.envSlug) was created with the parent's data; the import did not apply."
+                    : "Env \(env.envSlug) was created, but its database could not be restored after the failed import."
+                FileHandle.standardError.write(Data((note + "\n").utf8))
+                DBImportCommand.reportImportError(failure, json: false)
+            }
+            throw ExitCode.failure
         }
     }
 }
