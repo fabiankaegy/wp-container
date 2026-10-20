@@ -640,16 +640,20 @@ enum MCPToolDispatch {
         // tell the caller now rather than letting it discover a refused connection.
         if let warning = ProxyControl.envProxyWarning(port: env.port) { warnings.append(warning) }
         if !warnings.isEmpty { payload["warnings"] = warnings }
-        // A failed import keeps the env, restored to the parent's data.
+        // A failed import keeps the env, rolled back to the parent's data.
         if let importFile, let importOpts {
             let importer = DatabaseImportService(cli: ctx.cli, lifecycle: ctx.lifecycle)
             do {
                 let summary = try await importer.importDatabase(into: env, publicURL: env.url, dump: importFile,
                                                                 options: importOpts) { _ in }
                 payload["import"] = importPayload(summary, target: env.envSlug)
-            } catch let dbError as DatabaseImportError {
-                payload["import"] = ["error": "import_failed", "detail": dbError.description,
-                                     "note": "The environment was created with the parent's data; the import did not apply."]
+            } catch {
+                let failure = DBImportFailureJSON(error)
+                var importError = importErrorPayload(failure)
+                importError["note"] = failure.databaseIntact
+                    ? "The environment was created with the parent's data; the import did not apply."
+                    : "The environment was created, but its database could not be restored after the failed import; restore it from the env's .backups/ folder."
+                payload["import"] = importError
                 return MCPResult.json(payload, isError: true)
             }
         }
@@ -825,17 +829,19 @@ enum MCPToolDispatch {
             }
             return MCPResult.json(importPayload(summary, target: targetSlug))
         } catch let dbError as DatabaseImportError {
-            if case .phaseFailed(let phase, let short, let full, let rolledBack) = dbError {
-                return MCPResult.json([
-                    "error": "import_failed",
-                    "phase": phase.rawValue,
-                    "short": short,
-                    "full": full,
-                    "rolledBack": rolledBack,
-                ], isError: true)
-            }
-            throw ToolError("import_failed", dbError.description)
+            return MCPResult.json(importErrorPayload(DBImportFailureJSON(dbError)), isError: true)
         }
+    }
+
+    /// `db_import`'s error payload.
+    private static func importErrorPayload(_ failure: DBImportFailureJSON) -> [String: Any] {
+        var payload: [String: Any] = ["error": failure.error]
+        if let phase = failure.phase { payload["phase"] = phase }
+        if let short = failure.short { payload["short"] = short }
+        if let full = failure.full { payload["full"] = full }
+        if let rolledBack = failure.rolledBack { payload["rolledBack"] = rolledBack }
+        if let detail = failure.detail { payload["detail"] = detail }
+        return payload
     }
 
     // MARK: - Small utilities

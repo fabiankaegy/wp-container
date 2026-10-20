@@ -75,7 +75,7 @@ public enum DatabaseImportError: Error, Sendable, CustomStringConvertible, Local
     }
 
     /// The most descriptive text available for an error (typed descriptions win).
-    static func fullText(of error: Error) -> String {
+    public static func fullText(of error: Error) -> String {
         if let e = error as? ContainerCLIError { return e.description }
         if let e = error as? LifecycleError { return e.description }
         if let e = error as? DatabaseImportError { return e.description }

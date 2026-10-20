@@ -152,7 +152,7 @@ struct DBImportCommand: AsyncParsableCommand {
                 emitLine(Self.summaryText(summary, site: site))
             }
         } catch let dbError as DatabaseImportError {
-            Self.reportImportError(dbError, json: jsonMode)
+            Self.reportImportError(DBImportFailureJSON(dbError), json: jsonMode)
             throw ExitCode.failure
         } catch {
             throw failCommand(error, json: jsonMode)
@@ -196,31 +196,51 @@ struct DBImportCommand: AsyncParsableCommand {
     /// A `phaseFailed` error always reports phase + short message + whether the
     /// DB was rolled back; the full underlying detail is only in --json output
     /// (kept out of the default text summary, which stays short).
-    static func reportImportError(_ error: DatabaseImportError, json: Bool) {
-        if case .phaseFailed(let phase, let short, let full, let rolledBack) = error {
-            if json {
-                struct ImportErrorJSON: Encodable {
-                    let error = "import_failed"
-                    let phase: String
-                    let short: String
-                    let full: String
-                    let rolledBack: Bool
-                }
-                let payload = ImportErrorJSON(phase: phase.rawValue, short: short, full: full, rolledBack: rolledBack)
-                FileHandle.standardError.write(Data((CLIJSON.string(payload) + "\n").utf8))
-            } else {
-                let rollbackNote = rolledBack
-                    ? "database rolled back to the pre-import backup."
-                    : "rollback ALSO failed — restore manually from the .backups/ folder."
-                FileHandle.standardError.write(Data(("Import failed during \(phase.rawValue) — \(short) (\(rollbackNote))\n").utf8))
-            }
+    static func reportImportError(_ failure: DBImportFailureJSON, json: Bool) {
+        if json {
+            FileHandle.standardError.write(Data((CLIJSON.string(failure) + "\n").utf8))
             return
         }
-        let cliError = CLIErrorJSON("import_failed", detail: error.description)
-        if json {
-            FileHandle.standardError.write(Data((CLIJSON.string(cliError) + "\n").utf8))
+        if let phase = failure.phase, let short = failure.short, let rolledBack = failure.rolledBack {
+            let rollbackNote = rolledBack
+                ? "database rolled back to the pre-import backup."
+                : "rollback ALSO failed — restore manually from the .backups/ folder."
+            FileHandle.standardError.write(Data(("Import failed during \(phase) — \(short) (\(rollbackNote))\n").utf8))
         } else {
-            FileHandle.standardError.write(Data(("\(cliError.error): \(cliError.detail ?? "")\n").utf8))
+            FileHandle.standardError.write(Data(("\(failure.error): \(failure.detail ?? "")\n").utf8))
+        }
+    }
+}
+
+/// A failed import, in `db import`'s error shapes: `phase`/`short`/`full`/
+/// `rolledBack` for a failure once the import phase started, `detail` for one
+/// before it.
+struct DBImportFailureJSON: Encodable {
+    let error = "import_failed"
+    let phase: String?
+    let short: String?
+    let full: String?
+    let rolledBack: Bool?
+    let detail: String?
+
+    /// Whether the database still holds what it had before the import. A
+    /// failure before the import phase never touches it; a later one is
+    /// rolled back to the pre-import backup unless that also failed.
+    var databaseIntact: Bool { rolledBack ?? true }
+
+    init(_ error: Error) {
+        if case .phaseFailed(let phase, let short, let full, let rolledBack) = error as? DatabaseImportError {
+            self.phase = phase.rawValue
+            self.short = short
+            self.full = full
+            self.rolledBack = rolledBack
+            self.detail = nil
+        } else {
+            self.phase = nil
+            self.short = nil
+            self.full = nil
+            self.rolledBack = nil
+            self.detail = DatabaseImportError.fullText(of: error)
         }
     }
 }

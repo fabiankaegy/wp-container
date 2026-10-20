@@ -559,7 +559,8 @@ struct WorktreeCreate: AsyncParsableCommand {
         imports a .sql/.sql.gz dump into the env's own database, with the same \
         pipeline and options as `wp-container db import` (backup, URL migration to \
         the env's URL, scrub, media, local admin, rollback on failure). If the \
-        import fails, the env is kept with the parent's data.
+        import fails, the env is kept, rolled back to the parent's data, and the \
+        command exits non-zero.
         """
     )
     @Option(name: .long, help: "Parent site slug.") var site: String
@@ -654,8 +655,8 @@ struct WorktreeCreate: AsyncParsableCommand {
         }
     }
 
-    /// Import into the just-created env. A failed import keeps the env (with the
-    /// parent's data, restored by the pipeline's rollback) and exits non-zero.
+    /// Import into the just-created env. A failed import keeps the env and exits
+    /// non-zero; `--json` still prints `{env, import}`, with the import's error.
     private func importDump(_ dump: URL, into env: WorktreeEnv, options: DBImportOptions, ctx: CLIContext) async throws {
         let importer = DatabaseImportService(cli: ctx.cli, lifecycle: ctx.lifecycle)
         let jsonMode = output.json
@@ -671,11 +672,18 @@ struct WorktreeCreate: AsyncParsableCommand {
             } else {
                 emitLine(DBImportCommand.summaryText(summary, site: env.envSlug))
             }
-        } catch let dbError as DatabaseImportError {
-            if !jsonMode {
-                FileHandle.standardError.write(Data("Env \(env.envSlug) was created with the parent's data; the import did not apply.\n".utf8))
+        } catch {
+            let failure = DBImportFailureJSON(error)
+            if jsonMode {
+                struct CreatedWithFailedImport: Encodable { let env: WorktreeDescriptor; let `import`: DBImportFailureJSON }
+                emitLine(CLIJSON.string(CreatedWithFailedImport(env: WorktreeDescriptor(from: env), import: failure)))
+            } else {
+                let note = failure.databaseIntact
+                    ? "Env \(env.envSlug) was created with the parent's data; the import did not apply."
+                    : "Env \(env.envSlug) was created, but its database could not be restored after the failed import."
+                FileHandle.standardError.write(Data((note + "\n").utf8))
+                DBImportCommand.reportImportError(failure, json: false)
             }
-            DBImportCommand.reportImportError(dbError, json: jsonMode)
             throw ExitCode.failure
         }
     }
