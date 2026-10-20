@@ -346,7 +346,7 @@ struct CreateCommand: AsyncParsableCommand {
                 }
                 dbHost = host
             } catch {
-                await Self.discard(created, keepFolder: folderExisted, ctx: ctx)
+                await SiteDiscard.discard(created, keepFolder: folderExisted, lifecycle: ctx.lifecycle, persistence: ctx.persistence)
                 if !output.json {
                     FileHandle.standardError.write(Data("Removed \(created.slug): it didn't start, so .wp-env.json wasn't applied.\n".utf8))
                 }
@@ -388,15 +388,6 @@ struct CreateCommand: AsyncParsableCommand {
 
     private static func expand(_ path: String) -> URL {
         URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
-    }
-
-    /// Removes a just-created site: its containers, store record, and
-    /// certificate hosts, and its folder unless that was on disk before.
-    private static func discard(_ site: Site, keepFolder: Bool, ctx: CLIContext) async {
-        await ctx.lifecycle.deleteContainers(site)
-        if !keepFolder { try? FileManager.default.trashItem(at: site.path, resultingItemURL: nil) }
-        _ = try? await ctx.persistence.mutate { store in store.sites.removeAll { $0.id == site.id } }
-        try? await CertificateAuthority().removeLeafCoverage(site.proxyHosts)
     }
 }
 
