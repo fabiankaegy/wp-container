@@ -142,6 +142,11 @@ Sites are provisioned automatically (no install wizard) and log in with
   `env.development`): WordPress and PHP version, multisite, and `config`
   constants. Local plugins, themes, and mappings are mounted live, remote ones
   (GitHub `owner/repo#ref`, zip URLs) installed, and plugins activated.
+- **Mounted folders** — `wp-container mount add <slug> <folder> <path>` bind-mounts
+  a host folder into a site's WordPress folder, such as a plugin repo at
+  `wp-content/plugins/<name>`, so edits reach the site live. `mount list` and
+  `mount remove` manage them, and `create --mount <folder>:<path>` mounts folders
+  when the site is created.
 - **Dev-ready by default** — every site gets `WP_DEVELOPMENT_MODE=all` /
   `WP_ENVIRONMENT_TYPE=local`, with live `WP_DEBUG`-family switches in
   Settings → Development.
