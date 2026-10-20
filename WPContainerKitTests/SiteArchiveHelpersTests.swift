@@ -17,6 +17,12 @@ final class SiteArchiveHelpersTests: XCTestCase {
 
     // MARK: - Excludes
 
+    func testDefaultExcludesAreExact() {
+        XCTAssertEqual(SiteArchiveService.defaultExcludes,
+                       [".git", ".svn", ".DS_Store", "__MACOSX", "node_modules", "bower_components"])
+        XCTAssertEqual(SiteArchiveService.alwaysExcluded, [".wpc-export", ".wpc-import"])
+    }
+
     func testZipExcludeArgsCoverRootAndNestedDepth() {
         let args = SiteArchiveService.zipExcludeArgs(["node_modules"], under: "wordpress")
         XCTAssertTrue(args.contains("wordpress/node_modules"))

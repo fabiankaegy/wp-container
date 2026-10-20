@@ -6,7 +6,7 @@ public actor SiteArchiveService {
     // MARK: - Helpers
 
     /// Folders left out of an export unless the caller overrides the list.
-    public static let defaultExcludes: [String] = ["node_modules", ".git", ".DS_Store"]
+    public static let defaultExcludes: [String] = [".git", ".svn", ".DS_Store", "__MACOSX", "node_modules", "bower_components"]
 
     /// Working folders of the export and import steps; never archived.
     public static let alwaysExcluded: [String] = [".wpc-export", ".wpc-import"]
