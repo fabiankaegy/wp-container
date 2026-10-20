@@ -241,7 +241,7 @@ public struct WPEnvPlan: Sendable {
             guard exists(url, "mapping") else { continue }
             mounts.append(Mount(hostPath: url.path, containerPath: "\(root)/\(clean)"))
         }
-        mounts = Self.ordered(mounts, warnings: &warnings)
+        mounts = SiteMounts.ordered(mounts, warnings: &warnings)
         for (name, value) in project.config {
             guard !Self.managedConstants.contains(name) else {
                 warnings.append("config \(name) is ignored: wp-container sets the site's URL and database itself.")
@@ -262,27 +262,6 @@ public struct WPEnvPlan: Sendable {
             default: warnings.append("\(key) is ignored: wp-container assigns ports itself.")
             }
         }
-    }
-
-    /// One mount per destination (the first wins), shallowest destination
-    /// first, so a folder mounted inside another mount lands on top of it.
-    static func ordered(_ mounts: [Mount], warnings: inout [String]) -> [Mount] {
-        var seen = Set<String>()
-        var unique: [Mount] = []
-        for mount in mounts {
-            guard seen.insert(mount.containerPath).inserted else {
-                warnings.append("\(mount.hostPath) maps to \(mount.containerPath), which is already mounted; skipped.")
-                continue
-            }
-            unique.append(mount)
-        }
-        return unique.enumerated()
-            .sorted { lhs, rhs in
-                let lhsDepth = lhs.element.containerPath.split(separator: "/").count
-                let rhsDepth = rhs.element.containerPath.split(separator: "/").count
-                return lhsDepth == rhsDepth ? lhs.offset < rhs.offset : lhsDepth < rhsDepth
-            }
-            .map(\.element)
     }
 
     /// `6.5.2` → `6.5`; `trunk`, `master` → nil.

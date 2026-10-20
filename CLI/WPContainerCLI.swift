@@ -25,6 +25,7 @@ struct WPContainerCLI: AsyncParsableCommand {
             AgentToolsCommand.self,
             ShimCommand.self,
             HTTPSCommand.self,
+            MountCommand.self,
             ProxyCommand.self,
             XdebugCommand.self,
             ElasticsearchCommand.self,
@@ -155,7 +156,7 @@ func emitLine(_ text: String) {
 
 /// Print an error (JSON on stderr when `--json`) and exit non-zero.
 func failCommand(_ error: Error, json: Bool) -> ExitCode {
-    let cliError = (error as? CLIErrorJSON) ?? CLIErrorJSON(humanText(error))
+    let cliError = (error as? CLIErrorJSON) ?? (error as? SiteMounts.Failure)?.cliError ?? CLIErrorJSON(humanText(error))
     if json {
         FileHandle.standardError.write(Data((CLIJSON.string(cliError) + "\n").utf8))
     } else {
@@ -230,6 +231,10 @@ struct CreateCommand: AsyncParsableCommand {
         (GitHub owner/repo#ref, zip URLs) are installed, and plugins activated. \
         The site is started to apply them. --wp, --php-version, --php, and \
         --multisite override the project's values.
+
+        `--mount <host-folder>:<path>` bind-mounts a host folder at a path in \
+        the WordPress folder, such as wp-content/plugins/example. It replaces a \
+        project mount at the same path. Manage mounts later with `mount`.
         """
     )
     @Argument(help: "Site name.") var name: String
@@ -243,12 +248,15 @@ struct CreateCommand: AsyncParsableCommand {
     @Option(name: .long, help: "CPU cap per container (1–8; default: container default of 4).") var cpus: Int?
     @Option(name: .long, help: "Memory cap per container in MB (e.g. 512; default: container default of 1024).") var memory: Int?
     @Option(name: .customLong("wp-env"), help: "Build the site from this project's .wp-env.json, and start it.") var wpEnv: String?
+    @Option(name: .customLong("mount"), help: ArgumentHelp("Bind-mount a host folder into the site, e.g. ~/code/example:wp-content/plugins/example. Repeatable.", valueName: "host-folder:path"))
+    var mounts: [String] = []
     @OptionGroup var output: JSONOptions
 
     func run() async throws {
         let ctx = CLIContext()
         do {
             let plan = try wpEnv.map { try WPEnvPlan(project: WPEnvProject.load(directory: Self.expand($0))) }
+            let siteMounts = try Self.mounts(mounts, plan: plan)
             let wp = self.wp ?? plan?.wordpressVersion
             let phpVersion = self.phpVersion ?? plan?.phpVersion
             let multisite = self.multisite ?? ((plan?.multisite ?? false) ? NetworkType.subdirectory.rawValue : nil)
@@ -297,7 +305,6 @@ struct CreateCommand: AsyncParsableCommand {
             let siteNetwork = networkType
             let siteCPU = cpus
             let siteMemory = memory
-            let siteMounts = plan?.mounts ?? []
             guard let (_, created, updated) = try await ctx.persistence.allocatePort(reserve: { port, env in
                 var s = Site(name: siteName, slug: slug, path: sitePath,
                              port: port, imageTag: siteImageTag, phpVersion: sitePHPLabel,
@@ -366,6 +373,17 @@ struct CreateCommand: AsyncParsableCommand {
         } catch {
             throw failCommand(error, json: output.json)
         }
+    }
+
+    /// The `--mount` folders, plus the project's mounts that don't share a
+    /// container path with one of them.
+    private static func mounts(_ specs: [String], plan: WPEnvPlan?) throws -> [Mount] {
+        let base = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let explicit = try specs.map { try SiteMounts.parse($0, relativeTo: base) }
+        let paths = Set(explicit.map(\.containerPath))
+        var mounts = (plan?.mounts ?? []).filter { !paths.contains($0.containerPath) }
+        for mount in explicit { mounts = try SiteMounts.adding(mount, to: mounts) }
+        return mounts
     }
 
     private static func expand(_ path: String) -> URL {
