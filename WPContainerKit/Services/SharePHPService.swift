@@ -131,7 +131,13 @@ public enum SharePHPService {
         function wpc_share_to_public_map() {
             static $map = null;
             if ( null === $map ) {
-                $map = wpc_share_origin_map( WPC_SHARE_LOCALS, WPC_SHARE_ORIGIN );
+                $froms = array();
+                foreach ( WPC_SHARE_LOCALS as $local ) {
+                    $host    = preg_replace( '~^https?://~', '', $local );
+                    $froms[] = 'http://' . $host;
+                    $froms[] = 'https://' . $host;
+                }
+                $map = wpc_share_origin_map( array_values( array_unique( $froms ) ), WPC_SHARE_ORIGIN );
             }
             return $map;
         }
@@ -141,23 +147,25 @@ public enum SharePHPService {
         /**
          * Replace each key of $map found in $text with its value. An origin only
          * matches when followed by a boundary, so a longer host that starts with
-         * it is left alone.
+         * it is left alone. The end of $text counts as a boundary only when
+         * $final is true, since a chunk may end in the middle of a host.
          */
-        function wpc_share_replace_origins( $text, $map ) {
+        function wpc_share_replace_origins( $text, $map, $final = true ) {
             if ( ! is_string( $text ) || '' === $text || empty( $map ) ) {
                 return $text;
             }
 
             static $patterns = array();
             $keys = array_keys( $map );
-            $id   = md5( implode( "\n", $keys ) );
+            $id   = md5( implode( "\n", $keys ) . ( $final ? '1' : '0' ) );
             if ( ! isset( $patterns[ $id ] ) ) {
                 usort( $keys, 'wpc_share_compare_length' );
                 $quoted = array();
                 foreach ( $keys as $key ) {
                     $quoted[] = preg_quote( $key, '~' );
                 }
-                $patterns[ $id ] = '~(' . implode( '|', $quoted ) . ')(?=[/"\'\\\\?#<&\s),;]|\z)~';
+                $end             = $final ? '|\z' : '';
+                $patterns[ $id ] = '~(' . implode( '|', $quoted ) . ')(?=[/"\'\\\\?#<&\s),;]' . $end . ')~';
             }
 
             $result = preg_replace_callback(
@@ -179,14 +187,17 @@ public enum SharePHPService {
     }
 
     if ( ! function_exists( 'wpc_share_filter_output' ) ) {
-        function wpc_share_filter_output( $buffer ) {
+        function wpc_share_filter_output( $buffer, $phase = PHP_OUTPUT_HANDLER_FINAL ) {
             $type = '';
             foreach ( headers_list() as $header ) {
-                $lower = strtolower( $header );
-                if ( 0 === strpos( $lower, 'content-encoding:' ) ) {
+                $lower       = strtolower( $header );
+                $is_encoding = 0 === strpos( $lower, 'content-encoding:' );
+                $is_type     = 0 === strpos( $lower, 'content-type:' );
+                $is_download = 0 === strpos( $lower, 'content-disposition:' ) && false !== strpos( $lower, 'attachment' );
+                if ( $is_encoding || $is_download ) {
                     return $buffer;
                 }
-                if ( 0 === strpos( $lower, 'content-type:' ) ) {
+                if ( $is_type ) {
                     $type = trim( (string) strtok( substr( $lower, 13 ), ';' ) );
                 }
             }
@@ -198,18 +209,26 @@ public enum SharePHPService {
                 'application/rss+xml',
                 'application/atom+xml',
             );
-            if ( '' !== $type && 0 !== strpos( $type, 'text/' ) && ! in_array( $type, $allowed, true ) ) {
+            $is_text = 0 === strpos( $type, 'text/' );
+            if ( '' !== $type && ! $is_text && ! in_array( $type, $allowed, true ) ) {
                 return $buffer;
             }
 
-            return wpc_share_replace_origins( $buffer, wpc_share_to_public_map() );
+            $final     = (bool) ( $phase & PHP_OUTPUT_HANDLER_FINAL );
+            $rewritten = wpc_share_replace_origins( $buffer, wpc_share_to_public_map(), $final );
+            if ( $rewritten !== $buffer && ! headers_sent() ) {
+                header_remove( 'Content-Length' );
+            }
+
+            return $rewritten;
         }
     }
 
     if ( ! function_exists( 'wpc_share_rewrite_location' ) ) {
         function wpc_share_rewrite_location() {
             foreach ( headers_list() as $header ) {
-                if ( 0 !== stripos( $header, 'location:' ) ) {
+                $is_location = 0 === stripos( $header, 'location:' );
+                if ( ! $is_location ) {
                     continue;
                 }
                 $value   = ltrim( substr( $header, 9 ) );
@@ -301,8 +320,10 @@ public enum SharePHPService {
                     return $swapped;
                 }
 
-                $data = @unserialize( $value, array( 'allowed_classes' => false ) );
-                if ( ( false === $data && 'b:0;' !== trim( $value ) ) || wpc_share_contains_incomplete_class( $data ) ) {
+                $data      = @unserialize( $value, array( 'allowed_classes' => false ) );
+                $trimmed   = trim( $value );
+                $is_failed = false === $data && 'b:0;' !== $trimmed;
+                if ( $is_failed || wpc_share_contains_incomplete_class( $data ) ) {
                     return $value;
                 }
                 return serialize( wpc_share_swap_back( $data, $depth + 1 ) );
@@ -316,14 +337,21 @@ public enum SharePHPService {
             }
 
             if ( is_object( $value ) && ! ( $value instanceof __PHP_Incomplete_Class ) ) {
-                if ( ! ( new ReflectionObject( $value ) )->isCloneable() ) {
+                try {
+                    if ( ! ( new ReflectionObject( $value ) )->isCloneable() ) {
+                        return $value;
+                    }
+                    $copy = clone $value;
+                    foreach ( get_object_vars( $copy ) as $key => $item ) {
+                        $swapped_item = wpc_share_swap_back( $item, $depth + 1 );
+                        if ( $swapped_item !== $item ) {
+                            $copy->$key = $swapped_item;
+                        }
+                    }
+                    return $copy;
+                } catch ( \Error $e ) {
                     return $value;
                 }
-                $copy = clone $value;
-                foreach ( get_object_vars( $copy ) as $key => $item ) {
-                    $copy->$key = wpc_share_swap_back( $item, $depth + 1 );
-                }
-                return $copy;
             }
 
             return $value;
@@ -392,9 +420,9 @@ public enum SharePHPService {
             $busy = true;
             try {
                 if ( 'add' === $kind ) {
-                    return add_metadata( $meta_type, $object_id, $meta_key, wp_slash( $swapped ), (bool) $extra );
+                    return add_metadata( $meta_type, $object_id, wp_slash( $meta_key ), wp_slash( $swapped ), (bool) $extra );
                 }
-                return update_metadata( $meta_type, $object_id, $meta_key, wp_slash( $swapped ), $extra );
+                return update_metadata( $meta_type, $object_id, wp_slash( $meta_key ), wp_slash( $swapped ), $extra );
             } finally {
                 $busy = false;
             }
@@ -407,8 +435,9 @@ public enum SharePHPService {
          * value is a different address.
          */
         function wpc_share_refuse_url_change( $value, $old_value ) {
-            $submitted = wpc_share_swap_back( $value );
-            if ( rtrim( (string) $submitted, '/' ) === rtrim( (string) $old_value, '/' ) ) {
+            $submitted = rtrim( (string) wpc_share_swap_back( $value ), '/' );
+            $current   = rtrim( (string) $old_value, '/' );
+            if ( $submitted === $current ) {
                 return $old_value;
             }
             if ( function_exists( 'add_settings_error' ) ) {
@@ -424,7 +453,9 @@ public enum SharePHPService {
                 return;
             }
             foreach ( array( 'domain', 'path' ) as $field ) {
-                if ( isset( $data[ $field ] ) && (string) $data[ $field ] !== (string) $old_site->$field ) {
+                $submitted = isset( $data[ $field ] ) ? (string) $data[ $field ] : null;
+                $current   = (string) $old_site->$field;
+                if ( null !== $submitted && $submitted !== $current ) {
                     $errors->add( 'wpc_share_url', 'Site addresses can’t be changed through a share link.' );
                     return;
                 }

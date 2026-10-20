@@ -105,7 +105,8 @@ final class ShareSettingsTests: XCTestCase {
     func testShareLocalOriginsForSite() {
         let origins = site(customDomain: "my-site.local").shareLocalOrigins
         for expected in ["http://my-site.localhost", "https://my-site.localhost",
-                         "http://my-site.local", "https://my-site.local", "http://127.0.0.1:8881"] {
+                         "http://my-site.local", "https://my-site.local",
+                         "http://127.0.0.1:8881", "https://127.0.0.1:8881"] {
             XCTAssertTrue(origins.contains(expected), expected)
         }
     }
@@ -116,6 +117,7 @@ final class ShareSettingsTests: XCTestCase {
         XCTAssertTrue(origins.contains("http://\(instance.domainHost)"))
         XCTAssertTrue(origins.contains("https://\(instance.domainHost)"))
         XCTAssertTrue(origins.contains("http://127.0.0.1:8906"))
+        XCTAssertTrue(origins.contains("https://127.0.0.1:8906"))
     }
 
     func testShareOriginHelpersDeriveFromURL() {

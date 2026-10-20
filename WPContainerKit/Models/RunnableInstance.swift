@@ -185,6 +185,7 @@ public extension RunnableInstance {
             origins.append("https://\(host)")
         }
         origins.append("http://127.0.0.1:\(port)")
+        origins.append("https://127.0.0.1:\(port)")
         return origins
     }
     /// The instance URL without a trailing slash.
