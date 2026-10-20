@@ -34,7 +34,11 @@ public struct ShareGateConfig: Sendable {
 }
 
 public enum ShareGateDecision: Equatable, Sendable {
+    /// Valid credentials, or a share with the password gate turned off.
     case pass
+    /// No valid credentials, but the request matches a gate exception. It is relayed
+    /// without cookies and with `X-WPC-Share-Exempt: 1`.
+    case exempt
     case challenge
     case throttled
 }
@@ -47,12 +51,14 @@ public enum ShareGate {
     /// Decides whether a request may reach the site.
     public static func authorize(requestLine: String, headerLines: [String], config: ShareGateConfig) -> ShareGateDecision {
         if config.authDisabled { return .pass }
+        if hasValidCredentials(headerLines, config: config) { return .pass }
 
         let target = requestLine.split(separator: " ", omittingEmptySubsequences: true).dropFirst().first.map(String.init) ?? "/"
         let withoutFragment = target.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? target
         let parts = withoutFragment.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
         let path = parts.first.map(String.init) ?? "/"
         let query = parts.count > 1 ? String(parts[1]) : nil
+        if reachesLoginEndpoint(path) { return .challenge }
         // WordPress serves `rest_route` from the query string whatever the path, so a
         // path-prefix exception cannot cover a request that carries it.
         let overridesRoute = hasRestRoute(query)
@@ -60,28 +66,23 @@ public enum ShareGate {
             if overridesRoute && exception.description.hasPrefix("/") { return false }
             return exception.matches(path: path, query: query)
         }
-        if exempt { return .pass }
-
-        guard let value = headerValue("authorization", in: headerLines) else { return .challenge }
-        let pieces = value.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
-        guard pieces.count == 2, pieces[0].lowercased() == "basic",
-              let decoded = Data(base64Encoded: pieces[1].trimmingCharacters(in: .whitespaces)) else {
-            return .challenge
-        }
-        let expected = Array("\(config.username):\(config.password)".utf8)
-        return constantTimeEqual(Array(decoded), expected) ? .pass : .challenge
+        return exempt ? .exempt : .challenge
     }
 
-    /// Builds the upstream request header block, ending in a blank line.
-    public static func rewriteRequest(requestLine: String, headerLines: [String], config: ShareGateConfig) -> String {
-        let hopHeaders: Set<String> = [
+    /// Builds the upstream request header block, ending in a blank line. An `exempt`
+    /// request loses its cookies, so it reaches the site as a logged-out visitor, and
+    /// carries `X-WPC-Share-Exempt: 1` for the PHP handler.
+    public static func rewriteRequest(requestLine: String, headerLines: [String], config: ShareGateConfig,
+                                      exempt: Bool = false) -> String {
+        var dropped: Set<String> = [
             "host", "authorization", "x-forwarded-proto", "x-forwarded-host",
             "connection", "keep-alive", "proxy-connection", "upgrade",
         ]
+        if exempt { dropped.insert("cookie") }
         var kept: [String] = []
         for line in stripShareHeaders(headerLines) {
             if line.isEmpty { continue }
-            if let name = headerName(line), hopHeaders.contains(name) { continue }
+            if let name = headerName(line), dropped.contains(name) { continue }
             kept.append(line)
         }
         let publicHost = URL(string: config.publicOrigin)?.host ?? config.upstreamHost
@@ -89,6 +90,7 @@ public enum ShareGate {
         kept.append("X-Forwarded-Host: \(publicHost)")
         kept.append("X-Forwarded-Proto: https")
         kept.append("X-WPC-Share-Origin: \(config.publicOrigin)")
+        if exempt { kept.append("X-WPC-Share-Exempt: 1") }
         kept.append("Connection: close")
         return requestLine + "\r\n" + kept.joined(separator: "\r\n") + "\r\n\r\n"
     }
@@ -133,6 +135,28 @@ public enum ShareGate {
         lines.filter { line in
             guard let name = headerName(line) else { return true }
             return !name.hasPrefix(shareHeaderPrefix)
+        }
+    }
+
+    private static func hasValidCredentials(_ headerLines: [String], config: ShareGateConfig) -> Bool {
+        guard let value = headerValue("authorization", in: headerLines) else { return false }
+        let pieces = value.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+        guard pieces.count == 2, pieces[0].lowercased() == "basic",
+              let decoded = Data(base64Encoded: pieces[1].trimmingCharacters(in: .whitespaces)) else {
+            return false
+        }
+        let expected = Array("\(config.username):\(config.password)".utf8)
+        return constantTimeEqual(Array(decoded), expected)
+    }
+
+    /// Whether the path reaches `wp-login.php` or `xmlrpc.php`, which no exception covers.
+    /// Any segment counts, so a trailing slash, path info, repeated slashes and a
+    /// subdirectory-multisite prefix are all caught. A path that does not decode counts too.
+    private static func reachesLoginEndpoint(_ path: String) -> Bool {
+        guard let decoded = path.removingPercentEncoding else { return true }
+        return decoded.split(separator: "/").contains { segment in
+            let name = segment.lowercased()
+            return name == "wp-login.php" || name == "xmlrpc.php"
         }
     }
 

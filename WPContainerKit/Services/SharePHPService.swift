@@ -60,8 +60,9 @@ public enum SharePHPService {
      * Loaded at prepend time, before wp-config.php, so only plain PHP is
      * available. For requests whose X-WPC-Share-Origin header matches the origin
      * in ../../wpc-share.json, rewrites local origins to the public origin in the
-     * response body and Location header. Added when a share starts, removed when
-     * it stops.
+     * response body and Location header, and refuses a POST `rest_route` on a
+     * request that skipped the share password through a gate exception. Added
+     * when a share starts, removed when it stops.
      */
     if ( 'cli' === PHP_SAPI ) {
         return;
@@ -248,11 +249,23 @@ public enum SharePHPService {
                 return;
             }
 
+            // A gate exception covers the request's path or query only; a POST
+            // `rest_route` would point it at any REST route.
+            $is_exempt = isset( $_SERVER['HTTP_X_WPC_SHARE_EXEMPT'] );
+            if ( $is_exempt && isset( $_POST['rest_route'] ) ) {
+                http_response_code( 401 );
+                header( 'Content-Type: text/plain; charset=utf-8' );
+                header( 'Cache-Control: no-store' );
+                echo "Authentication required.\n";
+                exit;
+            }
+
             define( 'WPC_SHARE_ORIGIN', $config['origin'] );
             define( 'WPC_SHARE_LOCAL', $config['local'] );
             define( 'WPC_SHARE_LOCALS', $config['locals'] );
 
-            if ( 0 === strpos( $config['origin'], 'https://' ) ) {
+            $is_https = 0 === strpos( $config['origin'], 'https://' );
+            if ( $is_https ) {
                 $_SERVER['HTTPS'] = 'on';
             }
 
@@ -447,6 +460,20 @@ public enum SharePHPService {
         }
     }
 
+    if ( ! function_exists( 'wpc_share_swap_back_domain' ) ) {
+        /**
+         * The local host for a submitted site domain that is the share's public host.
+         */
+        function wpc_share_swap_back_domain( $domain ) {
+            $public_host = strtolower( preg_replace( '~^https?://~', '', WPC_SHARE_ORIGIN ) );
+            $submitted   = strtolower( $domain );
+            if ( $submitted !== $public_host ) {
+                return $domain;
+            }
+            return preg_replace( '~^https?://~', '', WPC_SHARE_LOCAL );
+        }
+    }
+
     if ( ! function_exists( 'wpc_share_validate_site_data' ) ) {
         function wpc_share_validate_site_data( $errors, $data, $old_site ) {
             if ( ! $old_site || ! ( $errors instanceof WP_Error ) ) {
@@ -454,7 +481,10 @@ public enum SharePHPService {
             }
             foreach ( array( 'domain', 'path' ) as $field ) {
                 $submitted = isset( $data[ $field ] ) ? (string) $data[ $field ] : null;
-                $current   = (string) $old_site->$field;
+                if ( 'domain' === $field && null !== $submitted ) {
+                    $submitted = wpc_share_swap_back_domain( $submitted );
+                }
+                $current = (string) $old_site->$field;
                 if ( null !== $submitted && $submitted !== $current ) {
                     $errors->add( 'wpc_share_url', 'Site addresses can’t be changed through a share link.' );
                     return;

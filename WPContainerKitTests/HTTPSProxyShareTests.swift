@@ -165,6 +165,57 @@ final class HTTPSProxyShareTests: XCTestCase {
         XCTAssertFalse(header.lowercased().contains("authorization:"), header)
     }
 
+    func testExemptRequestReachesTheUpstreamWithoutCookies() async throws {
+        let exception = try ShareException(parsing: "?wc-api")
+        let port = try await openShare(instanceID: UUID(), route: route, config: config(allow: [exception]))
+
+        let response = try await LoopbackClient.exchange(port: port, request: """
+            POST /wp-admin/?wc-api=1 HTTP/1.1\r
+            Host: abc.example.com\r
+            Cookie: wordpress_logged_in_example=session\r
+            X-WPC-Share-Exempt: forged\r
+            Content-Length: 0\r
+            \r
+
+            """)
+
+        XCTAssertTrue(response.hasPrefix("HTTP/1.1 302"), response)
+        let header = try XCTUnwrap(upstream.lastRequestHeader)
+        XCTAssertFalse(header.lowercased().contains("cookie:"), header)
+        XCTAssertTrue(header.components(separatedBy: "\r\n").contains("X-WPC-Share-Exempt: 1"), header)
+        XCTAssertFalse(header.contains("forged"), header)
+    }
+
+    func testAuthenticatedRequestOnAnExceptionKeepsCookies() async throws {
+        let exception = try ShareException(parsing: "?wc-api")
+        let port = try await openShare(instanceID: UUID(), route: route, config: config(allow: [exception]))
+
+        _ = try await LoopbackClient.exchange(port: port, request: """
+            GET /wp-admin/?wc-api=1 HTTP/1.1\r
+            Host: abc.example.com\r
+            Authorization: Basic \(Self.credentials)\r
+            Cookie: wordpress_logged_in_example=session\r
+            \r
+
+            """)
+
+        let header = try XCTUnwrap(upstream.lastRequestHeader)
+        XCTAssertTrue(header.contains("Cookie: wordpress_logged_in_example=session"), header)
+        XCTAssertFalse(header.lowercased().contains("x-wpc-share-exempt"), header)
+    }
+
+    func testLoginEndpointWithAnExceptionQueryIsChallenged() async throws {
+        let exception = try ShareException(parsing: "?wc-api")
+        let port = try await openShare(instanceID: UUID(), route: route, config: config(allow: [exception]))
+
+        let login = try await LoopbackClient.exchange(port: port, request: Self.request("/wp-login.php?wc-api=1"))
+        let xmlrpc = try await LoopbackClient.exchange(port: port, request: Self.request("/xmlrpc.php/x?wc-api=1"))
+
+        XCTAssertTrue(login.hasPrefix("HTTP/1.1 401"), login)
+        XCTAssertTrue(xmlrpc.hasPrefix("HTTP/1.1 401"), xmlrpc)
+        XCTAssertEqual(upstream.connectionCount, 0)
+    }
+
     func testShareListenerRewritesResponseLocationAndAddsRobots() async throws {
         let port = try await openShare(instanceID: UUID(), route: route, config: config())
 

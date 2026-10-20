@@ -51,7 +51,7 @@ final class ShareGateTests: XCTestCase {
 
     func testExceptionSkipsAuth() throws {
         let decision = ShareGate.authorize(requestLine: "POST /?wc-api=wc_stripe HTTP/1.1", headerLines: [], config: try config(allow: ["?wc-api"]))
-        XCTAssertEqual(decision, .pass)
+        XCTAssertEqual(decision, .exempt)
     }
 
     func testRequestRewriteSetsHostAndShareHeaders() throws {
@@ -130,13 +130,13 @@ final class ShareGateTests: XCTestCase {
     }
 
     func testQueryExceptionStillPassesWithRestRoute() throws {
-        XCTAssertEqual(try decide("GET /wp-json/wc/?rest_route=/x&wc-api=hook HTTP/1.1", allow: ["/wp-json/wc/", "?wc-api"]), .pass)
+        XCTAssertEqual(try decide("GET /wp-json/wc/?rest_route=/x&wc-api=hook HTTP/1.1", allow: ["/wp-json/wc/", "?wc-api"]), .exempt)
     }
 
     func testPathExceptionStillPassesWithoutRestRoute() throws {
-        XCTAssertEqual(try decide("GET /wp-json/wc/v3/orders?x=rest_route HTTP/1.1", allow: ["/wp-json/wc/"]), .pass)
-        XCTAssertEqual(try decide("GET /anything?rest_route=/x HTTP/1.1", allow: ["?rest_route"]), .pass)
-        XCTAssertEqual(try decide("GET /wp-json/wc/?Rest_Route=/x HTTP/1.1", allow: ["/wp-json/wc/"]), .pass)
+        XCTAssertEqual(try decide("GET /wp-json/wc/v3/orders?x=rest_route HTTP/1.1", allow: ["/wp-json/wc/"]), .exempt)
+        XCTAssertEqual(try decide("GET /anything?rest_route=/x HTTP/1.1", allow: ["?rest_route"]), .exempt)
+        XCTAssertEqual(try decide("GET /wp-json/wc/?Rest_Route=/x HTTP/1.1", allow: ["/wp-json/wc/"]), .exempt)
     }
 
     func testResponseHeaderOriginReplacementRespectsBoundaries() throws {
@@ -162,10 +162,71 @@ final class ShareGateTests: XCTestCase {
                                     localOrigins: [], username: "share", password: "p:w:x", authDisabled: false, allow: [])
         XCTAssertEqual(ShareGate.authorize(requestLine: "GET / HTTP/1.1", headerLines: header("share:p:w:x"), config: colon), .pass)
 
-        XCTAssertEqual(try decide("GET /wc-webhook/order HTTP/1.1", allow: ["/wc-webhook"]), .pass)
+        XCTAssertEqual(try decide("GET /wc-webhook/order HTTP/1.1", allow: ["/wc-webhook"]), .exempt)
         XCTAssertEqual(try decide("GET /wp-admin/ HTTP/1.1", allow: ["/wc-webhook"]), .challenge)
         XCTAssertEqual(try decide("GET /wc-webhook/../wp-admin/ HTTP/1.1", allow: ["/wc-webhook"]), .challenge)
-        XCTAssertEqual(try decide("GET /?hook=a HTTP/1.1", allow: ["?hook=a"]), .pass)
+        XCTAssertEqual(try decide("GET /?hook=a HTTP/1.1", allow: ["?hook=a"]), .exempt)
         XCTAssertEqual(try decide("GET /?hook=b HTTP/1.1", allow: ["?hook=a"]), .challenge)
+    }
+
+    func testValidCredentialsOnAnExceptionPass() throws {
+        XCTAssertEqual(try decide("GET /?wc-api=1 HTTP/1.1", [basic("share:pw")], allow: ["?wc-api"]), .pass)
+        XCTAssertEqual(try decide("GET /?wc-api=1 HTTP/1.1", [basic("share:nope")], allow: ["?wc-api"]), .exempt)
+        XCTAssertEqual(try decide("GET /?wc-api=1 HTTP/1.1", allow: ["?wc-api"]), .exempt)
+    }
+
+    func testLoginAndXMLRPCAreNeverExempt() throws {
+        let paths = [
+            "/wp-login.php", "/xmlrpc.php", "/wp-login.php/", "/xmlrpc.php/x", "/WP-Login.PHP",
+            "/%77p-login.php", "/xmlrpc%2Ephp", "//xmlrpc.php", "/sub/wp-login.php", "/wc/../wp-login.php",
+            "http://abc.example.com/xmlrpc.php",
+        ]
+        for path in paths {
+            XCTAssertEqual(try decide("POST \(path)?wc-api=1 HTTP/1.1", allow: ["?wc-api"]), .challenge, path)
+        }
+        XCTAssertEqual(try decide("POST /wp-login.php HTTP/1.1", allow: ["/wp-login"]), .challenge)
+        XCTAssertEqual(try decide("POST /xmlrpc.php HTTP/1.1", allow: ["/"]), .challenge)
+        XCTAssertEqual(try decide("POST /wp-login.php?wc-api=1 HTTP/1.1", [basic("share:pw")], allow: ["?wc-api"]), .pass)
+        XCTAssertEqual(try decide("GET /wp-login.phpx?wc-api=1 HTTP/1.1", allow: ["?wc-api"]), .exempt)
+    }
+
+    func testExemptRequestLosesCookiesAndCarriesTheMarker() throws {
+        let headers = ["Host: abc.example.com", "Cookie: wordpress_logged_in_x=secret", "Accept: */*",
+                       "X-WPC-Share-Exempt: forged"]
+        let exempt = ShareGate.rewriteRequest(requestLine: "POST /?wc-api=1 HTTP/1.1", headerLines: headers,
+                                              config: try config(), exempt: true)
+        XCTAssertFalse(exempt.lowercased().contains("cookie:"), exempt)
+        XCTAssertFalse(exempt.contains("forged"), exempt)
+        XCTAssertTrue(exempt.contains("\r\nX-WPC-Share-Exempt: 1\r\n"), exempt)
+        XCTAssertTrue(exempt.contains("Accept: */*"), exempt)
+
+        let passed = ShareGate.rewriteRequest(requestLine: "GET / HTTP/1.1", headerLines: headers, config: try config())
+        XCTAssertTrue(passed.contains("Cookie: wordpress_logged_in_x=secret"), passed)
+        XCTAssertFalse(passed.lowercased().contains("x-wpc-share-exempt"), passed)
+    }
+
+    func testExemptMarkerIsStrippedOnRegularListeners() {
+        let rewritten = HTTPSProxy.rewriteHeaders(requestLine: "GET / HTTP/1.1",
+                                                  lines: ["Host: my-site.localhost", "X-WPC-Share-Exempt: 1"],
+                                                  host: "my-site.localhost", proto: "https")
+        XCTAssertFalse(rewritten.lowercased().contains("x-wpc-share-exempt"), rewritten)
+    }
+
+    func testShareDecisionKeepsExceptionsExemptAndCountsTheirBadCredentials() throws {
+        let cfg = try config(allow: ["?wc-api"])
+        let throttle = ShareAuthThrottle()
+        let now = Date()
+        let bad = [basic("share:nope")]
+        XCTAssertEqual(HTTPSProxy.shareDecision(requestLine: "GET /?wc-api=1 HTTP/1.1", headerLines: [], config: cfg,
+                                                throttle: throttle, now: now), .exempt)
+        for _ in 0..<10 {
+            XCTAssertEqual(HTTPSProxy.shareDecision(requestLine: "GET /?wc-api=1 HTTP/1.1", headerLines: bad, config: cfg,
+                                                    throttle: throttle, now: now), .exempt)
+        }
+        XCTAssertTrue(throttle.isLocked(now: now))
+        XCTAssertEqual(HTTPSProxy.shareDecision(requestLine: "GET /?wc-api=1 HTTP/1.1", headerLines: [basic("share:pw")],
+                                                config: cfg, throttle: throttle, now: now), .exempt)
+        XCTAssertEqual(HTTPSProxy.shareDecision(requestLine: "GET / HTTP/1.1", headerLines: [basic("share:pw")],
+                                                config: cfg, throttle: throttle, now: now), .throttled)
     }
 }

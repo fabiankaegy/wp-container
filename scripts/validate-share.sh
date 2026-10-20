@@ -11,6 +11,8 @@
 # directly. Asserts:
 #   - 401 without credentials, 200 with them
 #   - `?wc-api` reachable without credentials only after `share --allow '?wc-api'`
+#   - `/wp-login.php`, `/xmlrpc.php` and a POST `rest_route` stay behind the
+#     password even with `?wc-api`
 #   - X-Robots-Tag: noindex, nofollow on responses
 #   - page bodies carry the share origin and not the local host
 #   - `/wp-admin` redirects stay on the share origin
@@ -475,6 +477,13 @@ else
 fi
 expect_eq "401 for / without credentials after --allow" "401" "$(http_code "${ORIGIN}/")"
 expect_eq "401 for ?other=1 without credentials after --allow" "401" "$(http_code "${ORIGIN}/?other=1")"
+expect_eq "401 for /wp-login.php?wc-api=1 without credentials" "401" "$(http_code "${ORIGIN}/wp-login.php?wc-api=1")"
+expect_eq "401 for POST /wp-login.php?wc-api=1 without credentials" "401" \
+  "$(http_code -X POST --data 'log=admin&pwd=password' "${ORIGIN}/wp-login.php?wc-api=1")"
+expect_eq "401 for /xmlrpc.php?wc-api=1 without credentials" "401" \
+  "$(http_code -X POST --data '<?xml version="1.0"?><methodCall><methodName>system.listMethods</methodName></methodCall>' "${ORIGIN}/xmlrpc.php?wc-api=1")"
+expect_eq "401 for POST rest_route on ?wc-api=1 without credentials" "401" \
+  "$(http_code -X POST --data 'rest_route=/wp/v2/users' "${ORIGIN}/?wc-api=1")"
 
 # ----------------------------------------------------------------------------
 # 6. Headers and body rewriting

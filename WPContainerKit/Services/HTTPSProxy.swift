@@ -1619,7 +1619,7 @@ public final class HTTPSProxy: @unchecked Sendable {
         let decision = Self.shareDecision(requestLine: requestLine, headerLines: headerLines, config: config,
                                           throttle: share.throttle, now: Date())
         switch decision {
-        case .pass:
+        case .pass, .exempt:
             break
         case .challenge:
             sendRawResponse(ShareGate.challengeResponse(), to: inbound)
@@ -1632,7 +1632,7 @@ public final class HTTPSProxy: @unchecked Sendable {
         let target = share.route
         stateLock.withLock { touchLocked(target) }
         var upstreamBytes = Data(ShareGate.rewriteRequest(requestLine: requestLine, headerLines: headerLines,
-                                                          config: config).utf8)
+                                                          config: config, exempt: decision == .exempt).utf8)
         upstreamBytes.append(bufferedBody)
         let wantsHTML = Self.acceptsHTML(Self.headerValue("Accept", in: headerLines))
         dial(candidates: upstreamCandidates(for: target)[...], inbound: inbound, upstreamBytes: upstreamBytes,
@@ -1643,20 +1643,22 @@ public final class HTTPSProxy: @unchecked Sendable {
     ///
     /// Every visitor reaches the listener from the tunnel agent on loopback, so
     /// the throttle is per share rather than per client. To keep one party from
-    /// locking everyone out, only a request that sent credentials and was
-    /// challenged counts as a failure, and the lock answers 429 only to requests
-    /// that send credentials. Exception paths and an auth-disabled share always
-    /// pass; a request without credentials always gets the plain 401.
+    /// locking everyone out, only a request that sent credentials that failed
+    /// counts as a failure, and the lock answers 429 only to requests that send
+    /// credentials. An auth-disabled share always passes, and an exception path is
+    /// always relayed: as `.pass` when its credentials are valid, otherwise as
+    /// `.exempt` (also while locked, when credentials are not checked). A request
+    /// without credentials always gets the plain 401.
     static func shareDecision(requestLine: String, headerLines: [String], config: ShareGateConfig,
                               throttle: ShareAuthThrottle, now: Date) -> ShareGateDecision {
         let credentialless = headerLines.filter { !isAuthorizationHeader($0) }
         let open = ShareGate.authorize(requestLine: requestLine, headerLines: credentialless, config: config)
         if open == .pass { return .pass }
         let sentCredentials = credentialless.count != headerLines.count
-        guard sentCredentials else { return .challenge }
-        if throttle.isLocked(now: now) { return .throttled }
+        guard sentCredentials else { return open }
+        if throttle.isLocked(now: now) { return open == .exempt ? .exempt : .throttled }
         let decision = ShareGate.authorize(requestLine: requestLine, headerLines: headerLines, config: config)
-        if decision == .challenge { throttle.recordFailure(now: now) }
+        if decision != .pass { throttle.recordFailure(now: now) }
         return decision
     }
 
