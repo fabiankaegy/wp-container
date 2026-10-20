@@ -166,6 +166,24 @@ Sites are provisioned automatically (no install wizard) and log in with
   default for environments, opt-in for sites. `wp-container idle <slug>`, the
   Idle stop card, or the `set_idle_stop` MCP tool — see
   [docs/RESOURCES.md](docs/RESOURCES.md).
+- **Site sharing** — put a site or branch environment on a public URL behind a
+  password: `wp-container share <site|env>` prints the link plus generated
+  credentials (kept across shares; `--reset-password` rotates them), the app has
+  a Share card, and the MCP `share_*` tools do the same for agents. Providers:
+  **ngrok** (default; `brew install ngrok`, then `ngrok config add-authtoken`),
+  **cloudflared** (a temporary `*.trycloudflare.com` link needs no account; a
+  fixed `--hostname` uses a named tunnel after `cloudflared tunnel login`), or
+  your own executable in `~/Library/Application Support/WPContainer/share-providers/`.
+  `--allow /wp-json/wc/v3/webhooks` or `--allow '?wc-api'` lets payment and
+  webhook callbacks through without the password. Links are rewritten to the
+  public URL on the fly, edits saved through a share keep local URLs, and every
+  response carries `X-Robots-Tag: noindex, nofollow`. A proxy host (the app or
+  `wp-container proxy serve`) must be running. Limits: the free ngrok plan
+  allows one share at a time and shows ngrok's own warning page to browser
+  visitors; subdomain multisite is not supported; application-password and
+  Basic-auth REST requests do not pass through a share; static CSS/JS files are
+  not rewritten. Details and the custom-provider contract:
+  [PLAN.md §2n](PLAN.md#2n-site-sharing).
 - **Touch ID for privileged actions** — the optional signed hosts-helper
   makes custom-domain changes a Touch ID dialog instead of a password prompt
   (one-time enable in Settings → General).
