@@ -18,6 +18,8 @@ public struct ShareSettings: Codable, Sendable, Hashable {
     public var active: Bool
     /// Whether the password gate is turned off for this share.
     public var authDisabled: Bool
+    /// Changes on every share request, so re-requesting a share that went down retries it.
+    public var requestID: UUID?
 
     public init(
         provider: String? = nil,
@@ -26,7 +28,8 @@ public struct ShareSettings: Codable, Sendable, Hashable {
         password: String,
         allow: [ShareException] = [],
         active: Bool = false,
-        authDisabled: Bool = false
+        authDisabled: Bool = false,
+        requestID: UUID? = nil
     ) {
         self.provider = provider
         self.hostname = hostname
@@ -35,6 +38,7 @@ public struct ShareSettings: Codable, Sendable, Hashable {
         self.allow = allow
         self.active = active
         self.authDisabled = authDisabled
+        self.requestID = requestID
     }
 
     /// Settings with the username `share` and a random 20-character alphanumeric password.

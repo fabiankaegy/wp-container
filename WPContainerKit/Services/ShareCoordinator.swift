@@ -85,13 +85,20 @@ final class LaunchedShareProcess: ShareProcessHandle, @unchecked Sendable {
     }
 }
 
+/// When a process started, as the kernel reports it.
+struct ProcessStartTime: Codable, Sendable, Equatable {
+    let seconds: UInt64
+    let microseconds: UInt64
+}
+
 /// A provider process this proxy host started, recorded so the next host can stop it
 /// after a crash.
 struct SharePIDRecord: Codable, Sendable, Equatable {
     let pid: Int32
-    /// The process's executable path when it was recorded, compared before signalling
-    /// so a reused pid is left alone.
+    /// The process's executable path and start time when it was recorded. A process is
+    /// signalled only while both still match, so a reused pid is left alone.
     let executable: String
+    let startTime: ProcessStartTime?
     let instanceID: UUID
 }
 
@@ -123,6 +130,8 @@ public actor ShareCoordinator {
         var authDisabled: Bool
         var upstreamHost: String
         var localOrigins: [String]
+        /// A new request retries a share that is down.
+        var requestID: UUID?
 
         var provider: String { launchKey.provider }
         var hostname: String? { launchKey.hostname }
@@ -226,6 +235,16 @@ public actor ShareCoordinator {
         await runSerially { await self.performReap() }
     }
 
+    /// When a running process started, or nil when there is none.
+    static func startTime(of pid: Int32) -> ProcessStartTime? {
+        guard pid > 0 else { return nil }
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        let length = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size)
+        guard length == size else { return nil }
+        return ProcessStartTime(seconds: info.pbi_start_tvsec, microseconds: info.pbi_start_tvusec)
+    }
+
     /// The executable path of a running process, or nil when there is none.
     static func executablePath(of pid: Int32) -> String? {
         guard pid > 0 else { return nil }
@@ -265,7 +284,8 @@ public actor ShareCoordinator {
         let instances: [any RunnableInstance] = envelope.sites.map { $0 } + envelope.envs.map { $0 }
         cleanUpTunnels(instances: instances, envelope: envelope)
 
-        var cleared = Set<UUID>()
+        // Settings as read when deciding to clear them; a newer request is left alone.
+        var cleared: [UUID: ShareSettings] = [:]
         for instance in instances {
             let id = instance.instanceID
             guard let share = instance.share, share.active else {
@@ -273,14 +293,15 @@ public actor ShareCoordinator {
                 continue
             }
             guard running.contains(instance.containerSlug) else {
-                cleared.insert(id)
+                cleared[id] = share
                 await tearDown(id)
                 continue
             }
             let desired = Self.desired(for: instance, share: share, envelope: envelope)
             if instance.networkType.isSubdomain {
-                cleared.insert(id)
-                await refuse(instance, desired: desired, share: share, error: .subdomainMultisite)
+                if await refuse(instance, desired: desired, share: share, error: .subdomainMultisite) {
+                    cleared[id] = share
+                }
                 continue
             }
             await reconcileActive(instance, desired: desired, routes: routes)
@@ -305,6 +326,7 @@ public actor ShareCoordinator {
                     await tearDown(id)
                 } else {
                     runtimes[id]?.desired = desired
+                    runtimes[id]?.instance = instance
                 }
                 return
             case .live:
@@ -343,6 +365,11 @@ public actor ShareCoordinator {
     private func start(_ instance: any RunnableInstance, desired: Desired, routes: [String: HTTPSProxy.Route]) {
         let id = instance.instanceID
         guard runtimes[id] == nil, let route = HTTPSProxy.route(for: instance, in: routes) else { return }
+        // A share being torn down still holds its hostname until it is released.
+        if let hostname = desired.hostname,
+           runtimes.contains(where: { $0.key != id && $0.value.phase == .stopping && $0.value.hostname == hostname }) {
+            return
+        }
         nextAttempt += 1
         let attempt = nextAttempt
         var runtime = Runtime(attempt: attempt, instance: instance, desired: desired, phase: .starting,
@@ -357,6 +384,9 @@ public actor ShareCoordinator {
             return
         }
         runtime.temporary = desired.hostname == nil && provider.randomURLsAreTemporary
+        if provider.name == "cloudflared", desired.hostname != nil {
+            runtime.tunnelName = CloudflaredTunnels.tunnelName(for: desired.slug)
+        }
         if let hostname = desired.hostname, let holder = claimant(of: hostname, excluding: id) {
             fail(&runtime, ShareError.hostnameInUse(hostname: hostname, by: holder.desired.slug,
                                                     providerAssigned: holder.desired.hostname == nil))
@@ -383,7 +413,6 @@ public actor ShareCoordinator {
             if provider.name == "cloudflared", let hostname = runtime.desired.hostname {
                 let name = CloudflaredTunnels.tunnelName(for: runtime.desired.slug)
                 tunnelName = name
-                runtimes[id]?.tunnelName = name
                 let warnings = try await ensureTunnel(instanceID: id, tunnelName: name, hostname: hostname)
                 runtimes[id]?.warnings += warnings
                 runtime = try currentAttempt(id, attempt)
@@ -440,7 +469,7 @@ public actor ShareCoordinator {
                 forgetPID(process.pid)
             }
             if listenerOpened { host?.closeShareListener(instanceID: id) }
-            if phpActivated { SharePHPService.deactivate(for: instance) }
+            if phpActivated { SharePHPService.deactivate(for: runtimes[id]?.instance ?? instance) }
             guard var runtime = runtimes[id], runtime.attempt == attempt else { return }
             if runtime.phase == .stopping {
                 runtimes.removeValue(forKey: id)
@@ -481,21 +510,33 @@ public actor ShareCoordinator {
         await tearDown(id)
     }
 
-    /// Publishes a refusal for a share that can never run as configured; the caller
-    /// clears its desired state. A share already running for the instance is released
-    /// first.
-    private func refuse(_ instance: any RunnableInstance, desired: Desired, share: ShareSettings, error: ShareError) async {
+    /// Publishes a refusal for a share that can never run as configured and returns true;
+    /// the caller then clears its desired state. A live share is released first. A share
+    /// still starting or stopping is cancelled and the refusal waits for a later tick, so
+    /// no entry replaces one whose resources are still held.
+    private func refuse(_ instance: any RunnableInstance, desired: Desired, share: ShareSettings, error: ShareError) async -> Bool {
         let id = instance.instanceID
         var cleared = share
         cleared.active = false
         cleared.authDisabled = false
-        if let existing = runtimes[id], existing.phase == .down, existing.refusedSettings == cleared { return }
+        if let existing = runtimes[id] {
+            switch existing.phase {
+            case .down where existing.refusedSettings == cleared:
+                return true
+            case .starting, .stopping:
+                await tearDown(id)
+                return false
+            case .live, .down:
+                break
+            }
+        }
         await tearDown(id)
         nextAttempt += 1
         var runtime = Runtime(attempt: nextAttempt, instance: instance, desired: desired, phase: .down)
         runtime.refusedSettings = cleared
         fail(&runtime, error)
         runtimes[id] = runtime
+        return true
     }
 
     /// Releases a share's resources and forgets it. A share still starting is cancelled
@@ -543,15 +584,18 @@ public actor ShareCoordinator {
         }?.value
     }
 
-    /// Turns off the desired share (and its `--no-auth`) of each instance in `ids`.
-    private func clearDesired(_ ids: Set<UUID>) async {
+    /// Turns off the desired share (and its `--no-auth`) of each instance in `snapshots`
+    /// whose stored settings still equal the snapshot taken when the decision was made.
+    private func clearDesired(_ snapshots: [UUID: ShareSettings]) async {
         do {
             try await persistence.mutateIfChanged { envelope in
                 var changed = false
-                for i in envelope.sites.indices where ids.contains(envelope.sites[i].id) {
+                for i in envelope.sites.indices {
+                    guard let snapshot = snapshots[envelope.sites[i].id], envelope.sites[i].share == snapshot else { continue }
                     if Self.clear(&envelope.sites[i].share) { changed = true }
                 }
-                for i in envelope.envs.indices where ids.contains(envelope.envs[i].id) {
+                for i in envelope.envs.indices {
+                    guard let snapshot = snapshots[envelope.envs[i].id], envelope.envs[i].share == snapshot else { continue }
                     if Self.clear(&envelope.envs[i].share) { changed = true }
                 }
                 return changed
@@ -579,7 +623,8 @@ public actor ShareCoordinator {
             allow: share.allow,
             authDisabled: share.authDisabled,
             upstreamHost: instance.shareUpstreamHost,
-            localOrigins: instance.shareLocalOrigins
+            localOrigins: instance.shareLocalOrigins,
+            requestID: share.requestID
         )
     }
 
@@ -626,7 +671,8 @@ public actor ShareCoordinator {
     // MARK: - Provider pids
 
     private func rememberPID(_ pid: Int32, executable: String, instanceID: UUID) {
-        pidRecords[pid] = SharePIDRecord(pid: pid, executable: executable, instanceID: instanceID)
+        pidRecords[pid] = SharePIDRecord(pid: pid, executable: executable, startTime: Self.startTime(of: pid),
+                                         instanceID: instanceID)
         writePIDs()
     }
 
@@ -653,9 +699,7 @@ public actor ShareCoordinator {
 
         let recorded: [SharePIDRecord] = (try? Data(contentsOf: pidsFile))
             .flatMap { try? JSONDecoder().decode([SharePIDRecord].self, from: $0) } ?? []
-        let orphans = recorded.filter { record in
-            pidRecords[record.pid] == nil && Self.executablePath(of: record.pid) == record.executable
-        }
+        let orphans = recorded.filter { pidRecords[$0.pid] == nil && Self.isRunning($0) }
         for orphan in orphans {
             Self.log.notice("share: stopping provider \(orphan.executable, privacy: .public) (pid \(orphan.pid)) left by a previous proxy")
             kill(orphan.pid, SIGTERM)
@@ -664,12 +708,22 @@ public actor ShareCoordinator {
         var alive = orphans
         while !alive.isEmpty && Date() < deadline {
             try? await Task.sleep(for: .milliseconds(100))
-            alive = alive.filter { Self.executablePath(of: $0.pid) == $0.executable }
+            alive = alive.filter(Self.isRunning)
         }
-        for survivor in alive where Self.executablePath(of: survivor.pid) == survivor.executable {
+        for survivor in alive where Self.isRunning(survivor) {
             kill(survivor.pid, SIGKILL)
         }
         writePIDs()
+        // Statuses a crashed host left behind describe shares that no longer run.
+        publish()
+    }
+
+    /// Whether the recorded process still runs: same pid, executable and start time.
+    private static func isRunning(_ record: SharePIDRecord) -> Bool {
+        guard let recordedStart = record.startTime else { return false }
+        let path = executablePath(of: record.pid)
+        let start = startTime(of: record.pid)
+        return path == record.executable && start == recordedStart
     }
 
     // MARK: - Stop
@@ -731,8 +785,9 @@ public actor ShareCoordinator {
     }
 
     /// Starts cleanup of every recorded tunnel whose instance is gone, or whose instance
-    /// no longer wants that cloudflared hostname. Instances with a share in progress are
-    /// skipped; their start cleans up their own records.
+    /// no longer wants that cloudflared hostname. A record stays while a share of its
+    /// instance still uses that tunnel, and while a deleted instance still has a share
+    /// being released; a later tick cleans it.
     private func cleanUpTunnels(instances: [any RunnableInstance], envelope: StoreEnvelope) {
         guard let tunnels = makeTunnels() else { return }
         var byID: [UUID: any RunnableInstance] = [:]
@@ -742,9 +797,10 @@ public actor ShareCoordinator {
         for record in tunnels.records() {
             guard cleanupTasks[record.tunnelName] == nil, !failedCleanups.contains(record) else { continue }
             let instance = byID[record.instanceID]
+            let runtime = runtimes[record.instanceID]
+            if instance == nil, runtime != nil { continue }
             if let instance {
-                let phase = runtimes[record.instanceID]?.phase
-                if phase == .starting || phase == .live || phase == .stopping { continue }
+                if let runtime, runtime.phase != .down, runtime.tunnelName == record.tunnelName { continue }
                 let wanted = Self.cloudflareHostname(of: instance, envelope: envelope)
                 let isStale = wanted == nil || (record.hostname != nil && record.hostname != wanted)
                 guard isStale else { continue }
