@@ -20,13 +20,18 @@ public final class ShareProcess: @unchecked Sendable {
     private var exitHandler: (@Sendable (Int32, [String]) -> Void)?
     private var processID: Int32 = 0
     private var started = false
+    /// The OS has reaped the process; its pid must not be signalled any more.
+    private var reaped = false
+    /// The exit has been fully reported (output flushed, `onExit` called).
     private var exited = false
     private var startContinuation: CheckedContinuation<String, Error>?
+    private var exitWaiters: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var nextWaiterID = 0
     private var stdoutBuffer = Data()
     private var stderrBuffer = Data()
     private var stderrTail: [String] = []
-    private var stdoutHandle: FileHandle?
-    private var stderrHandle: FileHandle?
+    private var sources: [DispatchSourceRead] = []
+    private let drained = DispatchGroup()
 
     public init(spec: ShareLaunchSpec, provider: any ShareProvider) {
         self.spec = spec
@@ -55,17 +60,24 @@ public final class ShareProcess: @unchecked Sendable {
         }
     }
 
-    /// Sends SIGTERM, then SIGKILL once `grace` has passed. Returns after the process has exited.
+    /// Sends SIGTERM, then SIGKILL once `grace` has passed. Returns after the process has exited
+    /// and `onExit` has run.
     public func terminate(grace: Duration = .seconds(5)) async {
-        let target: Int32? = lock.withLock { started && !exited ? processID : nil }
-        guard let target else { return }
-        kill(target, SIGTERM)
+        let isStarted = lock.withLock { started }
+        guard isStarted else { return }
+        signalIfRunning(SIGTERM)
         if await waitForExit(within: grace) { return }
-        kill(target, SIGKILL)
+        signalIfRunning(SIGKILL)
         _ = await waitForExit(within: .seconds(5))
     }
 
     private func launch(_ continuation: CheckedContinuation<String, Error>) {
+        lock.withLock { startContinuation = continuation }
+        if Task.isCancelled {
+            settleStart(throwing: { _ in CancellationError() })
+            return
+        }
+
         let stdout = Pipe()
         let stderr = Pipe()
         process.executableURL = spec.executable
@@ -78,32 +90,23 @@ public final class ShareProcess: @unchecked Sendable {
             self?.handleTermination(status: finished.terminationStatus)
         }
 
-        lock.withLock {
-            startContinuation = continuation
-            stdoutHandle = stdout.fileHandleForReading
-            stderrHandle = stderr.fileHandleForReading
-        }
-        stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            self?.consume(handle.availableData, isStderr: false)
-        }
-        stderr.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            self?.consume(handle.availableData, isStderr: true)
-        }
+        let created = [
+            makeSource(for: stdout.fileHandleForReading, isStderr: false),
+            makeSource(for: stderr.fileHandleForReading, isStderr: true),
+        ]
+        lock.withLock { sources = created }
+        created.forEach { $0.resume() }
 
         do {
             try process.run()
         } catch {
-            stdout.fileHandleForReading.readabilityHandler = nil
-            stderr.fileHandleForReading.readabilityHandler = nil
-            try? stdout.fileHandleForReading.close()
-            try? stderr.fileHandleForReading.close()
+            created.forEach { $0.cancel() }
             try? stdout.fileHandleForWriting.close()
             try? stderr.fileHandleForWriting.close()
-            lock.withLock {
-                exited = true
-                startContinuation = nil
+            drained.notify(queue: .global()) { [weak self] in
+                self?.lock.withLock { self?.exited = true }
             }
-            continuation.resume(throwing: error)
+            settleStart(throwing: { _ in error })
             return
         }
         lock.withLock {
@@ -112,13 +115,39 @@ public final class ShareProcess: @unchecked Sendable {
         }
     }
 
-    private func consume(_ data: Data, isStderr: Bool) {
-        if data.isEmpty {
-            // EOF: stop polling this pipe; the remainder is flushed on termination.
-            let handle = lock.withLock { isStderr ? stderrHandle : stdoutHandle }
-            handle?.readabilityHandler = nil
-            return
+    /// Reads one pipe on its own serial queue. The cancel handler runs after any in-flight read,
+    /// flushes what is left, and closes the pipe, so the pipe is never read after it is closed.
+    private func makeSource(for handle: FileHandle, isStderr: Bool) -> DispatchSourceRead {
+        let descriptor = handle.fileDescriptor
+        let flags = fcntl(descriptor, F_GETFL)
+        _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK)
+        let queue = DispatchQueue(label: "wpc.share-process.\(isStderr ? "stderr" : "stdout")")
+        let source = DispatchSource.makeReadSource(fileDescriptor: descriptor, queue: queue)
+        drained.enter()
+        source.setEventHandler { [weak self, weak source] in
+            guard let self, let source else { return }
+            if self.readAvailable(descriptor, isStderr: isStderr) { source.cancel() }
         }
+        source.setCancelHandler { [weak self] in
+            _ = self?.readAvailable(descriptor, isStderr: isStderr)
+            try? handle.close()
+            self?.drained.leave()
+        }
+        return source
+    }
+
+    /// Reads until the pipe would block. Returns true at end of file.
+    private func readAvailable(_ descriptor: Int32, isStderr: Bool) -> Bool {
+        var chunk = [UInt8](repeating: 0, count: 65536)
+        while true {
+            let count = read(descriptor, &chunk, chunk.count)
+            if count == 0 { return true }
+            if count < 0 { return false }
+            consume(Data(chunk[0..<count]), isStderr: isStderr)
+        }
+    }
+
+    private func consume(_ data: Data, isStderr: Bool) {
         let lines: [String] = lock.withLock {
             var buffer = isStderr ? stderrBuffer : stdoutBuffer
             buffer.append(data)
@@ -151,39 +180,43 @@ public final class ShareProcess: @unchecked Sendable {
     }
 
     private func handleTermination(status: Int32) {
-        // Read what the pipes still hold, then release the handles.
-        let (out, err) = lock.withLock { (stdoutHandle, stderrHandle) }
-        out?.readabilityHandler = nil
-        err?.readabilityHandler = nil
-        let outRest = out.map(Self.drain) ?? Data()
-        let errRest = err.map(Self.drain) ?? Data()
-        try? out?.close()
-        try? err?.close()
+        let activeSources: [DispatchSourceRead] = lock.withLock {
+            reaped = true
+            return sources
+        }
+        activeSources.forEach { $0.cancel() }
+        drained.notify(queue: .global()) { [weak self] in
+            self?.finishExit(status: status)
+        }
+    }
 
-        let lines: [(String, Bool)] = lock.withLock {
-            stdoutBuffer.append(outRest)
-            stderrBuffer.append(errRest)
-            var result = Self.extractLines(from: &stdoutBuffer).map { ($0, false) }
-            result += Self.extractLines(from: &stderrBuffer).map { ($0, true) }
-            for (buffer, isStderr) in [(stdoutBuffer, false), (stderrBuffer, true)] where !buffer.isEmpty {
-                result.append((String(decoding: buffer, as: UTF8.self), isStderr))
-            }
+    private func finishExit(status: Int32) {
+        let rest: [(String, Bool)] = lock.withLock {
+            var result: [(String, Bool)] = []
+            if !stdoutBuffer.isEmpty { result.append((String(decoding: stdoutBuffer, as: UTF8.self), false)) }
+            if !stderrBuffer.isEmpty { result.append((String(decoding: stderrBuffer, as: UTF8.self), true)) }
             stdoutBuffer = Data()
             stderrBuffer = Data()
+            sources = []
             return result
         }
-        for (line, isStderr) in lines { handle(line: line, isStderr: isStderr) }
+        for (line, isStderr) in rest { handle(line: line, isStderr: isStderr) }
 
         let (tail, handler, continuation): ([String], (@Sendable (Int32, [String]) -> Void)?, CheckedContinuation<String, Error>?) = lock.withLock {
-            exited = true
             let continuation = startContinuation
             startContinuation = nil
-            stdoutHandle = nil
-            stderrHandle = nil
             return (stderrTail, exitHandler, continuation)
         }
         continuation?.resume(throwing: ShareError.providerExited(status: status, stderrTail: tail))
         handler?(status, tail)
+
+        let waiters: [CheckedContinuation<Void, Never>] = lock.withLock {
+            exited = true
+            let all = Array(exitWaiters.values)
+            exitWaiters = [:]
+            return all
+        }
+        waiters.forEach { $0.resume() }
     }
 
     private func settleStart(throwing makeError: ([String]) -> Error) {
@@ -195,11 +228,31 @@ public final class ShareProcess: @unchecked Sendable {
         continuation?.resume(throwing: makeError(tail))
     }
 
+    /// Signals the process unless it has already been reaped, so a recycled pid is never hit.
+    private func signalIfRunning(_ signal: Int32) {
+        lock.withLock {
+            if started && !reaped { kill(processID, signal) }
+        }
+    }
+
+    /// Waits for the exit to be fully reported, or for `duration`; independent of task cancellation.
     private func waitForExit(within duration: Duration) async -> Bool {
-        let deadline = ContinuousClock.now + duration
-        while ContinuousClock.now < deadline {
-            if lock.withLock({ exited }) { return true }
-            try? await Task.sleep(for: .milliseconds(20))
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let id: Int? = lock.withLock {
+                if exited { return nil }
+                nextWaiterID += 1
+                exitWaiters[nextWaiterID] = continuation
+                return nextWaiterID
+            }
+            guard let id else {
+                continuation.resume()
+                return
+            }
+            let seconds = Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
+            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { [weak self] in
+                let waiter = self?.lock.withLock { self?.exitWaiters.removeValue(forKey: id) }
+                waiter?.resume()
+            }
         }
         return lock.withLock { exited }
     }
@@ -213,20 +266,5 @@ public final class ShareProcess: @unchecked Sendable {
             buffer = Data(buffer[buffer.index(after: newline)...])
         }
         return lines
-    }
-
-    /// Reads whatever is buffered without waiting on a writer that is still alive (a child of the provider).
-    private static func drain(_ handle: FileHandle) -> Data {
-        let descriptor = handle.fileDescriptor
-        let flags = fcntl(descriptor, F_GETFL)
-        _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK)
-        var result = Data()
-        var chunk = [UInt8](repeating: 0, count: 65536)
-        while true {
-            let count = read(descriptor, &chunk, chunk.count)
-            if count <= 0 { break }
-            result.append(chunk, count: count)
-        }
-        return result
     }
 }

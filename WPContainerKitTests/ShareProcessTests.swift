@@ -171,4 +171,82 @@ final class ShareProcessTests: XCTestCase {
             XCTAssertEqual(tail.last, "line30")
         }
     }
+
+    func testLaunchFailureThrows() async throws {
+        let spec = ShareLaunchSpec(executable: directory.appendingPathComponent("missing"), arguments: [])
+        let process = ShareProcess(spec: spec, provider: StubProvider())
+        do {
+            _ = try await process.start(readyTimeout: .seconds(5))
+            XCTFail("expected launch failure")
+        } catch {
+            XCTAssertFalse(error is CancellationError)
+        }
+        await process.terminate(grace: .milliseconds(200))
+    }
+
+    func testCancellationBeforeLaunchThrowsWithoutProcess() async throws {
+        let spec = try script("exec sleep 60")
+        let process = ShareProcess(spec: spec, provider: StubProvider())
+        let task = Task<String, Error> {
+            while !Task.isCancelled { try await Task.sleep(for: .milliseconds(5)) }
+            return try await process.start(readyTimeout: .seconds(30))
+        }
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("expected cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertEqual(process.pid, 0)
+    }
+
+    func testCancellationMidStartStopsProcess() async throws {
+        let spec = try script("echo waiting\nexec sleep 60")
+        let process = ShareProcess(spec: spec, provider: StubProvider())
+        let task = Task<String, Error> { try await process.start(readyTimeout: .seconds(30)) }
+        try await Task.sleep(for: .milliseconds(300))
+        let began = ContinuousClock.now
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("expected cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertLessThan(ContinuousClock.now - began, .seconds(5))
+        XCTAssertTrue(isGone(process.pid))
+    }
+
+    func testTerminateAfterNaturalExitIsPrompt() async throws {
+        let spec = try script("echo https://done.example.test\nexit 0")
+        let process = ShareProcess(spec: spec, provider: StubProvider())
+        let box = ExitBox()
+        let fired = expectation(description: "onExit")
+        process.onExit = { status, tail in
+            box.record(status, tail)
+            fired.fulfill()
+        }
+        _ = try await process.start(readyTimeout: .seconds(10))
+        await fulfillment(of: [fired], timeout: 10)
+        let began = ContinuousClock.now
+        await process.terminate(grace: .seconds(5))
+        XCTAssertLessThan(ContinuousClock.now - began, .seconds(1))
+        XCTAssertEqual(box.all.count, 1)
+    }
+
+    func testTerminateFromCancelledTaskWaitsForExit() async throws {
+        let spec = try script("echo https://c.example.test\nexec sleep 60")
+        let process = ShareProcess(spec: spec, provider: StubProvider())
+        _ = try await process.start(readyTimeout: .seconds(10))
+        let task = Task { () -> Bool in
+            while !Task.isCancelled { try? await Task.sleep(for: .milliseconds(5)) }
+            await process.terminate(grace: .seconds(5))
+            return true
+        }
+        task.cancel()
+        let finished = await task.value
+        XCTAssertTrue(finished)
+        XCTAssertTrue(isGone(process.pid))
+    }
 }
