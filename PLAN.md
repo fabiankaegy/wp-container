@@ -622,10 +622,9 @@ machine, import warns and points to the trust step.
   [--force] [--no-start] [--json]`; `wpc import <file.zip> [--name N]
   [--domain D | --no-domain] [--path DIR] [--group G] [--image TAG] [--json]`.
 - *MCP:* `site_export` and `site_import`, synchronous, returning a summary.
-- *App:* Export… in the sidebar context menu, the Site menu and the site detail
-  view (editable exclude list remembered per user, save panel, progress, Reveal in
-  Finder). Import via File ▸ Import Site… (⇧⌘I), the sidebar "+" menu, or by
-  dropping a `.zip` on the main window's panel; the sheet shows a source summary, Name
+- *App:* Export Site… in the sidebar context menu only (editable exclude list
+  remembered per user, save panel, progress, Reveal in Finder). Import via File ▸
+  Import Site… (⇧⌘I) or by dropping a `.zip` on the main window's panel; the sheet shows a source summary, Name
   and Domain fields and the parent folder, then per-phase progress and Open Site.
 
 **Non-goals.** Zips from LocalWP or other tools (a zip without `wpc-site.json` fails

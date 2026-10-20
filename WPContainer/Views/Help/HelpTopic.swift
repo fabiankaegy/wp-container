@@ -342,7 +342,7 @@ extension HelpTopic {
         sections: [
             HelpSection(
                 title: "Exporting",
-                body: "Choose Export… from the site's context menu, the Site menu, or the site's detail view. The site starts if it is stopped. Pick what to leave out, choose where to save, and reveal the finished archive in Finder.",
+                body: "Right-click a site in the sidebar and choose Export Site…. The site starts if it is stopped. Pick what to leave out, choose where to save, and reveal the finished archive in Finder.",
                 bullets: [
                     "`.git`, `node_modules` and similar folders are left out by default; the list is editable and remembered.",
                     "Project folders mounted into the site are copied in as plain folders.",
@@ -351,7 +351,7 @@ extension HelpTopic {
             ),
             HelpSection(
                 title: "Importing",
-                body: "Choose File ▸ Import Site… (⇧⌘I), use the sidebar + menu, or drop a `.zip` onto the main window. Name and domain default to the archive's values and can be changed.",
+                body: "Choose File ▸ Import Site… (⇧⌘I) or drop a `.zip` onto the main window. Name and domain default to the archive's values and can be changed.",
                 bullets: [
                     "The new site gets its own port; every URL in the database and `wp-config.php`, including multisite networks, is rewritten to the new address.",
                     "Users, passwords and content are kept exactly as exported.",

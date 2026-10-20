@@ -137,12 +137,6 @@ private struct AppCommands: Commands {
             Button("Open WP Admin") { if let s = vm.selectedSite { SystemActions.openInBrowser(s.adminURL) } }
                 .disabled(!(vm.selectedSite?.status.isRunning ?? false))
             Button("Reveal in Finder") { if let s = vm.selectedSite { SystemActions.revealInFinder(s.path) } }
-            Divider()
-            Button("Export…") {
-                vm.exportSiteTarget = vm.selectedSite
-                vm.presentingExportSite = true
-            }
-            .disabled(vm.selectedSite == nil)
         }
     }
 }

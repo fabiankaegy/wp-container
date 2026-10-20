@@ -170,10 +170,6 @@ struct SiteDetailView: View {
                 vm.pendingImportDump = nil
                 vm.presentingImportDB = true
             }
-            actionButton("Export", "square.and.arrow.up") {
-                vm.exportSiteTarget = site
-                vm.presentingExportSite = true
-            }
             Spacer()
         }
     }

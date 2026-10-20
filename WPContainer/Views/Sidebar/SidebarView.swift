@@ -182,20 +182,13 @@ struct SidebarView: View {
     // MARK: Add button
 
     private var addButton: some View {
-        Menu {
-            Button("New Site…", systemImage: "plus") { vm.presentingAddSite = true }
-            Button("Import Site…", systemImage: "square.and.arrow.down") {
-                vm.pendingImportArchive = nil
-                vm.presentingImportSite = true
-            }
+        Button {
+            vm.presentingAddSite = true
         } label: {
             Label("Add Site", systemImage: "plus")
                 .font(.body.weight(.semibold))
                 .frame(maxWidth: .infinity)
-        } primaryAction: {
-            vm.presentingAddSite = true
         }
-        .menuStyle(.button)
         .controlSize(.large)
         .buttonStyle(.borderedProminent)
         .tint(Theme.accent)
