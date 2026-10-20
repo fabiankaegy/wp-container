@@ -599,8 +599,9 @@ place. Temp files are removed on every exit path. Symlinks pointing outside
    `wordpress/`), free disk >= 1.2x the uncompressed size.
 2. Resolve a unique slug and the domain choice (keep, set or none).
 3. Create the store record with `provisioned = true`.
-4. Extract on the same volume, move `wordpress/` into the site folder, drop outside
-   symlinks, write the `wp` shim, enable Mailpit, start the site.
+4. Extract on the same volume, move `wordpress/` into the site folder, drop
+   symlinks that resolve outside it or do not resolve, write the `wp` shim, enable
+   Mailpit, start the site.
 5. `wp db import`, then `EnvURLMigrator.migrate` rewrites the source URLs to the new
    site's authority (multisite, `DOMAIN_CURRENT_SITE`, `WP_HOME`/`WP_SITEURL`,
    forwarded-proto).
@@ -608,7 +609,11 @@ place. Temp files are removed on every exit path. Symlinks pointing outside
    hosts failure is a warning and the site stays.
 
 **Rollback.** A failure or cancellation from step 3 through the cache flush removes
-the store record, containers, cert hosts and folder. Content is imported as-is: no
+the store record, containers, cert hosts and folder, and a group the import created
+once no site is left in it.
+`wpc import` and `wpc export` turn Ctrl-C and SIGTERM into a cancellation and exit
+130 once cleanup is done. Work folders (`.wpc-import-*`) and partial archives more
+than six hours old are swept by the next import or export. Content is imported as-is: no
 scrub, no admin reset. HTTPS stays on; if the wpc CA is untrusted on the importing
 machine, import warns and points to the trust step.
 
@@ -620,7 +625,7 @@ machine, import warns and points to the trust step.
 - *App:* Export… in the sidebar context menu, the Site menu and the site detail
   view (editable exclude list remembered per user, save panel, progress, Reveal in
   Finder). Import via File ▸ Import Site… (⇧⌘I), the sidebar "+" menu, or by
-  dropping a `.zip` on the site detail pane; the sheet shows a source summary, Name
+  dropping a `.zip` on the main window's panel; the sheet shows a source summary, Name
   and Domain fields and the parent folder, then per-phase progress and Open Site.
 
 **Non-goals.** Zips from LocalWP or other tools (a zip without `wpc-site.json` fails

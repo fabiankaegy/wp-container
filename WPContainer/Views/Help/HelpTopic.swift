@@ -351,11 +351,12 @@ extension HelpTopic {
             ),
             HelpSection(
                 title: "Importing",
-                body: "Choose File ▸ Import Site… (⇧⌘I), use the sidebar + menu, or drop a `.zip` onto the site detail pane. Name and domain default to the archive's values and can be changed.",
+                body: "Choose File ▸ Import Site… (⇧⌘I), use the sidebar + menu, or drop a `.zip` onto the main window. Name and domain default to the archive's values and can be changed.",
                 bullets: [
                     "The new site gets its own port; every URL in the database and `wp-config.php`, including multisite networks, is rewritten to the new address.",
                     "Users, passwords and content are kept exactly as exported.",
-                    "If the import fails or is cancelled, everything it created is removed.",
+                    "If the import fails, or `wpc import` is stopped with Ctrl-C, everything it created is removed.",
+                    "Files left by an interrupted import or export are cleared by a later one.",
                     "HTTPS stays on. If the wpc certificate authority is not trusted on this Mac, the import warns you.",
                 ],
                 tip: "Only archives made by WP Container can be imported."
