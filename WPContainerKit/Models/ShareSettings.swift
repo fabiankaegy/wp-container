@@ -124,11 +124,15 @@ public struct ShareException: Codable, Sendable, Hashable, CustomStringConvertib
 /// Failures raised by share configuration and lifecycle.
 public enum ShareError: Error, Sendable, CustomStringConvertible {
     case invalidException(String)
+    /// A share origin or upstream host carrying a line break, which would inject request headers.
+    case invalidGateConfig(String)
 
     public var description: String {
         switch self {
         case .invalidException(let text):
             return "Invalid share exception \"\(text)\": use /path-prefix or ?query-key[=value]."
+        case .invalidGateConfig(let field):
+            return "Invalid share configuration: \(field) must not contain line breaks."
         }
     }
 }

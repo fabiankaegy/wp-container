@@ -151,6 +151,12 @@ public final class HTTPSProxy: @unchecked Sendable {
     private var _boundHTTPPort: UInt16?
     /// SAN hosts the leaf currently covers, to detect when a reload is needed.
     private var coveredHosts: Set<String> = []
+    /// Live share listeners keyed by the instance they serve, each on its own
+    /// `127.0.0.1:<ephemeral>` socket. Opened and closed per share; `stop()` closes
+    /// them all, and `reload()` leaves them bound like the env port listeners.
+    private var shareListeners: [UUID: ShareListener] = [:]
+    /// Slugs whose `wpc-<slug>-wp` container was running at the last IP refresh.
+    private var _runningSlugs: Set<String> = []
 
     // MARK: Idle tracking (issue #16)
 
@@ -255,6 +261,11 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// The plain-HTTP listener port, once started.
     public var boundHTTPPort: UInt16? {
         stateLock.withLock { _boundHTTPPort }
+    }
+
+    /// Slugs whose wp container was running at the last refresh tick.
+    public var runningSlugs: Set<String> {
+        stateLock.withLock { _runningSlugs }
     }
 
     // MARK: - Local Network Privacy (macOS 15+ TCC)
@@ -603,6 +614,7 @@ public final class HTTPSProxy: @unchecked Sendable {
         let now = Date()
         stateLock.withLock {
             containerIPs = ips
+            _runningSlugs = runningSlugs
             for slug in runningSlugs where firstSeenRunning[slug] == nil {
                 firstSeenRunning[slug] = now
             }
@@ -638,16 +650,23 @@ public final class HTTPSProxy: @unchecked Sendable {
             return all
         }
         listeners.forEach { $0.cancel() }
+        let shares = stateLock.withLock { () -> [NWListener] in
+            let all = shareListeners.values.map(\.listener)
+            shareListeners.removeAll()
+            return all
+        }
+        shares.forEach { $0.cancel() }
         // Clean stop ⇒ withdraw the ownership report rather than leaving a file
         // claiming ports nothing serves.
         ProxyControl.clearEnvPorts()
     }
 
     /// Tear down the shared 443/80 listeners and the background loops, leaving the
-    /// per-env loopback listeners alone. This — not `stop()` — is what `reload()`
-    /// uses: a reload is a TLS identity swap, and it is triggered by a SAN change,
-    /// i.e. precisely when an env was just created. Dropping every running env's
-    /// socket to re-import a certificate would be a self-inflicted outage.
+    /// per-env loopback listeners and the share listeners alone. This — not
+    /// `stop()` — is what `reload()` uses: a reload is a TLS identity swap, and it
+    /// is triggered by a SAN change, i.e. precisely when an env was just created.
+    /// Dropping every running env's socket to re-import a certificate would be a
+    /// self-inflicted outage.
     private func stopServing() {
         refreshTask?.cancel(); refreshTask = nil
         idleTask?.cancel(); idleTask = nil
@@ -678,11 +697,31 @@ public final class HTTPSProxy: @unchecked Sendable {
         /// WHICH socket the request arrived on, so the Host header is irrelevant
         /// (and for an env it is `127.0.0.1:<port>`, which maps to nothing).
         let pinnedPort: UInt16?
+        /// Set only for a share listener: the request is gated and relayed to
+        /// this share's route, whatever its Host header says.
+        let share: ShareListenerContext?
 
-        init(forwardedProto: String, pinnedPort: UInt16? = nil) {
+        init(forwardedProto: String, pinnedPort: UInt16? = nil, share: ShareListenerContext? = nil) {
             self.forwardedProto = forwardedProto
             self.pinnedPort = pinnedPort
+            self.share = share
         }
+    }
+
+    /// What a share listener's connections carry. The gate config is read from
+    /// `shareListeners` on every request, so `updateShareConfig` reaches
+    /// connections accepted before the swap.
+    private struct ShareListenerContext: Sendable {
+        let instanceID: UUID
+        let route: Route
+        let throttle: ShareAuthThrottle
+    }
+
+    /// One open share: its socket, the route it serves, and the current gate config.
+    private struct ShareListener {
+        let listener: NWListener
+        let route: Route
+        var config: ShareGateConfig
     }
 
     private func startListener(_ listener: NWListener, context: InboundContext) async throws {
@@ -920,6 +959,109 @@ public final class HTTPSProxy: @unchecked Sendable {
         }
     }
 
+    // MARK: - Share listeners
+
+    /// Bind a share listener for one instance on `127.0.0.1:<ephemeral>` and
+    /// return the port. Every connection on it is gated by `config` and relayed to
+    /// `route` only. Opening a share for an instance that already has one replaces
+    /// the old listener.
+    public func openShareListener(instanceID: UUID, route: Route, config: ShareGateConfig) async throws -> UInt16 {
+        try Self.validateShareConfig(config)
+        // Loopback only: the tunnel provider runs on this Mac and is the one
+        // client a share listener is for.
+        let params = NWParameters.tcp
+        params.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: .any)
+        let listener: NWListener
+        do { listener = try NWListener(using: params) } catch { throw ProxyError.listenerFailed("\(error)") }
+
+        let context = InboundContext(forwardedProto: "https",
+                                     share: ShareListenerContext(instanceID: instanceID, route: route,
+                                                                 throttle: ShareAuthThrottle()))
+        listener.newConnectionHandler = { [weak self] connection in
+            self?.handle(inbound: connection, context: context)
+        }
+        let previous = stateLock.withLock { () -> NWListener? in
+            let old = shareListeners[instanceID]?.listener
+            shareListeners[instanceID] = ShareListener(listener: listener, route: route, config: config)
+            return old
+        }
+        previous?.cancel()
+
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<UInt16, Error>) in
+            let resumed = ResumeOnce()
+            // Identity-guarded like the env port listeners: a late callback from a
+            // replaced listener must not evict the current one from the table.
+            listener.stateUpdateHandler = { [weak self, weak listener] state in
+                switch state {
+                case .ready:
+                    guard resumed.tryResume() else { return }
+                    if let port = listener?.port?.rawValue {
+                        cont.resume(returning: port)
+                    } else {
+                        cont.resume(throwing: ProxyError.listenerFailed("share listener has no port"))
+                    }
+                case .failed(let error):
+                    if let listener { self?.removeShareListener(instanceID, ifCurrent: listener)?.cancel() }
+                    if resumed.tryResume() { cont.resume(throwing: ProxyError.listenerFailed("\(error)")) }
+                case .cancelled:
+                    if let listener { _ = self?.removeShareListener(instanceID, ifCurrent: listener) }
+                    if resumed.tryResume() { cont.resume(throwing: ProxyError.listenerFailed("cancelled")) }
+                default:
+                    break
+                }
+            }
+            listener.start(queue: queue)
+        }
+    }
+
+    /// Swap the gate config of a live share listener; the next request uses it.
+    /// A config whose origin or upstream host carries a line break is ignored.
+    public func updateShareConfig(instanceID: UUID, config: ShareGateConfig) {
+        do {
+            try Self.validateShareConfig(config)
+        } catch {
+            Self.log.error("share: ignored a config update for \(instanceID, privacy: .public) — \(error.description, privacy: .public)")
+            return
+        }
+        stateLock.withLock { shareListeners[instanceID]?.config = config }
+    }
+
+    /// Close an instance's share listener. Requests already relayed finish; new
+    /// connections are refused.
+    public func closeShareListener(instanceID: UUID) {
+        let listener = stateLock.withLock { shareListeners.removeValue(forKey: instanceID)?.listener }
+        listener?.cancel()
+    }
+
+    /// The route a share for `instance` relays to, found by the host of its
+    /// upstream `Host` value. An instance advertised on `127.0.0.1:<port>` has no
+    /// hostname in the table, so its route is the non-mailbox one on that port.
+    public static func route(for instance: any RunnableInstance, in routes: [String: Route]) -> Route? {
+        let upstream = instance.shareUpstreamHost
+        let host = upstream.split(separator: ":").first.map { $0.lowercased() } ?? upstream.lowercased()
+        if let route = routes[host] { return route }
+        guard host == "127.0.0.1" || host == "localhost", let port = instance.url.port else { return nil }
+        return routes.values.first { $0.port == port && !$0.isMailbox }
+    }
+
+    /// Both values end up in request headers, so a line break in either would let
+    /// a provider inject headers of its own.
+    private static func validateShareConfig(_ config: ShareGateConfig) throws(ShareError) {
+        let fields = [("publicOrigin", config.publicOrigin), ("upstreamHost", config.upstreamHost)]
+        for (name, value) in fields where value.unicodeScalars.contains(where: { $0 == "\r" || $0 == "\n" }) {
+            throw .invalidGateConfig(name)
+        }
+    }
+
+    /// Remove `listener` from the share table if it is still the one serving
+    /// `instanceID`, returning it so the caller can cancel it.
+    private func removeShareListener(_ instanceID: UUID, ifCurrent listener: NWListener) -> NWListener? {
+        stateLock.withLock {
+            guard shareListeners[instanceID]?.listener === listener else { return nil }
+            return shareListeners.removeValue(forKey: instanceID)?.listener
+        }
+    }
+
     // MARK: - Idle stop (issue #16)
 
     /// The idle sweep lives HERE, next to the routing table, rather than in the
@@ -964,6 +1106,7 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// - `isBusy` skips anything the lifecycle already has an action in flight
     ///   for, and `wakesInFlight` skips anything mid-wake, so a request that
     ///   just revived an instance can't be immediately undone.
+    /// - An instance with an active share is skipped while the share is open.
     private func sweepIdleInstances() async {
         guard let lifecycle else { return }
         guard let envelope = try? await persistence.load() else { return }
@@ -974,6 +1117,7 @@ public final class HTTPSProxy: @unchecked Sendable {
         var stoppedAnEnv = false
         for env in envelope.envs where !env.isSettled {
             guard running.contains(env.wpContainerName) else { continue }
+            guard env.share?.active != true else { continue }
             // An env is only idle-STOPPABLE while we own its port, because that
             // ownership is the whole basis of the env clock being trustworthy: it
             // is what makes browser traffic to `127.0.0.1:<port>` visible, and it
@@ -1024,6 +1168,7 @@ public final class HTTPSProxy: @unchecked Sendable {
 
         for site in envelope.sites {
             guard running.contains(site.wpContainerName) else { continue }
+            guard site.share?.active != true else { continue }
             let timeout = site.effectiveIdleStopMinutes
             guard timeout > 0 else { continue }
             guard idleMinutes(of: site.slug, persisted: site.lastActivityAt, now: now) >= Double(timeout) else { continue }
@@ -1319,6 +1464,9 @@ public final class HTTPSProxy: @unchecked Sendable {
 
     // MARK: - Connection handling
 
+    /// Cap on a buffered request or share response header block — abuse guard.
+    private static let maxHeaderBytes = 1_048_576
+
     private func handle(inbound: NWConnection, context: InboundContext) {
         // One serial queue per accepted connection (shared with its upstream):
         // serial is a Network.framework requirement (see `queue`), per-pair so
@@ -1345,7 +1493,7 @@ public final class HTTPSProxy: @unchecked Sendable {
                 inbound.cancel()
                 return
             }
-            if buffer.count > 1_048_576 { // 1 MiB header cap — abuse guard.
+            if buffer.count > Self.maxHeaderBytes {
                 inbound.cancel()
                 return
             }
@@ -1357,6 +1505,11 @@ public final class HTTPSProxy: @unchecked Sendable {
         guard let header = String(data: rawHeader, encoding: .utf8) else { inbound.cancel(); return }
         let lines = header.components(separatedBy: "\r\n")
         guard let requestLine = lines.first, !requestLine.isEmpty else { inbound.cancel(); return }
+        if let share = context.share {
+            routeShare(inbound: inbound, requestLine: requestLine, headerLines: Array(lines.dropFirst()),
+                       bufferedBody: bufferedBody, share: share, on: connQueue)
+            return
+        }
 
         let host = Self.headerValue("Host", in: lines) ?? ""
         // A request on a proxy-owned env port resolves by SOCKET, not by Host —
@@ -1379,6 +1532,55 @@ public final class HTTPSProxy: @unchecked Sendable {
             return bytes
         }()
 
+        // Whether the client would understand an HTML interstitial. An asset
+        // fetch, an XHR or `curl` gets a terse machine-readable 503 instead — a
+        // page of markup where a stylesheet or a JSON body was expected is worse
+        // than useless (issue #16).
+        let wantsHTML = Self.acceptsHTML(Self.headerValue("Accept", in: lines))
+        dial(candidates: upstreamCandidates(for: target)[...], inbound: inbound, upstreamBytes: upstreamBytes,
+             host: host, target: target, wantsHTML: wantsHTML, on: connQueue)
+    }
+
+    /// A request on a share listener: gate it, rewrite it for the instance's own
+    /// host, and relay it to the one route the listener serves. The Host header
+    /// plays no part in routing, so a visitor cannot reach any other instance.
+    private func routeShare(inbound: NWConnection, requestLine: String, headerLines: [String],
+                            bufferedBody: Data, share: ShareListenerContext, on connQueue: DispatchQueue) {
+        // nil once the share was closed after this connection was accepted.
+        guard let config = stateLock.withLock({ shareListeners[share.instanceID]?.config }) else {
+            inbound.cancel()
+            return
+        }
+        let now = Date()
+        if share.throttle.isLocked(now: now) {
+            sendRawResponse(ShareGate.throttledResponse(), to: inbound)
+            return
+        }
+        let decision = ShareGate.authorize(requestLine: requestLine, headerLines: headerLines, config: config)
+        switch decision {
+        case .pass:
+            break
+        case .challenge:
+            share.throttle.recordFailure(now: now)
+            sendRawResponse(ShareGate.challengeResponse(), to: inbound)
+            return
+        case .throttled:
+            sendRawResponse(ShareGate.throttledResponse(), to: inbound)
+            return
+        }
+
+        let target = share.route
+        stateLock.withLock { touchLocked(target) }
+        var upstreamBytes = Data(ShareGate.rewriteRequest(requestLine: requestLine, headerLines: headerLines,
+                                                          config: config).utf8)
+        upstreamBytes.append(bufferedBody)
+        let wantsHTML = Self.acceptsHTML(Self.headerValue("Accept", in: headerLines))
+        dial(candidates: upstreamCandidates(for: target)[...], inbound: inbound, upstreamBytes: upstreamBytes,
+             host: config.upstreamHost, target: target, wantsHTML: wantsHTML, share: config, on: connQueue)
+    }
+
+    /// Upstream addresses for a route, in dialing order.
+    private func upstreamCandidates(for target: Route) -> [DialCandidate] {
         // Prefer dialing the container's vmnet IP directly (forwarder bypass —
         // see `Route.containerName`); the published `127.0.0.1:<port>` is a
         // last-resort candidate so unknown-IP and stale-IP cases still work.
@@ -1397,13 +1599,7 @@ public final class HTTPSProxy: @unchecked Sendable {
         if !ownsLoopbackPort(target.port), let port = UInt16(exactly: target.port) {
             candidates.append(DialCandidate(host: "127.0.0.1", port: port, isContainerIP: false))
         }
-        // Whether the client would understand an HTML interstitial. An asset
-        // fetch, an XHR or `curl` gets a terse machine-readable 503 instead — a
-        // page of markup where a stylesheet or a JSON body was expected is worse
-        // than useless (issue #16).
-        let wantsHTML = Self.acceptsHTML(Self.headerValue("Accept", in: lines))
-        dial(candidates: candidates[...], inbound: inbound, upstreamBytes: upstreamBytes,
-             host: host, target: target, wantsHTML: wantsHTML, on: connQueue)
+        return candidates
     }
 
     /// Whether an `Accept` header asks for HTML. A missing header is treated as
@@ -1475,6 +1671,7 @@ public final class HTTPSProxy: @unchecked Sendable {
     private func dial(candidates: ArraySlice<DialCandidate>,
                       inbound: NWConnection, upstreamBytes: Data,
                       host: String, target: Route, wantsHTML: Bool,
+                      share: ShareGateConfig? = nil,
                       attempt: Int = 1, triedContainerIP: String? = nil,
                       on connQueue: DispatchQueue) {
         guard let candidate = candidates.first else {
@@ -1496,7 +1693,7 @@ public final class HTTPSProxy: @unchecked Sendable {
                     connQueue.async {
                         self.dial(candidates: [retry][...], inbound: inbound,
                                   upstreamBytes: upstreamBytes, host: host, target: target,
-                                  wantsHTML: wantsHTML, triedContainerIP: ip, on: connQueue)
+                                  wantsHTML: wantsHTML, share: share, triedContainerIP: ip, on: connQueue)
                     }
                     return
                 }
@@ -1555,12 +1752,12 @@ public final class HTTPSProxy: @unchecked Sendable {
                 // vmnet path usually succeeds immediately afterwards.
                 self.dial(candidates: candidates, inbound: inbound,
                           upstreamBytes: upstreamBytes, host: host, target: target,
-                          wantsHTML: wantsHTML, attempt: attempt + 1,
+                          wantsHTML: wantsHTML, share: share, attempt: attempt + 1,
                           triedContainerIP: tried, on: connQueue)
             } else {
                 self.dial(candidates: candidates.dropFirst(), inbound: inbound,
                           upstreamBytes: upstreamBytes, host: host, target: target,
-                          wantsHTML: wantsHTML, triedContainerIP: tried,
+                          wantsHTML: wantsHTML, share: share, triedContainerIP: tried,
                           on: connQueue)
             }
         }
@@ -1573,8 +1770,13 @@ public final class HTTPSProxy: @unchecked Sendable {
                 if candidate.isContainerIP { self?.clearLocalNetworkDenied() }
                 upstream.send(content: upstreamBytes, completion: .contentProcessed { [weak self] err in
                     if err != nil { inbound.cancel(); upstream.cancel(); return }
-                    // Bidirectional raw relay until either side closes.
-                    self?.relay(from: upstream, to: inbound)
+                    // Bidirectional raw relay until either side closes. A share
+                    // response gets its header block rewritten first.
+                    if let share {
+                        self?.relayShareResponse(from: upstream, to: inbound, accumulated: Data(), config: share)
+                    } else {
+                        self?.relay(from: upstream, to: inbound)
+                    }
                     self?.relay(from: inbound, to: upstream)
                 })
             case .waiting(let error):
@@ -1661,6 +1863,86 @@ public final class HTTPSProxy: @unchecked Sendable {
         }
     }
 
+    /// The upstream→client pump of a share connection: holds bytes until the
+    /// response header block is complete, rewrites it with
+    /// `ShareGate.rewriteResponseHeader`, sends it, then hands over to `relay`.
+    ///
+    /// One request per connection: the upstream request carries
+    /// `Connection: close`, so the first final (non-1xx) header block is the only
+    /// one the upstream sends and every byte after it is body.
+    ///
+    /// The `relay` rules hold here too: each `receive` is re-armed at once, so the
+    /// proxy never becomes the slow reader, and an upstream EOF is forwarded as
+    /// flush-then-FIN on the client while only the upstream is cancelled.
+    private func relayShareResponse(from upstream: NWConnection, to inbound: NWConnection,
+                                    accumulated: Data, config: ShareGateConfig) {
+        upstream.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, isComplete, error in
+            guard let self else { upstream.cancel(); inbound.cancel(); return }
+            var buffer = accumulated
+            if let data, !data.isEmpty { buffer.append(data) }
+            self.forwardShareResponse(buffer, ended: isComplete || error != nil,
+                                      from: upstream, to: inbound, config: config)
+        }
+    }
+
+    /// Rewrite and send every complete header block at the front of `buffer`.
+    /// Informational (1xx) blocks are rewritten and forwarded too, and
+    /// accumulation goes on until the final one arrives. Header bytes are decoded
+    /// as ISO Latin 1 so non-ASCII bytes pass through unchanged.
+    private func forwardShareResponse(_ buffer: Data, ended: Bool, from upstream: NWConnection,
+                                      to inbound: NWConnection, config: ShareGateConfig) {
+        var remaining = buffer
+        var out = Data()
+        while let range = Self.headerTerminator(in: remaining) {
+            let headerBytes = remaining.subdata(in: remaining.startIndex..<range.lowerBound)
+            remaining = remaining.subdata(in: range.upperBound..<remaining.endIndex)
+            let header = String(data: headerBytes, encoding: .isoLatin1) ?? ""
+            let rewritten = ShareGate.rewriteResponseHeader(header, config: config)
+            out.append(rewritten.data(using: .isoLatin1) ?? Data(rewritten.utf8))
+            guard Self.isInformationalResponse(header) else {
+                out.append(remaining)
+                if ended {
+                    inbound.send(content: out, contentContext: .finalMessage, isComplete: true, completion: .idempotent)
+                    upstream.cancel()
+                    return
+                }
+                inbound.send(content: out, completion: .contentProcessed { err in
+                    if err != nil { upstream.cancel(); inbound.cancel() }
+                })
+                relay(from: upstream, to: inbound)
+                return
+            }
+        }
+        if ended {
+            // The upstream closed before a final header block; a partial header
+            // carries nothing safe to forward, so end the client's response here.
+            inbound.send(content: out.isEmpty ? nil : out, contentContext: .finalMessage, isComplete: true,
+                         completion: .idempotent)
+            upstream.cancel()
+            return
+        }
+        if remaining.count > Self.maxHeaderBytes {
+            upstream.cancel()
+            inbound.cancel()
+            return
+        }
+        if !out.isEmpty {
+            inbound.send(content: out, completion: .contentProcessed { err in
+                if err != nil { upstream.cancel(); inbound.cancel() }
+            })
+        }
+        relayShareResponse(from: upstream, to: inbound, accumulated: remaining, config: config)
+    }
+
+    /// Whether a response header block is a 1xx interim response that a final one
+    /// follows. `101 Switching Protocols` is final.
+    private static func isInformationalResponse(_ header: String) -> Bool {
+        let statusLine = header.prefix { !$0.isNewline }
+        let parts = statusLine.split(separator: " ", omittingEmptySubsequences: true)
+        guard parts.count >= 2, let code = Int(parts[1]) else { return false }
+        return (100..<200).contains(code) && code != 101
+    }
+
     private func sendHTMLResponse(to inbound: NWConnection, status: String, html: String,
                                   retryAfterSeconds: Int? = nil) {
         sendResponse(to: inbound, status: status, contentType: "text/html; charset=utf-8",
@@ -1675,6 +1957,11 @@ public final class HTTPSProxy: @unchecked Sendable {
         // browser rendering the HTML variant.
         let retry = retryAfterSeconds.map { "Retry-After: \($0)\r\n" } ?? ""
         let response = "HTTP/1.1 \(status)\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.utf8.count)\r\n\(retry)Cache-Control: no-store\r\nConnection: close\r\n\r\n\(body)"
+        inbound.send(content: Data(response.utf8), completion: .contentProcessed { _ in inbound.cancel() })
+    }
+
+    /// Send a complete prebuilt response, then close.
+    private func sendRawResponse(_ response: String, to inbound: NWConnection) {
         inbound.send(content: Data(response.utf8), completion: .contentProcessed { _ in inbound.cancel() })
     }
 
@@ -1958,11 +2245,12 @@ public final class HTTPSProxy: @unchecked Sendable {
         return nil
     }
 
-    /// Rebuild the header block: drop hop-by-hop/forwarding headers we own,
-    /// force `Connection: close`, and inject the X-Forwarded-* pair.
-    private static func rewriteHeaders(requestLine: String, lines: [String], host: String, proto: String) -> String {
+    /// Rebuild the header block: drop hop-by-hop/forwarding headers we own and any
+    /// client-sent `X-WPC-Share-*`, force `Connection: close`, and inject the
+    /// X-Forwarded-* pair.
+    static func rewriteHeaders(requestLine: String, lines: [String], host: String, proto: String) -> String {
         var kept: [String] = []
-        for line in lines {
+        for line in ShareGate.stripShareHeaders(lines) {
             if line.isEmpty { continue }
             guard let colon = line.firstIndex(of: ":") else { kept.append(line); continue }
             let key = line[line.startIndex..<colon].trimmingCharacters(in: .whitespaces).lowercased()
