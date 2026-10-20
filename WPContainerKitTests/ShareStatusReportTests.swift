@@ -66,4 +66,21 @@ final class ShareStatusReportTests: XCTestCase {
         XCTAssertNil(ProxyControl.current(pidFile: pid, portFile: port, sharesFile: shares))
         XCTAssertFalse(FileManager.default.fileExists(atPath: shares.path))
     }
+
+    func testStaleOverridesWithoutSharesFileStayInOverrideDirectory() throws {
+        let pid = dir.appendingPathComponent("proxy.pid")
+        let port = dir.appendingPathComponent("proxy.port")
+        let sibling = dir.appendingPathComponent("proxy-shares.json")
+        let sentinelDir = dir.appendingPathComponent("elsewhere")
+        try FileManager.default.createDirectory(at: sentinelDir, withIntermediateDirectories: true)
+        let sentinel = sentinelDir.appendingPathComponent("proxy-shares.json")
+        ProxyControl.writeShares([status(slug: "my-site", state: .live)], file: sibling)
+        ProxyControl.writeShares([status(slug: "other-site", state: .live)], file: sentinel)
+        try "99999".write(to: pid, atomically: true, encoding: .utf8)
+        // No port file: the record is torn, hence stale.
+
+        XCTAssertNil(ProxyControl.current(pidFile: pid, portFile: port))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sibling.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sentinel.path))
+    }
 }

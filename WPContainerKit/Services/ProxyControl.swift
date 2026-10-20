@@ -48,8 +48,11 @@ public enum ProxyControl {
             try? FileManager.default.removeItem(at: portURL)
             // The env-port report belongs to that dead owner too; a stale one
             // would claim ports nothing is serving.
-            clearEnvPorts()
-            clearShares(file: sharesFile)
+            // With an overridden pidfile the sibling reports live next to it,
+            // so isolated callers never touch the default directory.
+            let reportDir = pidFile?.deletingLastPathComponent()
+            clearEnvPorts(file: reportDir?.appendingPathComponent("proxy-env-ports.json"))
+            clearShares(file: sharesFile ?? reportDir?.appendingPathComponent("proxy-shares.json"))
             return nil
         }
         return Status(pid: pid, port: port)
@@ -105,8 +108,8 @@ public enum ProxyControl {
         try? data.write(to: envPortsFileURL, options: .atomic)
     }
 
-    public static func clearEnvPorts() {
-        try? FileManager.default.removeItem(at: envPortsFileURL)
+    public static func clearEnvPorts(file: URL? = nil) {
+        try? FileManager.default.removeItem(at: file ?? envPortsFileURL)
     }
 
     /// The report as written by the live proxy, or nil when there is none.
