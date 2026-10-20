@@ -74,6 +74,22 @@ final class SiteArchiveImportTests: XCTestCase {
         await assertInspectThrows(archive, .notAWPCExport)
     }
 
+    func testInspectRejectsManifestWithoutDatabase() async throws {
+        try write(try makeManifest().encoded(), to: "wpc-site.json")
+        try write("<?php // index\n", to: "wordpress/index.php")
+        let archive = try await makeZip()
+
+        await assertInspectThrows(archive, .notAWPCExport)
+    }
+
+    func testInspectRejectsManifestWithoutWordPressFolder() async throws {
+        try write(try makeManifest().encoded(), to: "wpc-site.json")
+        try write("-- example dump\n", to: "database.sql")
+        let archive = try await makeZip()
+
+        await assertInspectThrows(archive, .notAWPCExport)
+    }
+
     // MARK: - extract
 
     func testExtractDropsSymlinksLeavingTree() async throws {
@@ -156,11 +172,122 @@ final class SiteArchiveImportTests: XCTestCase {
         XCTAssertEqual(slugs, ["other"])
     }
 
+    // MARK: - importSite rollback
+
+    func testImportRollsBackWhenWordPressFolderIsASymlink() async throws {
+        // unzip refuses to write `wordpress/…` entries through the top-level `wordpress` link.
+        let fm = FileManager.default
+        try write(try makeManifest().encoded(), to: "wpc-site.json")
+        try write("-- example dump\n", to: "database.sql")
+        let target = tempRoot.appendingPathComponent("target", isDirectory: true)
+        try fm.createDirectory(at: target, withIntermediateDirectories: true)
+        try fm.createSymbolicLink(atPath: source.appendingPathComponent("wordpress").path, withDestinationPath: target.path)
+        let archive = try await makeZip()
+        let payload = tempRoot.appendingPathComponent("payload", isDirectory: true)
+        try fm.createDirectory(at: payload.appendingPathComponent("wordpress"), withIntermediateDirectories: true)
+        try "<?php // index\n".write(to: payload.appendingPathComponent("wordpress/index.php"), atomically: true, encoding: .utf8)
+        let appended = try await ProcessRunner.run(
+            executable: "/usr/bin/zip", args: ["-r", "-y", "-q", "-X", archive.path, "wordpress"], cwd: payload)
+        XCTAssertTrue(appended.succeeded, appended.stderr)
+
+        let persistence = StorePersistence(fileURL: tempRoot.appendingPathComponent("sites.json"))
+        let existingGroup = SiteGroup(name: "Clients")
+        _ = try await persistence.mutate { $0.groups.append(existingGroup) }
+        let phases = PhaseRecorder()
+        let options = SiteImportOptions(name: Self.rollbackSiteName, parentFolder: sitesFolder, groupName: "clients")
+
+        let error = await importError(archive, persistence: persistence, options: options, phases: phases)
+
+        XCTAssertNotNil(error)
+        XCTAssertTrue(phases.phases.contains(.rollingBack), "\(phases.phases)")
+        let envelope = try await persistence.load()
+        XCTAssertTrue(envelope.sites.isEmpty)
+        XCTAssertEqual(envelope.groups.map(\.id), [existingGroup.id])
+        XCTAssertFalse(fm.fileExists(atPath: sitesFolder.appendingPathComponent(Self.rollbackSlug).path))
+        XCTAssertEqual(try importWorkFolders(), [])
+        XCTAssertTrue(try fm.contentsOfDirectory(atPath: target.path).isEmpty)
+    }
+
+    func testImportRollbackRemovesSiteFolderAndGroupItCreated() async throws {
+        let archive = try await makeArchive(customDomain: "")
+        let persistence = StorePersistence(fileURL: tempRoot.appendingPathComponent("sites.json"))
+        let phases = PhaseRecorder()
+        // A folder planted at the site's `wordpress/` path makes the move out of the work folder fail.
+        let obstacle = sitesFolder.appendingPathComponent("\(Self.rollbackSlug)/wordpress", isDirectory: true)
+        let options = SiteImportOptions(name: Self.rollbackSiteName, parentFolder: sitesFolder, groupName: "Imported")
+
+        let error = await importError(archive, persistence: persistence, options: options, phases: phases) { phase in
+            if phase == .extracting {
+                try? FileManager.default.createDirectory(at: obstacle, withIntermediateDirectories: true)
+            }
+        }
+
+        XCTAssertNotNil(error)
+        XCTAssertTrue(phases.phases.contains(.rollingBack), "\(phases.phases)")
+        let envelope = try await persistence.load()
+        XCTAssertTrue(envelope.sites.isEmpty)
+        XCTAssertTrue(envelope.groups.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sitesFolder.appendingPathComponent(Self.rollbackSlug).path))
+        XCTAssertEqual(try importWorkFolders(), [])
+    }
+
     // MARK: - Helpers
+
+    /// A name whose slug no real site is likely to use, since rollback touches the shared certificate.
+    private static let rollbackSiteName = "WPC Rollback Fixture"
+    private static let rollbackSlug = "wpc-rollback-fixture"
 
     /// Twelve hops into `b -> .` and twelve back up, ending at a path that does not exist.
     private static let danglingChainTarget =
         (Array(repeating: "b", count: 12) + Array(repeating: "..", count: 12) + ["nonexist", "dir"]).joined(separator: "/")
+
+    private var sitesFolder: URL { tempRoot.appendingPathComponent("sites", isDirectory: true) }
+
+    /// Records import phases from the progress callback.
+    private final class PhaseRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var recorded: [SiteImportPhase] = []
+
+        var phases: [SiteImportPhase] {
+            lock.lock()
+            defer { lock.unlock() }
+            return recorded
+        }
+
+        func record(_ phase: SiteImportPhase) {
+            lock.lock()
+            recorded.append(phase)
+            lock.unlock()
+        }
+    }
+
+    /// Runs an import against a container CLI that cannot launch and returns its error.
+    private func importError(
+        _ archive: URL,
+        persistence: StorePersistence,
+        options: SiteImportOptions,
+        phases: PhaseRecorder,
+        onPhase: @escaping @Sendable (SiteImportPhase) -> Void = { _ in }
+    ) async -> Error? {
+        let cli = ContainerCLI(binaryPath: "/nonexistent/container")
+        let service = SiteArchiveService(cli: cli, lifecycle: SiteLifecycle(cli: cli), persistence: persistence)
+        do {
+            _ = try await service.importSite(archive: archive, options: options) { phase in
+                phases.record(phase)
+                onPhase(phase)
+            }
+            return nil
+        } catch {
+            return error
+        }
+    }
+
+    /// Names of `.wpc-import-*` folders left in `sitesFolder`.
+    private func importWorkFolders() throws -> [String] {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: sitesFolder.path) else { return [] }
+        return try fm.contentsOfDirectory(atPath: sitesFolder.path).filter { $0.hasPrefix(".wpc-import-") }
+    }
 
     private func write(_ text: String, to relativePath: String) throws {
         try write(Data(text.utf8), to: relativePath)
