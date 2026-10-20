@@ -162,6 +162,12 @@ public enum ShareError: Error, Sendable, CustomStringConvertible {
     case hostnameInUse(hostname: String, by: String, providerAssigned: Bool)
     /// The provider exited after its share went live.
     case providerStopped(status: Int32, stderrTail: [String])
+    /// No proxy host is running to serve the share.
+    case proxyNotRunning
+    /// The share did not reach `live` or `down` before the wait timeout.
+    case timedOut
+    /// No site or worktree env has this id.
+    case instanceNotFound(UUID)
 
     public var description: String {
         switch self {
@@ -197,6 +203,12 @@ public enum ShareError: Error, Sendable, CustomStringConvertible {
             let message = "\(hostname) is already used by the share of \(slug). Stop that share first: wp-container share stop \(slug)"
             guard providerAssigned else { return message }
             return message + "\nA free ngrok account serves one share at a time; use --provider cloudflared or a paid ngrok plan to share more."
+        case .proxyNotRunning:
+            return "Sharing needs the proxy running. Start the WP Container app or run: wp-container proxy serve"
+        case .timedOut:
+            return "The share did not report a status in time. Check its state with: wp-container share list"
+        case .instanceNotFound(let id):
+            return "No site or environment with id \(id.uuidString) exists."
         case .providerStopped(let status, let tail):
             return "The share provider exited with status \(status)." + Self.formatTail(tail)
         case .hostnameMismatch(let expected, let got):
