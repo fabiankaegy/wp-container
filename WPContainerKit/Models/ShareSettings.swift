@@ -137,6 +137,10 @@ public enum ShareError: Error, Sendable, CustomStringConvertible {
     case invalidTunnelName(String)
     /// The provider reported a public hostname other than the requested one.
     case hostnameMismatch(expected: String, got: String)
+    /// The provider did not report a public URL before the start timeout.
+    case providerTimedOut(stderrTail: [String])
+    /// The provider exited before reporting a public URL.
+    case providerExited(status: Int32, stderrTail: [String])
 
     public var description: String {
         switch self {
@@ -158,6 +162,14 @@ public enum ShareError: Error, Sendable, CustomStringConvertible {
             return "Invalid tunnel name \"\(value)\": use letters, digits, dots, underscores and hyphens, not starting with a hyphen."
         case .hostnameMismatch(let expected, let got):
             return "The share provider returned the hostname \(got) instead of the requested \(expected)."
+        case .providerTimedOut(let tail):
+            return "The share provider did not report a public URL in time." + Self.formatTail(tail)
+        case .providerExited(let status, let tail):
+            return "The share provider exited with status \(status) before reporting a public URL." + Self.formatTail(tail)
         }
+    }
+
+    private static func formatTail(_ tail: [String]) -> String {
+        tail.isEmpty ? "" : " Last output:\n" + tail.joined(separator: "\n")
     }
 }
