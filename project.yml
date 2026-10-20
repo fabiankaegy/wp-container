@@ -61,7 +61,7 @@ targets:
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
         PRODUCT_NAME: WPContainerKit
-        MARKETING_VERSION: "0.3.0"
+        MARKETING_VERSION: "0.4.0"
         CURRENT_PROJECT_VERSION: "14"
         SKIP_INSTALL: "YES"
 
@@ -107,7 +107,7 @@ targets:
       base:
         PRODUCT_NAME: WPContainer
         PRODUCT_BUNDLE_IDENTIFIER: com.fabiankaegy.wpcontainer
-        MARKETING_VERSION: "0.3.0"
+        MARKETING_VERSION: "0.4.0"
         CURRENT_PROJECT_VERSION: "14"
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
@@ -147,7 +147,7 @@ targets:
       base:
         PRODUCT_NAME: wp-container
         PRODUCT_BUNDLE_IDENTIFIER: com.fabiankaegy.wpcontainer.cli
-        MARKETING_VERSION: "0.3.0"
+        MARKETING_VERSION: "0.4.0"
         CURRENT_PROJECT_VERSION: "14"
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
@@ -169,7 +169,7 @@ targets:
       base:
         PRODUCT_NAME: wpc-hosts-helper
         PRODUCT_BUNDLE_IDENTIFIER: com.fabiankaegy.wpcontainer.hostshelper
-        MARKETING_VERSION: "0.3.0"
+        MARKETING_VERSION: "0.4.0"
         CURRENT_PROJECT_VERSION: "14"
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: minimal

@@ -43,6 +43,7 @@ extension HelpTopic {
         mailpit,
         redis,
         databaseImport,
+        siteExportImport,
         wpCLI,
     ]
 
@@ -325,6 +326,46 @@ extension HelpTopic {
                     "Only the environment's own database is replaced; the site and other environments are untouched.",
                     "URLs are migrated to the environment's URL.",
                     "A dump that switches databases (`USE`, `CREATE DATABASE`, as `mysqldump --databases` writes) is refused for an environment that shares its site's database server. Export with `wp db export` instead.",
+                ]
+            ),
+        ]
+    )
+
+    // MARK: - 8b. Site Export & Import
+
+    static let siteExportImport = HelpTopic(
+        id: "site-export-import",
+        icon: "shippingbox",
+        title: "Site Export & Import",
+        summary: "Move a site to another Mac as a .zip",
+        intro: "Export a site to a single `.zip` and import it on another Mac as a new site. The archive holds the WordPress files, a fresh database dump, and the site's settings.",
+        sections: [
+            HelpSection(
+                title: "Exporting",
+                body: "Choose Export… from the site's context menu, the Site menu, or the site's detail view. The site starts if it is stopped. Pick what to leave out, choose where to save, and reveal the finished archive in Finder.",
+                bullets: [
+                    "`.git`, `node_modules` and similar folders are left out by default; the list is editable and remembered.",
+                    "Project folders mounted into the site are copied in as plain folders.",
+                    "Symlinks that point outside the site are reported, because import drops them.",
+                ]
+            ),
+            HelpSection(
+                title: "Importing",
+                body: "Choose File ▸ Import Site… (⇧⌘I), use the sidebar + menu, or drop a `.zip` onto the site detail pane. Name and domain default to the archive's values and can be changed.",
+                bullets: [
+                    "The new site gets its own port; every URL in the database and `wp-config.php`, including multisite networks, is rewritten to the new address.",
+                    "Users, passwords and content are kept exactly as exported.",
+                    "If the import fails or is cancelled, everything it created is removed.",
+                    "HTTPS stays on. If the wpc certificate authority is not trusted on this Mac, the import warns you.",
+                ],
+                tip: "Only archives made by WP Container can be imported."
+            ),
+            HelpSection(
+                title: "From the command line",
+                bullets: [
+                    "`wpc export <slug> -o site.zip` — add `--exclude <name>`, `--no-default-excludes`, `--force`, or `--no-start`.",
+                    "`wpc import site.zip` — add `--name`, `--domain` or `--no-domain`, `--path`, `--group`, or `--image`.",
+                    "AI agents can use the `site_export` and `site_import` MCP tools.",
                 ]
             ),
         ]
