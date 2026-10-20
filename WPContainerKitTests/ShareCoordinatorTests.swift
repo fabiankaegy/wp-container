@@ -1,0 +1,731 @@
+import Darwin
+import XCTest
+@testable import WPContainerKit
+
+/// The coordinator against a fake listener host, a fake launcher, fake providers,
+/// a temporary store, and temporary status, pid and tunnel registry files.
+final class ShareCoordinatorTests: XCTestCase {
+
+    private var tempRoot: URL!
+    private var persistence: StorePersistence!
+    private var host: FakeShareListenerHost!
+    private var launcher: FakeShareLauncher!
+    private var statusFile: URL!
+    private var pidsFile: URL!
+    private var registryFile: URL!
+    private var cloudflaredLog: URL!
+    private var cloudflared: URL!
+    private var spawned: [Process] = []
+
+    override func setUp() async throws {
+        tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ShareCoordinatorTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        persistence = StorePersistence(fileURL: tempRoot.appendingPathComponent("sites.json"))
+        host = FakeShareListenerHost()
+        launcher = FakeShareLauncher()
+        statusFile = tempRoot.appendingPathComponent("proxy-shares.json")
+        pidsFile = tempRoot.appendingPathComponent("share-pids.json")
+        registryFile = tempRoot.appendingPathComponent("share-cloudflare.json")
+        cloudflaredLog = tempRoot.appendingPathComponent("cloudflared.log")
+        cloudflared = tempRoot.appendingPathComponent("cloudflared")
+        let script = """
+        #!/bin/sh
+        echo "$*" >> '\(cloudflaredLog.path)'
+        exit 0
+        """
+        try script.write(to: cloudflared, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cloudflared.path)
+    }
+
+    override func tearDown() async throws {
+        for process in spawned where process.isRunning { process.terminate() }
+        try? FileManager.default.removeItem(at: tempRoot)
+    }
+
+    // MARK: - Tests
+
+    func testActiveShareOpensListenerStartsProviderAndPublishesLive() async throws {
+        let site = makeSite("my-site", share: activeShare(provider: "fixture"))
+        try await save([site])
+        let coordinator = makeCoordinator()
+
+        try await reconcile(coordinator, running: ["my-site"])
+
+        let status = try XCTUnwrap(statuses().first)
+        XCTAssertEqual(statuses().count, 1)
+        XCTAssertEqual(status.state, .live)
+        XCTAssertEqual(status.url, "https://my-site.example.com")
+        XCTAssertEqual(status.provider, "fixture")
+        XCTAssertEqual(status.slug, "my-site")
+        XCTAssertEqual(status.hostname, "my-site.example.com")
+        XCTAssertFalse(status.temporary)
+        let port = try XCTUnwrap(host.port(of: site.id))
+        XCTAssertEqual(status.listenerPort, port)
+        XCTAssertEqual(status.pid, launcher.handles.first?.pid)
+
+        let config = try XCTUnwrap(host.config(of: site.id))
+        XCTAssertEqual(config.publicOrigin, "https://my-site.example.com")
+        XCTAssertEqual(config.upstreamHost, site.shareUpstreamHost)
+        XCTAssertEqual(config.localOrigins, site.shareLocalOrigins)
+        XCTAssertEqual(config.username, "share")
+        XCTAssertEqual(config.password, "secret-one")
+        XCTAssertEqual(launcher.launches.first?.upstream, "http://127.0.0.1:\(port)")
+
+        let originFile = site.phpConfFolder.appendingPathComponent(SharePHPService.originFileName)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: originFile)) as? [String: Any])
+        XCTAssertEqual(json["origin"] as? String, "https://my-site.example.com")
+        XCTAssertEqual(pidRecords().map(\.pid), [launcher.handles[0].pid])
+    }
+
+    func testStoppedInstanceClearsDesiredShareAndStopsProvider() async throws {
+        var share = activeShare(provider: "fixture")
+        share.authDisabled = true
+        let site = makeSite("my-site", share: share)
+        try await save([site])
+        let coordinator = makeCoordinator()
+        try await reconcile(coordinator, running: ["my-site"])
+        XCTAssertEqual(statuses().first?.state, .live)
+
+        try await reconcile(coordinator, running: [])
+
+        XCTAssertTrue(launcher.handles[0].terminated)
+        XCTAssertTrue(host.closed.contains(site.id))
+        let stored = try await persistence.load().sites.first?.share
+        XCTAssertEqual(stored?.active, false)
+        XCTAssertEqual(stored?.authDisabled, false)
+        XCTAssertEqual(stored?.password, "secret-one")
+        XCTAssertEqual(statuses(), [])
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: site.phpConfFolder.appendingPathComponent(SharePHPService.originFileName).path))
+        XCTAssertEqual(pidRecords(), [])
+    }
+
+    func testInactiveShareTearsDown() async throws {
+        var share = activeShare(provider: "fixture")
+        share.allow = [try ShareException(parsing: "/wp-json/example/webhook")]
+        let site = makeSite("my-site", share: share)
+        try await save([site])
+        let coordinator = makeCoordinator()
+        try await reconcile(coordinator, running: ["my-site"])
+
+        try await setShare(site.id) { $0.active = false }
+        try await reconcile(coordinator, running: ["my-site"])
+
+        XCTAssertTrue(launcher.handles[0].terminated)
+        XCTAssertTrue(host.closed.contains(site.id))
+        XCTAssertEqual(statuses(), [])
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: site.phpConfFolder.appendingPathComponent(SharePHPService.originFileName).path))
+        let stored = try await persistence.load().sites.first?.share
+        XCTAssertEqual(stored?.active, false)
+        XCTAssertEqual(stored?.password, "secret-one")
+        XCTAssertEqual(stored?.allow.map(\.description), ["/wp-json/example/webhook"])
+    }
+
+    func testProviderExitMarksDownWithoutRestart() async throws {
+        let site = makeSite("my-site", share: activeShare(provider: "fixture"))
+        try await save([site])
+        let coordinator = makeCoordinator()
+        try await reconcile(coordinator, running: ["my-site"])
+
+        launcher.handles[0].exit(status: 1, stderrTail: ["err"])
+        let down = try await waitForStatus { $0.first?.state == .down }
+
+        XCTAssertTrue(try XCTUnwrap(down.first?.error).contains("err"))
+        XCTAssertTrue(host.closed.contains(site.id))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: site.phpConfFolder.appendingPathComponent(SharePHPService.originFileName).path))
+        let storedActive = try await persistence.load().sites.first?.share?.active
+        XCTAssertEqual(storedActive, true)
+
+        try await reconcile(coordinator, running: ["my-site"])
+        try await reconcile(coordinator, running: ["my-site"])
+        XCTAssertEqual(launcher.launches.count, 1)
+        XCTAssertEqual(statuses().first?.state, .down)
+
+        try await setShare(site.id) { $0.allow = [try! ShareException(parsing: "?example-callback")] }
+        try await reconcile(coordinator, running: ["my-site"])
+        XCTAssertEqual(launcher.launches.count, 2)
+        XCTAssertEqual(statuses().first?.state, .live)
+    }
+
+    func testFixedHostnameClashIsRefused() async throws {
+        let first = makeSite("site-one", port: 8881, share: activeShare(provider: "fixture", hostname: "share.example.com"))
+        let second = makeSite("site-two", port: 8882, share: activeShare(provider: "fixture", hostname: "share.example.com"))
+        launcher.urls = ["site-one": "https://share.example.com", "site-two": "https://share.example.com"]
+        try await save([first, second])
+        let coordinator = makeCoordinator()
+
+        try await reconcile(coordinator, running: ["site-one", "site-two"])
+
+        let one = try XCTUnwrap(statuses().first { $0.slug == "site-one" })
+        let two = try XCTUnwrap(statuses().first { $0.slug == "site-two" })
+        XCTAssertEqual(one.state, .live)
+        XCTAssertEqual(two.state, .down)
+        let error = try XCTUnwrap(two.error)
+        XCTAssertTrue(error.contains("site-one"), error)
+        XCTAssertTrue(error.contains("wp-container share stop site-one"), error)
+        XCTAssertEqual(launcher.launches.map(\.slug), ["site-one"])
+        XCTAssertNil(host.port(of: second.id))
+    }
+
+    func testNgrokAssignedDomainCountsForClash() async throws {
+        let first = makeSite("site-one", port: 8881, share: activeShare(provider: "ngrok"))
+        let second = makeSite("site-two", port: 8882, share: inactiveShare(provider: "ngrok", hostname: nil))
+        launcher.urls = ["site-one": "https://abc.ngrok-free.app", "site-two": "https://abc.ngrok-free.app"]
+        try await save([first, second])
+        let coordinator = makeCoordinator()
+
+        try await reconcile(coordinator, running: ["site-one"])
+        let one = try XCTUnwrap(statuses().first)
+        XCTAssertEqual(one.state, .live)
+        XCTAssertEqual(one.hostname, "abc.ngrok-free.app")
+        XCTAssertFalse(one.temporary)
+
+        try await setShare(second.id) { $0.active = true }
+        try await reconcile(coordinator, running: ["site-one", "site-two"])
+
+        let two = try XCTUnwrap(statuses().first { $0.slug == "site-two" })
+        XCTAssertEqual(two.state, .down)
+        let error = try XCTUnwrap(two.error)
+        XCTAssertTrue(error.contains("wp-container share stop site-one"), error)
+        XCTAssertTrue(error.contains("cloudflared"), error)
+        XCTAssertTrue(launcher.handles[1].terminated)
+        XCTAssertFalse(launcher.handles[0].terminated)
+        XCTAssertTrue(host.closed.contains(second.id))
+        XCTAssertEqual(statuses().first { $0.slug == "site-one" }?.state, .live)
+    }
+
+    func testQuickTunnelIsTemporary() async throws {
+        let site = makeSite("my-site", share: activeShare(provider: "cloudflared"))
+        launcher.urls = ["my-site": "https://random-words.trycloudflare.com"]
+        try await save([site])
+        let coordinator = makeCoordinator()
+
+        try await reconcile(coordinator, running: ["my-site"])
+
+        let status = try XCTUnwrap(statuses().first)
+        XCTAssertEqual(status.state, .live)
+        XCTAssertTrue(status.temporary)
+        XCTAssertEqual(launcher.launches.first?.tunnelName, "")
+    }
+
+    func testFixedCloudflaredHostnameEnsuresTheNamedTunnel() async throws {
+        let site = makeSite("my-site", share: activeShare(provider: "cloudflared", hostname: "share.example.com"))
+        launcher.urls = ["my-site": "https://share.example.com"]
+        try await save([site])
+        let coordinator = makeCoordinator()
+
+        try await reconcile(coordinator, running: ["my-site"])
+
+        XCTAssertEqual(statuses().first?.state, .live)
+        XCTAssertFalse(try XCTUnwrap(statuses().first).temporary)
+        XCTAssertEqual(launcher.launches.first?.tunnelName, "wpc-my-site")
+        XCTAssertEqual(cloudflaredCalls(), ["tunnel create wpc-my-site", "tunnel route dns wpc-my-site share.example.com"])
+        XCTAssertEqual(registry(), [CloudflareTunnelRecord(instanceID: site.id, tunnelName: "wpc-my-site",
+                                                           hostname: "share.example.com")])
+    }
+
+    func testChangedCloudflaredHostnameReplacesTheTunnelBeforeRestarting() async throws {
+        let site = makeSite("my-site", share: activeShare(provider: "cloudflared", hostname: "a.example.com"))
+        launcher.urls = ["my-site": "https://a.example.com"]
+        try await save([site])
+        let coordinator = makeCoordinator()
+        try await reconcile(coordinator, running: ["my-site"])
+
+        launcher.urls = ["my-site": "https://b.example.com"]
+        try await setShare(site.id) { $0.hostname = "b.example.com" }
+        try await reconcile(coordinator, running: ["my-site"])
+
+        XCTAssertEqual(statuses().first?.state, .live)
+        XCTAssertEqual(statuses().first?.url, "https://b.example.com")
+        XCTAssertEqual(Array(cloudflaredCalls().dropFirst(2)), [
+            "tunnel delete -f wpc-my-site",
+            "tunnel create wpc-my-site",
+            "tunnel route dns wpc-my-site b.example.com",
+        ])
+        XCTAssertEqual(registry(), [CloudflareTunnelRecord(instanceID: site.id, tunnelName: "wpc-my-site",
+                                                           hostname: "b.example.com")])
+        XCTAssertTrue(try XCTUnwrap(statuses().first?.error).contains("a.example.com"))
+    }
+
+    func testRestartReopensRunningShares() async throws {
+        let site = makeSite("my-site", share: activeShare(provider: "fixture"))
+        try await save([site])
+        let first = makeCoordinator()
+        try await reconcile(first, running: ["my-site"])
+        XCTAssertEqual(statuses().first?.state, .live)
+
+        host = FakeShareListenerHost()
+        launcher = FakeShareLauncher()
+        let second = makeCoordinator()
+        try await reconcile(second, running: ["my-site"])
+
+        XCTAssertEqual(statuses().first?.state, .live)
+        XCTAssertEqual(launcher.launches.count, 1)
+        let config = try XCTUnwrap(host.config(of: site.id))
+        XCTAssertEqual(config.username, "share")
+        XCTAssertEqual(config.password, "secret-one")
+    }
+
+    func testReapOrphansKillsRecordedProviderPids() async throws {
+        let orphan = try spawnSleep()
+        let bystander = try spawnSleep()
+        let orphanPath = try XCTUnwrap(ShareCoordinator.executablePath(of: orphan.processIdentifier))
+        let records = [
+            SharePIDRecord(pid: orphan.processIdentifier, executable: orphanPath, instanceID: UUID()),
+            SharePIDRecord(pid: bystander.processIdentifier, executable: "/usr/bin/true", instanceID: UUID()),
+        ]
+        try JSONEncoder().encode(records).write(to: pidsFile)
+
+        await makeCoordinator().reapOrphans()
+
+        let deadline = Date().addingTimeInterval(5)
+        while orphan.isRunning && Date() < deadline { try await Task.sleep(for: .milliseconds(50)) }
+        XCTAssertFalse(orphan.isRunning)
+        XCTAssertTrue(bystander.isRunning)
+        XCTAssertEqual(pidRecords(), [])
+    }
+
+    func testSubdomainMultisiteIsRefused() async throws {
+        var share = activeShare(provider: "fixture")
+        share.authDisabled = true
+        let site = makeSite("my-site", share: share, networkType: .subdomain)
+        try await save([site])
+        let coordinator = makeCoordinator()
+
+        try await reconcile(coordinator, running: ["my-site"])
+
+        let status = try XCTUnwrap(statuses().first)
+        XCTAssertEqual(status.state, .down)
+        XCTAssertTrue(try XCTUnwrap(status.error).contains("subdomain"))
+        let stored = try await persistence.load().sites.first?.share
+        XCTAssertEqual(stored?.active, false)
+        XCTAssertEqual(stored?.authDisabled, false)
+        XCTAssertEqual(launcher.launches.count, 0)
+        XCTAssertNil(host.port(of: site.id))
+
+        try await reconcile(coordinator, running: ["my-site"])
+        XCTAssertEqual(statuses().first?.state, .down)
+    }
+
+    func testScriptReportingWrongHostnameIsRejected() async throws {
+        let site = makeSite("my-site", share: activeShare(provider: "fixture", hostname: "a.example.com"))
+        launcher.urls = ["my-site": "https://b.example.com"]
+        try await save([site])
+        let coordinator = makeCoordinator()
+
+        try await reconcile(coordinator, running: ["my-site"])
+
+        let status = try XCTUnwrap(statuses().first)
+        XCTAssertEqual(status.state, .down)
+        XCTAssertEqual(status.error, ShareError.hostnameMismatch(expected: "a.example.com", got: "b.example.com").description)
+        XCTAssertTrue(launcher.handles[0].terminated)
+        XCTAssertTrue(host.closed.contains(site.id))
+        XCTAssertEqual(pidRecords(), [])
+    }
+
+    func testDeletedInstanceCleansUpItsCloudflareTunnel() async throws {
+        let gone = CloudflareTunnelRecord(instanceID: UUID(), tunnelName: "wpc-gone", hostname: "gone.example.com")
+        try JSONEncoder().encode([gone]).write(to: registryFile)
+        try await save([makeSite("my-site", share: nil)])
+        let coordinator = makeCoordinator()
+
+        try await reconcile(coordinator, running: ["my-site"])
+        try await reconcile(coordinator, running: ["my-site"])
+
+        XCTAssertEqual(cloudflaredCalls(), ["tunnel delete -f wpc-gone"])
+        XCTAssertEqual(registry(), [])
+    }
+
+    func testClearedHostnameCleansUpTunnel() async throws {
+        let cleared = makeSite("site-one", port: 8881, share: inactiveShare(provider: "cloudflared", hostname: nil))
+        let changed = makeSite("site-two", port: 8882, share: inactiveShare(provider: "cloudflared", hostname: "new.example.com"))
+        let kept = makeSite("site-three", port: 8883, share: inactiveShare(provider: "cloudflared", hostname: "kept.example.com"))
+        let records = [
+            CloudflareTunnelRecord(instanceID: cleared.id, tunnelName: "wpc-site-one", hostname: "one.example.com"),
+            CloudflareTunnelRecord(instanceID: changed.id, tunnelName: "wpc-site-two", hostname: "old.example.com"),
+            CloudflareTunnelRecord(instanceID: kept.id, tunnelName: "wpc-site-three", hostname: "kept.example.com"),
+        ]
+        try JSONEncoder().encode(records).write(to: registryFile)
+        try await save([cleared, changed, kept])
+        let coordinator = makeCoordinator()
+
+        try await reconcile(coordinator, running: [])
+
+        XCTAssertEqual(Set(cloudflaredCalls()), ["tunnel delete -f wpc-site-one", "tunnel delete -f wpc-site-two"])
+        XCTAssertEqual(registry(), [records[2]])
+    }
+
+    func testGateSettingsChangeUpdatesTheLiveListener() async throws {
+        let site = makeSite("my-site", share: activeShare(provider: "fixture"))
+        try await save([site])
+        let coordinator = makeCoordinator()
+        try await reconcile(coordinator, running: ["my-site"])
+
+        try await setShare(site.id) { $0.password = "secret-two" }
+        try await reconcile(coordinator, running: ["my-site"])
+
+        XCTAssertEqual(launcher.launches.count, 1)
+        XCTAssertEqual(host.config(of: site.id)?.password, "secret-two")
+        XCTAssertEqual(host.config(of: site.id)?.publicOrigin, "https://my-site.example.com")
+        XCTAssertEqual(statuses().first?.state, .live)
+    }
+
+    func testHostnameChangeRestartsTheProvider() async throws {
+        let site = makeSite("my-site", share: activeShare(provider: "fixture", hostname: "a.example.com"))
+        launcher.urls = ["my-site": "https://a.example.com"]
+        try await save([site])
+        let coordinator = makeCoordinator()
+        try await reconcile(coordinator, running: ["my-site"])
+
+        launcher.urls = ["my-site": "https://b.example.com"]
+        try await setShare(site.id) { $0.hostname = "b.example.com" }
+        try await reconcile(coordinator, running: ["my-site"])
+
+        XCTAssertTrue(launcher.handles[0].terminated)
+        XCTAssertEqual(launcher.launches.count, 2)
+        XCTAssertEqual(statuses().first?.url, "https://b.example.com")
+        XCTAssertEqual(statuses().first?.state, .live)
+    }
+
+    func testDroppedListenerIsReopened() async throws {
+        let site = makeSite("my-site", share: activeShare(provider: "fixture"))
+        try await save([site])
+        let coordinator = makeCoordinator()
+        try await reconcile(coordinator, running: ["my-site"])
+
+        host.drop(site.id)
+        try await reconcile(coordinator, running: ["my-site"])
+
+        XCTAssertTrue(launcher.handles[0].terminated)
+        XCTAssertEqual(launcher.launches.count, 2)
+        XCTAssertEqual(host.openCount, 2)
+        XCTAssertEqual(statuses().first?.state, .live)
+    }
+
+    func testPreflightFailureIsReportedDown() async throws {
+        let site = makeSite("my-site", share: activeShare(provider: "broken"))
+        try await save([site])
+        let coordinator = makeCoordinator()
+
+        try await reconcile(coordinator, running: ["my-site"])
+
+        let status = try XCTUnwrap(statuses().first)
+        XCTAssertEqual(status.state, .down)
+        XCTAssertEqual(status.error, ShareError.providerMissingBinary(name: "broken", install: "brew install broken").description)
+        XCTAssertEqual(launcher.launches.count, 0)
+        XCTAssertNil(host.port(of: site.id))
+    }
+
+    func testDeactivatingWhileStartingCancelsTheLaunch() async throws {
+        let site = makeSite("my-site", share: activeShare(provider: "fixture"))
+        launcher.held = ["my-site"]
+        try await save([site])
+        let coordinator = makeCoordinator()
+
+        let envelope = try await persistence.load()
+        await coordinator.reconcile(envelope: envelope, routes: HTTPSProxy.routes(from: envelope), running: ["my-site"])
+        _ = try await waitForStatus { $0.first?.state == .starting }
+        try await waitUntil { self.launcher.launches.count == 1 }
+
+        try await setShare(site.id) { $0.active = false }
+        try await reconcile(coordinator, running: ["my-site"])
+
+        XCTAssertEqual(statuses(), [])
+        XCTAssertTrue(host.closed.contains(site.id))
+        XCTAssertEqual(launcher.handles.count, 0)
+    }
+
+    func testStopAllTerminatesProvidersAndClearsTheStatusFile() async throws {
+        let site = makeSite("my-site", share: activeShare(provider: "fixture"))
+        try await save([site])
+        let coordinator = makeCoordinator()
+        try await reconcile(coordinator, running: ["my-site"])
+
+        await coordinator.stopAll()
+
+        XCTAssertTrue(launcher.handles[0].terminated)
+        XCTAssertTrue(host.closed.contains(site.id))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: statusFile.path))
+        XCTAssertEqual(pidRecords(), [])
+        let storedActive = try await persistence.load().sites.first?.share?.active
+        XCTAssertEqual(storedActive, true)
+
+        try await reconcile(coordinator, running: ["my-site"])
+        XCTAssertEqual(launcher.launches.count, 1)
+    }
+
+    func testDefaultLauncherReportsAnExitThatPrecedesItsHandler() async throws {
+        let script = tempRoot.appendingPathComponent("fixture")
+        try "#!/bin/sh\necho \"http://127.0.0.1:9\"\nexit 3\n".write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        let provider = ScriptProvider(name: "fixture", executable: script)
+        let spec = try provider.launchSpec(upstream: URL(string: "http://127.0.0.1:1")!, hostname: nil,
+                                           instanceSlug: "my-site", tunnelName: nil)
+
+        let launched = try await DefaultShareProcessLauncher(readyTimeout: .seconds(5)).launch(spec: spec, provider: provider)
+        XCTAssertEqual(launched.url, "http://127.0.0.1:9")
+        try await Task.sleep(for: .milliseconds(500))
+
+        let exited = expectation(description: "exit reported")
+        launched.process.onExit = { status, _ in
+            XCTAssertEqual(status, 3)
+            exited.fulfill()
+        }
+        await fulfillment(of: [exited], timeout: 2)
+    }
+
+    func testProxyReportsWhetherAShareListenerIsOpen() async throws {
+        let proxy = HTTPSProxy(ca: CertificateAuthority(directory: tempRoot.appendingPathComponent("ca")),
+                               persistence: persistence)
+        let id = UUID()
+        let config = ShareGateConfig(publicOrigin: "https://share.example.com", upstreamHost: "my-site.localhost",
+                                     localOrigins: ["http://my-site.localhost"], username: "share",
+                                     password: "secret-one", authDisabled: false, allow: [])
+        XCTAssertFalse(proxy.isShareListenerOpen(instanceID: id))
+
+        _ = try await proxy.openShareListener(instanceID: id, route: HTTPSProxy.Route(port: 8881), config: config)
+        XCTAssertTrue(proxy.isShareListenerOpen(instanceID: id))
+
+        proxy.closeShareListener(instanceID: id)
+        XCTAssertFalse(proxy.isShareListenerOpen(instanceID: id))
+    }
+
+    // MARK: - Helpers
+
+    private func makeCoordinator() -> ShareCoordinator {
+        let providers: [String: FakeShareProvider] = [
+            "fixture": FakeShareProvider(name: "fixture", randomURLsAreTemporary: false),
+            "ngrok": FakeShareProvider(name: "ngrok", randomURLsAreTemporary: false),
+            "cloudflared": FakeShareProvider(name: "cloudflared", randomURLsAreTemporary: true),
+            "broken": FakeShareProvider(name: "broken", randomURLsAreTemporary: false,
+                                        preflightError: .providerMissingBinary(name: "broken", install: "brew install broken")),
+        ]
+        let executable = cloudflared!
+        let registry = registryFile!
+        return ShareCoordinator(
+            host: host,
+            persistence: persistence,
+            launcher: launcher,
+            providers: { name in
+                guard let provider = providers[name] else { throw ShareError.providerNotFound(name) }
+                return provider
+            },
+            statusFile: statusFile,
+            pidsFile: pidsFile,
+            tunnels: { CloudflaredTunnels(executable: executable, registryFile: registry) }
+        )
+    }
+
+    private func makeSite(_ slug: String, port: Int = 8881, share: ShareSettings?,
+                          networkType: NetworkType = .none) -> Site {
+        Site(name: slug, slug: slug, path: tempRoot.appendingPathComponent(slug, isDirectory: true),
+             port: port, imageTag: SiteRecipe.defaultWordPressImage, networkType: networkType, share: share)
+    }
+
+    private func activeShare(provider: String, hostname: String? = nil) -> ShareSettings {
+        ShareSettings(provider: provider, hostname: hostname, username: "share", password: "secret-one", active: true)
+    }
+
+    private func inactiveShare(provider: String, hostname: String?) -> ShareSettings {
+        ShareSettings(provider: provider, hostname: hostname, username: "share", password: "secret-one")
+    }
+
+    private func save(_ sites: [Site]) async throws {
+        try await persistence.save(StoreEnvelope(sites: sites))
+    }
+
+    private func setShare(_ id: UUID, _ change: @escaping @Sendable (inout ShareSettings) -> Void) async throws {
+        try await persistence.mutate { envelope in
+            guard let i = envelope.sites.firstIndex(where: { $0.id == id }), var share = envelope.sites[i].share else { return }
+            change(&share)
+            envelope.sites[i].share = share
+        }
+    }
+
+    private func reconcile(_ coordinator: ShareCoordinator, running: Set<String>) async throws {
+        let envelope = try await persistence.load()
+        await coordinator.reconcile(envelope: envelope, routes: HTTPSProxy.routes(from: envelope), running: running)
+        await coordinator.waitUntilIdle()
+    }
+
+    private func statuses() -> [ShareStatus] {
+        ProxyControl.shares(file: statusFile)
+    }
+
+    private func pidRecords() -> [SharePIDRecord] {
+        guard let data = try? Data(contentsOf: pidsFile) else { return [] }
+        return (try? JSONDecoder().decode([SharePIDRecord].self, from: data)) ?? []
+    }
+
+    private func registry() -> [CloudflareTunnelRecord] {
+        guard let data = try? Data(contentsOf: registryFile) else { return [] }
+        return (try? JSONDecoder().decode([CloudflareTunnelRecord].self, from: data)) ?? []
+    }
+
+    private func cloudflaredCalls() -> [String] {
+        ((try? String(contentsOf: cloudflaredLog, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+    }
+
+    private func waitForStatus(_ condition: ([ShareStatus]) -> Bool) async throws -> [ShareStatus] {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            let current = statuses()
+            if condition(current) { return current }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("status condition not met: \(statuses())")
+        return statuses()
+    }
+
+    private func waitUntil(_ condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(5)
+        while !condition() && Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertTrue(condition())
+    }
+
+    private func spawnSleep() throws -> Process {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.arguments = ["30"]
+        try process.run()
+        spawned.append(process)
+        return process
+    }
+}
+
+// MARK: - Fakes
+
+private final class FakeShareListenerHost: ShareListenerHost, @unchecked Sendable {
+    private let lock = NSLock()
+    private var open: [UUID: (port: UInt16, config: ShareGateConfig)] = [:]
+    private var nextPort: UInt16 = 40000
+    private var _closed: [UUID] = []
+    private var _openCount = 0
+
+    var closed: [UUID] { lock.withLock { _closed } }
+    var openCount: Int { lock.withLock { _openCount } }
+
+    func port(of id: UUID) -> UInt16? { lock.withLock { open[id]?.port } }
+    func config(of id: UUID) -> ShareGateConfig? { lock.withLock { open[id]?.config } }
+    func drop(_ id: UUID) { lock.withLock { _ = open.removeValue(forKey: id) } }
+
+    func openShareListener(instanceID: UUID, route: HTTPSProxy.Route, config: ShareGateConfig) async throws -> UInt16 {
+        lock.withLock {
+            nextPort += 1
+            _openCount += 1
+            open[instanceID] = (nextPort, config)
+            return nextPort
+        }
+    }
+
+    func updateShareConfig(instanceID: UUID, config: ShareGateConfig) {
+        lock.withLock { open[instanceID]?.config = config }
+    }
+
+    func closeShareListener(instanceID: UUID) {
+        lock.withLock {
+            open.removeValue(forKey: instanceID)
+            _closed.append(instanceID)
+        }
+    }
+
+    func isShareListenerOpen(instanceID: UUID) -> Bool {
+        lock.withLock { open[instanceID] != nil }
+    }
+}
+
+private struct FakeShareProvider: ShareProvider {
+    let name: String
+    let randomURLsAreTemporary: Bool
+    var preflightError: ShareError?
+
+    func preflight() async throws {
+        if let preflightError { throw preflightError }
+    }
+
+    func launchSpec(upstream: URL, hostname: String?, instanceSlug: String, tunnelName: String?) throws -> ShareLaunchSpec {
+        ShareLaunchSpec(executable: URL(fileURLWithPath: "/usr/local/bin/fake-\(name)"), arguments: [],
+                        environment: ["UPSTREAM": upstream.absoluteString, "SLUG": instanceSlug,
+                                      "TUNNEL": tunnelName ?? ""])
+    }
+
+    func publicURL(fromOutputLine: String) -> String? { nil }
+}
+
+private final class FakeShareLauncher: ShareProcessLauncher, @unchecked Sendable {
+    struct Launch {
+        let slug: String
+        let upstream: String
+        let tunnelName: String
+    }
+
+    private let lock = NSLock()
+    private var _urls: [String: String] = [:]
+    private var _held: Set<String> = []
+    private var _launches: [Launch] = []
+    private var _handles: [FakeShareHandle] = []
+    private var nextPID: Int32 = 900_000
+
+    var urls: [String: String] {
+        get { lock.withLock { _urls } }
+        set { lock.withLock { _urls = newValue } }
+    }
+    /// Slugs whose launch waits until cancelled.
+    var held: Set<String> {
+        get { lock.withLock { _held } }
+        set { lock.withLock { _held = newValue } }
+    }
+    var launches: [Launch] { lock.withLock { _launches } }
+    var handles: [FakeShareHandle] { lock.withLock { _handles } }
+
+    func launch(spec: ShareLaunchSpec, provider: any ShareProvider) async throws -> (url: String, process: any ShareProcessHandle) {
+        let slug = spec.environment["SLUG"] ?? ""
+        let (url, isHeld) = lock.withLock { () -> (String, Bool) in
+            _launches.append(Launch(slug: slug, upstream: spec.environment["UPSTREAM"] ?? "",
+                                    tunnelName: spec.environment["TUNNEL"] ?? ""))
+            return (_urls[slug] ?? "https://\(slug).example.com", _held.contains(slug))
+        }
+        if isHeld { try await Task.sleep(for: .seconds(30)) }
+        let handle = lock.withLock { () -> FakeShareHandle in
+            nextPID += 1
+            let handle = FakeShareHandle(pid: nextPID)
+            _handles.append(handle)
+            return handle
+        }
+        return (url, handle)
+    }
+}
+
+private final class FakeShareHandle: ShareProcessHandle, @unchecked Sendable {
+    let pid: Int32
+    private let lock = NSLock()
+    private var handler: (@Sendable (Int32, [String]) -> Void)?
+    private var _terminated = false
+    private var exited = false
+
+    init(pid: Int32) { self.pid = pid }
+
+    var terminated: Bool { lock.withLock { _terminated } }
+
+    var onExit: (@Sendable (Int32, [String]) -> Void)? {
+        get { lock.withLock { handler } }
+        set { lock.withLock { handler = newValue } }
+    }
+
+    func terminate() async {
+        lock.withLock { _terminated = true }
+        exit(status: 15, stderrTail: [])
+    }
+
+    func exit(status: Int32, stderrTail: [String]) {
+        let handler: (@Sendable (Int32, [String]) -> Void)? = lock.withLock {
+            guard !exited else { return nil }
+            exited = true
+            return self.handler
+        }
+        handler?(status, stderrTail)
+    }
+}

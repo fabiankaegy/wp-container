@@ -162,6 +162,9 @@ public final class HTTPSProxy: @unchecked Sendable {
     private var nextShareGeneration: UInt64 = 0
     /// Slugs whose `wpc-<slug>-wp` container was running at the last IP refresh.
     private var _runningSlugs: Set<String> = []
+    /// Runs the shares in the store; set once at the end of `init`, since it needs
+    /// `self` as its listener host.
+    private var shareCoordinator: ShareCoordinator?
 
     // MARK: Idle tracking (issue #16)
 
@@ -256,6 +259,7 @@ public final class HTTPSProxy: @unchecked Sendable {
         self.ca = ca
         self.persistence = persistence
         self.lifecycle = lifecycle
+        self.shareCoordinator = ShareCoordinator(host: self, persistence: persistence)
     }
 
     /// The port the listener actually bound, once started.
@@ -588,6 +592,9 @@ public final class HTTPSProxy: @unchecked Sendable {
         await refreshContainerIPs()
         // …and find out immediately whether we are even allowed to reach them.
         await probeLocalNetworkAccess()
+        // Provider processes a crashed proxy host left running would hold public URLs
+        // with nothing behind them; the first reconcile reopens the shares.
+        await shareCoordinator?.reapOrphans()
         // Take ownership of every current env's `127.0.0.1:<port>` socket. From
         // here the refresh loop keeps the set in sync.
         stateLock.withLock { acceptingEnvPorts = true }
@@ -603,8 +610,10 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// self-healing: a failed dial invalidates it). Emptying the cache instead
     /// would demote every SITE request to the lossy forwarder and leave every ENV
     /// request with no upstream candidate at all.
-    private func refreshContainerIPs() async {
-        guard let records = try? await cli.list(all: false) else { return }
+    /// Returns the running slugs, or nil when the list failed.
+    @discardableResult
+    private func refreshContainerIPs() async -> Set<String>? {
+        guard let records = try? await cli.list(all: false) else { return nil }
         var ips: [String: String] = [:]
         var runningSlugs = Set<String>()
         for record in records {
@@ -633,6 +642,7 @@ public final class HTTPSProxy: @unchecked Sendable {
                 wakeFailures.removeValue(forKey: slug)
             }
         }
+        return runningSlugs
     }
 
     /// `wpc-<slug>-wp` → `<slug>`; nil for any other container name.
@@ -644,6 +654,7 @@ public final class HTTPSProxy: @unchecked Sendable {
 
     public func stop() {
         stopServing()
+        stopShares()
         // Full teardown gives the env sockets back too — anything else would
         // leave a dead process's ports held for the next owner.
         let listeners = stateLock.withLock { () -> [NWListener] in
@@ -665,6 +676,18 @@ public final class HTTPSProxy: @unchecked Sendable {
         // Clean stop ⇒ withdraw the ownership report rather than leaving a file
         // claiming ports nothing serves.
         ProxyControl.clearEnvPorts()
+    }
+
+    /// Stops every share's provider before the share listeners close, waiting up to
+    /// 15 seconds. Desired state stays in the store for the next proxy host.
+    private func stopShares() {
+        guard let coordinator = shareCoordinator else { return }
+        let done = DispatchSemaphore(value: 0)
+        Task.detached {
+            await coordinator.stopAll()
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + 15)
     }
 
     /// Tear down the shared 443/80 listeners and the background loops, leaving the
@@ -923,12 +946,22 @@ public final class HTTPSProxy: @unchecked Sendable {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
                 guard let self else { return }
-                await self.refreshContainerIPs()
-                guard let env = try? await self.persistence.load() else { continue }
-                self.updateHostMap(routes: Self.routes(from: env))
+                // The store is read before the container list: a client starts an
+                // instance before it marks it shared, so every share seen here belongs
+                // to an instance the list below already sees running.
+                let loaded = try? await self.persistence.load()
+                let running = await self.refreshContainerIPs()
+                guard let env = loaded else { continue }
+                let routes = Self.routes(from: env)
+                self.updateHostMap(routes: routes)
                 // Diff the proxy-owned env ports against what is actually bound,
                 // which also RETRIES any port an earlier tick couldn't take.
                 self.syncEnvPortListeners()
+                // Without a container list there is no telling a stopped instance
+                // from a failed probe, so shares wait for the next tick.
+                if let running, let coordinator = self.shareCoordinator {
+                    await coordinator.reconcile(envelope: env, routes: routes, running: running)
+                }
                 let wanted = Set(Self.sanHosts(from: env))
                 let known = self.stateLock.withLock { self.coveredHosts }
                 if wanted != known {
@@ -1041,6 +1074,11 @@ public final class HTTPSProxy: @unchecked Sendable {
             return
         }
         stateLock.withLock { shareListeners[instanceID]?.config = config }
+    }
+
+    /// Whether the instance still has a share listener; one that fails is dropped.
+    public func isShareListenerOpen(instanceID: UUID) -> Bool {
+        stateLock.withLock { shareListeners[instanceID] != nil }
     }
 
     /// Close an instance's share listener. Requests already relayed finish; new
@@ -2383,3 +2421,5 @@ private final class ResumeOnce: @unchecked Sendable {
         return true
     }
 }
+
+extension HTTPSProxy: ShareListenerHost {}

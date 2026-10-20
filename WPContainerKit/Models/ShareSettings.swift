@@ -151,6 +151,13 @@ public enum ShareError: Error, Sendable, CustomStringConvertible {
     case cloudflaredHostnameChanged(tunnel: String, recorded: String, requested: String)
     /// The tunnel registry could not be written.
     case cloudflaredRegistryWriteFailed(String)
+    /// Subdomain multisite networks need one public hostname per subsite.
+    case subdomainMultisite
+    /// Another share already serves `hostname`. `providerAssigned` is true when that
+    /// share's hostname came from the provider (a free ngrok domain).
+    case hostnameInUse(hostname: String, by: String, providerAssigned: Bool)
+    /// The provider exited after its share went live.
+    case providerStopped(status: Int32, stderrTail: [String])
 
     public var description: String {
         switch self {
@@ -180,6 +187,14 @@ public enum ShareError: Error, Sendable, CustomStringConvertible {
             return "The tunnel \(tunnel) is routed to \(recorded), not \(requested). Stop sharing to clean it up before using a new hostname."
         case .cloudflaredRegistryWriteFailed(let detail):
             return "Could not save the Cloudflare tunnel registry: \(detail)"
+        case .subdomainMultisite:
+            return "A subdomain multisite network cannot be shared: every subsite needs its own public hostname, and a share has one."
+        case .hostnameInUse(let hostname, let slug, let providerAssigned):
+            let message = "\(hostname) is already used by the share of \(slug). Stop that share first: wp-container share stop \(slug)"
+            guard providerAssigned else { return message }
+            return message + "\nA free ngrok account serves one share at a time; use --provider cloudflared or a paid ngrok plan to share more."
+        case .providerStopped(let status, let tail):
+            return "The share provider exited with status \(status)." + Self.formatTail(tail)
         case .hostnameMismatch(let expected, let got):
             return "The share provider returned the hostname \(got) instead of the requested \(expected)."
         case .providerTimedOut(let tail):
