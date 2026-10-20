@@ -175,6 +175,11 @@ private struct SiteMenuRow: View {
                     .font(.caption2).foregroundStyle(.secondary)
             }
             Spacer(minLength: 6)
+            if vm.shareStatus(for: site.id)?.state == .live {
+                Image(systemName: "link")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityLabel("Shared")
+            }
             RunControl(status: site.status,
                        start: { vm.startSite(site) },
                        stop: { vm.stopSite(site) })
@@ -211,6 +216,11 @@ private struct EnvMenuRow: View {
                     .font(.caption2).foregroundStyle(.secondary)
             }
             Spacer(minLength: 6)
+            if vm.shareStatus(for: env.id)?.state == .live {
+                Image(systemName: "link")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityLabel("Shared")
+            }
             RunControl(status: env.status,
                        start: { vm.startEnv(env) },
                        stop: { vm.stopEnv(env) })
