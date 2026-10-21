@@ -191,6 +191,25 @@ open build/Build/Products/Debug/WPContainer.app
 make install-cli      # optional: /usr/local/bin/wp-container + wpc
 ```
 
+### Testing a pull request build
+
+Each pull request's Build run attaches a Debug build of the app,
+`WPContainer-pr<number>-<commit>.zip`, under Artifacts on the run's summary page.
+It is built from the pull request merged into `main` and kept for 14 days.
+
+```bash
+ditto -x -k ~/Downloads/WPContainer-pr<number>-<commit>.zip ~/Downloads
+xattr -dr com.apple.quarantine ~/Downloads/WPContainer.app   # the build is signed ad-hoc
+open ~/Downloads/WPContainer.app
+```
+
+The build runs the pull request's code with your user's access, so only run builds
+of pull requests you have read. It uses the same site list and sites folder as an
+installed WP Container,
+so quit the installed app first and test on throwaway sites. Its CLI is at
+`WPContainer.app/Contents/MacOS/wp-container`; an installed `wpc` still runs the
+installed app's CLI.
+
 ## How it works
 
 Each site runs two containers (`wpc-<slug>-wp`, `wpc-<slug>-db`) labeled
