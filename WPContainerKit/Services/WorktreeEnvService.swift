@@ -254,9 +254,7 @@ public actor WorktreeEnvService {
             // Worktrees nested inside the parent repo are full checkouts of
             // their own, never runtime deps, so they're left out.
             if provision {
-                let nested = await git.nestedWorktrees(in: repoURL)
-                try await SiteFolders.seedIgnoredRuntimeDeps(from: repoURL, into: worktreePath,
-                                                             nestedCheckouts: nested)
+                try await SiteFolders.seedIgnoredRuntimeDeps(from: repoURL, into: worktreePath)
             }
 
             // 2. Clone site files (APFS CoW), minus the repo folder: the
@@ -264,7 +262,7 @@ public actor WorktreeEnvService {
             try fm.createDirectory(at: envPath, withIntermediateDirectories: true)
             try await SiteFolders.cloneCopyOnWrite(from: parent.wordpressFolder,
                                                    to: envPath.appendingPathComponent("wordpress", isDirectory: true),
-                                                   skipping: repoRelPath.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
+                                                   skipping: repoRelPath)
 
             // 3. Clone the database.
             if let sharedSchema {
@@ -291,14 +289,6 @@ public actor WorktreeEnvService {
                 // Fast path: copy-on-write the parent's data directory.
                 try await SiteFolders.cloneCopyOnWrite(from: parent.databaseFolder, to: env.databaseFolder)
             }
-
-            // Pre-create the shadow mountpoint intentionally. VALIDATED gotcha: if
-            // the subpath doesn't exist in the outer mount the runtime auto-creates
-            // an empty dir on the HOST as a side effect; creating it ourselves keeps
-            // it tidy (and it is removed with `.envs/<b>` on deletion). The clone
-            // in step 2 already leaves an empty folder here; this is a safety net.
-            let mountpoint = env.wordpressFolder.appendingPathComponent(repoRelPath, isDirectory: true)
-            try? fm.createDirectory(at: mountpoint, withIntermediateDirectories: true)
 
             // 4. Start env containers (shared recipe + shadow mount). For a
             // shared-database env the parent is the `dbProvider`, so no DB
