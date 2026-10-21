@@ -6,14 +6,19 @@ import Foundation
 /// wp-cli container per site. `FaviconLocator`'s filename heuristics remain
 /// the fallback for stopped sites and sites without a Site Icon.
 public enum SiteIconQuery {
+    /// The query didn't run: the database isn't accepting connections yet, or
+    /// the lookup was cancelled. Worth retrying, unlike a site without an icon.
+    public struct Unavailable: Error {}
+
     /// The Site Icon's path relative to `wp-content/uploads`, or nil when the
-    /// site has none, its database isn't reachable, or the path looks unsafe.
-    public static func attachmentPath(for inst: any RunnableInstance, cli: ContainerCLI) async -> String? {
-        let config = (try? String(contentsOf: inst.wordpressFolder.appendingPathComponent("wp-config.php"), encoding: .utf8)) ?? ""
+    /// site has none or the path looks unsafe. Throws `Unavailable` when the
+    /// database couldn't be asked.
+    public static func attachmentPath(for inst: any RunnableInstance, cli: ContainerCLI) async throws -> String? {
+        let config = (try? String(contentsOf: WPConfigService.configURL(for: inst.wordpressFolder), encoding: .utf8)) ?? ""
         let args = ["exec", inst.dbContainerName, "mariadb",
                     "-u\(SiteRecipe.dbUser)", "-p\(SiteRecipe.dbPassword)", inst.databaseName,
-                    "-N", "-B", "-e", sql(prefix: tablePrefix(fromWPConfig: config))]
-        guard let result = try? await cli.runCapturing(args), result.succeeded else { return nil }
+                    "-N", "-B", "-e", sql(prefix: WPConfigService.parseTablePrefix(config) ?? "wp_")]
+        guard let result = try? await cli.runCapturing(args), result.succeeded, !Task.isCancelled else { throw Unavailable() }
         return uploadsRelativePath(result.stdout)
     }
 
@@ -25,21 +30,9 @@ public enum SiteIconQuery {
         return FileManager.default.fileExists(atPath: file.path) ? file : nil
     }
 
-    /// The table prefix from `wp-config.php`: the last string literal assigned
-    /// to `$table_prefix`, which covers both `'wp_'` and the official image's
-    /// `getenv_docker('WORDPRESS_TABLE_PREFIX', 'wp_')`. Defaults to `wp_`.
-    public static func tablePrefix(fromWPConfig config: String) -> String {
-        // Split on any line ending: in Swift "\r\n" is ONE character, so a
-        // CRLF wp-config.php never splits on "\n" alone.
-        guard let line = config.split(whereSeparator: \.isNewline).first(where: { $0.contains("$table_prefix") && $0.contains("=") }),
-              let assignment = line.split(separator: "=", maxSplits: 1).last else { return "wp_" }
-        let literals = assignment.matches(of: #/['"]([A-Za-z0-9_]*)['"]/#).map { String($0.output.1) }
-        return literals.last.flatMap { $0.isEmpty ? nil : $0 } ?? "wp_"
-    }
-
     /// The `_wp_attached_file` (a path relative to uploads) of the attachment
     /// named by the `site_icon` option. `prefix` is validated by
-    /// `tablePrefix(fromWPConfig:)` to `[A-Za-z0-9_]`, so it is safe to inline.
+    /// `WPConfigService.parseTablePrefix` to `[A-Za-z0-9_]`, so it is safe to inline.
     public static func sql(prefix: String) -> String {
         """
         SELECT pm.meta_value FROM \(prefix)options o \

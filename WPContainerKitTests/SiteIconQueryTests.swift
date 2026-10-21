@@ -6,21 +6,21 @@ final class SiteIconQueryTests: XCTestCase {
 
     func testPrefixFromOfficialImageConfig() {
         let config = "<?php\n$table_prefix = getenv_docker('WORDPRESS_TABLE_PREFIX', 'wp_');\n"
-        XCTAssertEqual(SiteIconQuery.tablePrefix(fromWPConfig: config), "wp_")
+        XCTAssertEqual(WPConfigService.parseTablePrefix(config), "wp_")
     }
 
     func testPrefixFromCRLFConfig() {
         let config = "<?php\r\ndefine( 'ABSPATH', __DIR__ );\r\n$table_prefix = getenv_docker('WORDPRESS_TABLE_PREFIX', 'wp_');\r\ndefine( 'WP_DEBUG', false );\r\n"
-        XCTAssertEqual(SiteIconQuery.tablePrefix(fromWPConfig: config), "wp_")
+        XCTAssertEqual(WPConfigService.parseTablePrefix(config), "wp_")
     }
 
     func testPrefixFromPlainAssignment() {
-        XCTAssertEqual(SiteIconQuery.tablePrefix(fromWPConfig: "$table_prefix  = \"nw7_\";"), "nw7_")
+        XCTAssertEqual(WPConfigService.parseTablePrefix("$table_prefix  = \"nw7_\";"), "nw7_")
     }
 
-    func testPrefixDefaultsAndRejectsUnsafeValues() {
-        XCTAssertEqual(SiteIconQuery.tablePrefix(fromWPConfig: ""), "wp_")
-        XCTAssertEqual(SiteIconQuery.tablePrefix(fromWPConfig: "$table_prefix = 'x; DROP TABLE';"), "wp_")
+    func testPrefixRejectsMissingAndUnsafeValues() {
+        XCTAssertNil(WPConfigService.parseTablePrefix(""))
+        XCTAssertNil(WPConfigService.parseTablePrefix("$table_prefix = 'x; DROP TABLE';"))
     }
 
     func testQueryUsesPrefix() {

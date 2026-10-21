@@ -193,7 +193,7 @@ struct SiteAvatar: View {
             }
         }
         .shadow(color: .black.opacity(0.12), radius: 1, y: 1)
-        .task(id: FaviconKey(path: wordpressFolder?.path, token: reloadToken, icons: SiteIcons.shared.version)) {
+        .task(id: FaviconKey(path: wordpressFolder?.path, token: reloadToken, icons: SiteIcons.shared.version(for: wordpressFolder))) {
             await loadFavicon()
         }
     }

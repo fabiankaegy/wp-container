@@ -5,33 +5,51 @@ import WPContainerKit
 
 /// Each running site's WordPress Site Icon (the `site_icon` option), resolved
 /// from its database (and downloaded through the site when its media isn't
-/// local) and handed to `FaviconImageCache` as the preferred avatar image. Resolved once per run of a site, so an icon changed in WP Admin shows
-/// after the next start. `version` changes whenever an icon resolves, so
-/// avatars know to reload.
+/// local) and handed to `FaviconImageCache` as the preferred avatar image.
+/// Resolved once per run of a site, so an icon changed in WP Admin shows after
+/// the next start. `version(for:)` changes when a site's icon resolves, so its
+/// avatar knows to reload.
 @MainActor
 @Observable
 final class SiteIcons {
     static let shared = SiteIcons()
 
-    private(set) var version = 0
+    /// WordPress folder path → resolve count, so only that site's avatars reload.
+    private var versions: [String: Int] = [:]
     @ObservationIgnored private var resolved: Set<UUID> = []
 
-    /// Resolves icons for newly running sites and forgets stopped ones.
+    func version(for wordpressFolder: URL?) -> Int {
+        wordpressFolder.flatMap { versions[$0.path] } ?? 0
+    }
+
+    /// Resolves icons for newly running sites, in parallel, and forgets stopped
+    /// ones. A site whose lookup failed or was cancelled is retried next sync.
     func sync(_ sites: [Site], cli: ContainerCLI) async {
         let running = sites.filter { $0.status.isRunning }
         resolved.formIntersection(running.map(\.id))
-        for site in running where !resolved.contains(site.id) {
-            resolved.insert(site.id)
-            var file: URL?
-            let relative = await SiteIconQuery.attachmentPath(for: site, cli: cli)
-            if let relative {
-                file = SiteIconQuery.localFile(for: site, relativePath: relative)
-                if file == nil { file = await Self.download(relative, from: site) }
+        await withTaskGroup(of: (Site, URL?)?.self) { group in
+            for site in running where !resolved.contains(site.id) {
+                group.addTask { await Self.iconFile(for: site, cli: cli) }
             }
-            Self.log.notice("\(site.slug, privacy: .public): site_icon \(relative ?? "none", privacy: .public) → \(file?.path ?? "no file", privacy: .public)")
-            await FaviconImageCache.shared.setPreferred(file, wordpressFolder: site.wordpressFolder)
-            version += 1
+            for await case let (site, file)? in group where !Task.isCancelled {
+                resolved.insert(site.id)
+                await FaviconImageCache.shared.setPreferred(file, wordpressFolder: site.wordpressFolder)
+                versions[site.wordpressFolder.path, default: 0] += 1
+            }
         }
+    }
+
+    /// The site's Site Icon file (nil when it has none or it couldn't be
+    /// fetched), or nil overall when the database couldn't be asked.
+    private static func iconFile(for site: Site, cli: ContainerCLI) async -> (Site, URL?)? {
+        let relative: String?
+        do { relative = try await SiteIconQuery.attachmentPath(for: site, cli: cli) }
+        catch { return nil }
+        guard let relative else { return (site, nil) }
+        var file = SiteIconQuery.localFile(for: site, relativePath: relative)
+        if file == nil { file = await download(relative, from: site) }
+        log.notice("\(site.slug, privacy: .public): site_icon \(relative, privacy: .public) → \(file?.path ?? "no file", privacy: .public)")
+        return (site, file)
     }
 
     private static let log = Logger(subsystem: "com.fabiankaegy.wpcontainer", category: "SiteIcons")
