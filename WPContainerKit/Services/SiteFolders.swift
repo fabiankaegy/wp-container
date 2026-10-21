@@ -76,6 +76,51 @@ public enum SiteFolders {
         }
     }
 
+    /// Like `cloneCopyOnWrite(from:to:)`, but leaves the folder at `skipping`
+    /// (a path relative to `source`, e.g. `wp-content`) out of the clone and puts
+    /// an empty directory in its place. Every ancestor of that folder is
+    /// recreated and its other entries cloned, so only that one subtree is
+    /// missing.
+    ///
+    /// Used for a worktree env's `wordpress/`: the repo folder is shadow-mounted
+    /// from the worktree, so a copy of it is never read. It's also usually the
+    /// heaviest part of the site (node_modules, build output, agent worktrees
+    /// nested inside the repo), where cloning file by file can take many minutes.
+    public static func cloneCopyOnWrite(from source: URL, to destination: URL, skipping relativePath: String) async throws {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: destination.path) {
+            try fm.removeItem(at: destination)
+        }
+        var src = source
+        var dst = destination
+        for component in relativePath.split(separator: "/").map(String.init) {
+            try fm.createDirectory(at: dst, withIntermediateDirectories: true)
+            let entries = try fm.contentsOfDirectory(at: src, includingPropertiesForKeys: nil)
+                .filter { $0.lastPathComponent != component }
+            try await cloneEntries(entries, into: dst)
+            src = src.appendingPathComponent(component, isDirectory: true)
+            dst = dst.appendingPathComponent(component, isDirectory: true)
+        }
+        try fm.createDirectory(at: dst, withIntermediateDirectories: true)
+    }
+
+    /// Clone `entries` into the existing directory `directory` with a single
+    /// `cp -Rc`, falling back to per-entry deep copies if CoW is unavailable.
+    private static func cloneEntries(_ entries: [URL], into directory: URL) async throws {
+        guard !entries.isEmpty else { return }
+        let fm = FileManager.default
+        let result = try await ProcessRunner.run(
+            executable: "/bin/cp",
+            args: ["-Rc"] + entries.map(\.path) + [directory.path]
+        )
+        guard !result.succeeded else { return }
+        for entry in entries {
+            let target = directory.appendingPathComponent(entry.lastPathComponent)
+            if fm.fileExists(atPath: target.path) { try? fm.removeItem(at: target) }
+            try fm.copyItem(at: entry, to: target)
+        }
+    }
+
     /// Files rsync never seeds into a worktree: `.git` (the worktree already has
     /// its own gitlink) and `node_modules` — a build *input*, not needed at
     /// runtime once the built output (e.g. `dist/`) is copied, and by far the
@@ -95,15 +140,25 @@ public enum SiteFolders {
     /// clobber a branch-specific version of a tracked file with the parent's
     /// working copy. See `seedExcludes` for what is skipped.
     ///
+    /// `nestedCheckouts` are paths relative to `parentRepo` that are skipped as
+    /// well: git worktrees living inside the parent repo (agents often put them
+    /// under `.worktrees/` or `.claude/worktrees/`). Each is a full checkout of
+    /// its own, and copying them would multiply the seed by the number of
+    /// worktrees.
+    ///
     /// A no-op-but-successful run (parent has nothing gitignored) is fine. Throws
     /// `SiteFoldersError.seedFailed` on a real rsync error so the caller can roll
     /// back the half-created env.
-    public static func seedIgnoredRuntimeDeps(from parentRepo: URL, into worktree: URL) async throws {
+    public static func seedIgnoredRuntimeDeps(from parentRepo: URL, into worktree: URL,
+                                              nestedCheckouts: [String] = []) async throws {
         // Trailing slashes make rsync copy the *contents* of parentRepo into
         // worktree (not nest it under a subfolder).
         func withSlash(_ u: URL) -> String { u.path.hasSuffix("/") ? u.path : u.path + "/" }
         var args = ["-a", "--ignore-existing"]
         for pattern in seedExcludes { args += ["--exclude", pattern] }
+        // A leading `/` anchors the pattern at the transfer root, so only that
+        // exact path is skipped, not every folder that happens to share its name.
+        for path in nestedCheckouts { args += ["--exclude", "/" + path] }
         args += [withSlash(parentRepo), withSlash(worktree)]
         let result = try await ProcessRunner.run(executable: "/usr/bin/rsync", args: args)
         guard result.succeeded else {

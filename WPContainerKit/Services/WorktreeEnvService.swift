@@ -251,14 +251,20 @@ public actor WorktreeEnvService {
             // the shadow-mounted worktree isn't missing vendor/, built assets, or
             // provisioned plugins and the env boots into a working site (#14).
             // --ignore-existing keeps the branch's tracked files untouched.
+            // Worktrees nested inside the parent repo are full checkouts of
+            // their own, never runtime deps, so they're left out.
             if provision {
-                try await SiteFolders.seedIgnoredRuntimeDeps(from: repoURL, into: worktreePath)
+                let nested = await git.nestedWorktrees(in: repoURL)
+                try await SiteFolders.seedIgnoredRuntimeDeps(from: repoURL, into: worktreePath,
+                                                             nestedCheckouts: nested)
             }
 
-            // 2. Clone site files (APFS CoW).
+            // 2. Clone site files (APFS CoW), minus the repo folder: the
+            // worktree is shadow-mounted over it, so a copy would never be read.
             try fm.createDirectory(at: envPath, withIntermediateDirectories: true)
             try await SiteFolders.cloneCopyOnWrite(from: parent.wordpressFolder,
-                                                   to: envPath.appendingPathComponent("wordpress", isDirectory: true))
+                                                   to: envPath.appendingPathComponent("wordpress", isDirectory: true),
+                                                   skipping: repoRelPath.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
 
             // 3. Clone the database.
             if let sharedSchema {
@@ -289,8 +295,8 @@ public actor WorktreeEnvService {
             // Pre-create the shadow mountpoint intentionally. VALIDATED gotcha: if
             // the subpath doesn't exist in the outer mount the runtime auto-creates
             // an empty dir on the HOST as a side effect; creating it ourselves keeps
-            // it tidy (and it is removed with `.envs/<b>` on deletion). The CoW clone
-            // usually already contains this path, but a bare repo layout may not.
+            // it tidy (and it is removed with `.envs/<b>` on deletion). The clone
+            // in step 2 already leaves an empty folder here; this is a safety net.
             let mountpoint = env.wordpressFolder.appendingPathComponent(repoRelPath, isDirectory: true)
             try? fm.createDirectory(at: mountpoint, withIntermediateDirectories: true)
 

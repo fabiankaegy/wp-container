@@ -99,6 +99,22 @@ public actor GitService {
         try await git(args, cwd: repo)
     }
 
+    /// Paths, relative to `repo`, of the repo's linked worktrees that live
+    /// INSIDE it (e.g. `.worktrees/fix-foo`, `.claude/worktrees/agent-1`).
+    /// Worktrees elsewhere on disk are left out. Empty if git can't list them.
+    public func nestedWorktrees(in repo: URL) async -> [String] {
+        guard let out = try? await git(["-C", repo.path, "worktree", "list", "--porcelain"], cwd: repo) else { return [] }
+        let base = repo.resolvingSymlinksInPath().standardizedFileURL.pathComponents
+        return out.split(separator: "\n")
+            .filter { $0.hasPrefix("worktree ") }
+            .compactMap { line -> String? in
+                let path = URL(fileURLWithPath: String(line.dropFirst("worktree ".count)))
+                let comps = path.resolvingSymlinksInPath().standardizedFileURL.pathComponents
+                guard comps.count > base.count, Array(comps.prefix(base.count)) == base else { return nil }
+                return comps.dropFirst(base.count).joined(separator: "/")
+            }
+    }
+
     /// `git -C <repo> worktree remove [--force] <path>`.
     public func worktreeRemove(repo: URL, path: URL, force: Bool) async throws {
         var args = ["-C", repo.path, "worktree", "remove"]
