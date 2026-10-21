@@ -87,6 +87,11 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     /// Reaped by `WorktreeEnvService.create` on the shared path, where the server
     /// is guaranteed up; entries are cleared once their DROP actually succeeds.
     public var pendingSchemaDrops: [String] = []
+    /// Host folders bind-mounted into the site's WordPress tree, such as a
+    /// project mounted as a plugin by `create --wp-env` (`.wp-env.json`'s local
+    /// plugins, themes, and mappings). Edits in those folders reach the site
+    /// live.
+    public var mounts: [Mount] = []
 
     /// When the site was archived: stopped, its branch environments settled,
     /// hidden from the default library and left out of the proxy's routes, with
@@ -109,6 +114,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         case lastImportSourceURL
         case pendingSchemaDrops
         case archivedAt
+        case mounts
     }
 
     public init(
@@ -139,6 +145,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         lastImportSourceURL: String? = nil,
         pendingSchemaDrops: [String] = [],
         archivedAt: Date? = nil,
+        mounts: [Mount] = [],
         status: SiteStatus = .stopped
     ) {
         self.id = id
@@ -168,6 +175,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.lastImportSourceURL = lastImportSourceURL
         self.pendingSchemaDrops = pendingSchemaDrops
         self.archivedAt = archivedAt
+        self.mounts = mounts
         self.status = status
     }
 
@@ -216,6 +224,8 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
             ?? []
         // Absent in stores written before archiving existed: an active site.
         self.archivedAt = try? c.decodeIfPresent(Date.self, forKey: .archivedAt)
+        // Absent in stores written before `create --wp-env`.
+        self.mounts = ((try? c.decodeIfPresent([Mount].self, forKey: .mounts)) ?? []) ?? []
     }
 
     // MARK: Derived paths
@@ -273,7 +283,7 @@ extension Site: RunnableInstance {
     public var envLabel: String? { nil }
     public var displayName: String { name }
     public var isProvisioned: Bool { provisioned }
-    public var extraMounts: [Mount] { [] }
+    public var extraMounts: [Mount] { mounts }
     /// `<slug>.localhost` plus any custom domain. Subdomain-multisite wildcards
     /// are omitted — /etc/hosts can't express them; subsite loopbacks would
     /// need per-subsite entries (acceptable gap, matches the proxy SAN story).

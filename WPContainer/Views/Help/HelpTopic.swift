@@ -320,7 +320,7 @@ extension HelpTopic {
             ),
             HelpSection(
                 title: "Importing into a branch environment",
-                body: "A branch environment starts with a copy of its site's database. To test a branch against different data, import a dump into the environment itself: `wp-container db import <env-slug> dump.sql`.",
+                body: "A branch environment starts with a copy of its site's database. To test a branch against different data, import a dump into the environment itself: `wp-container db import <env-slug> dump.sql`, or create it with one: `wp-container worktree create … --import dump.sql`.",
                 bullets: [
                     "Only the environment's own database is replaced; the site and other environments are untouched.",
                     "URLs are migrated to the environment's URL.",

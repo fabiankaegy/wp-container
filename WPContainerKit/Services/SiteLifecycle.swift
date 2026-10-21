@@ -223,6 +223,14 @@ public actor SiteLifecycle {
         defer { releaseDatabaseLease(inst.dbContainerName) }
         do {
             try SiteFolders.ensure(for: inst)
+            // Pre-create every mountpoint inside wordpress/; the runtime would
+            // otherwise create an empty one on the host as a side effect.
+            let documentRoot = SiteRecipe.wordpressContainerPath + "/"
+            for mount in inst.extraMounts where mount.containerPath.hasPrefix(documentRoot) {
+                let rel = String(mount.containerPath.dropFirst(documentRoot.count))
+                try? FileManager.default.createDirectory(at: inst.wordpressFolder.appendingPathComponent(rel, isDirectory: true),
+                                                         withIntermediateDirectories: true)
+            }
             // PHP overrides folder (50 MB upload limits) — must exist before
             // the wp `container run` bind-mounts it.
             try PHPConfService.ensure(for: inst)
