@@ -26,6 +26,7 @@ struct ShareStart: AsyncParsableCommand {
     )
     @Argument(help: "Site slug or env slug.") var target: String
     @Option(name: .long, help: "Provider: ngrok, cloudflared, or a custom provider name.") var provider: String?
+    @Flag(name: .long, help: "Forget the saved provider so the share follows the default provider.") var clearProvider = false
     @Option(name: .long, help: "Fixed public hostname, when the provider supports one.") var hostname: String?
     @Flag(name: .long, help: "Forget the fixed hostname.") var clearHostname = false
     @Option(name: .long, help: "Request that bypasses the password: /path-prefix or ?query-key[=value]. Repeatable.") var allow: [String] = []
@@ -40,6 +41,9 @@ struct ShareStart: AsyncParsableCommand {
             if hostname != nil && clearHostname {
                 throw CLIErrorJSON("bad_args", detail: "--hostname and --clear-hostname cannot be combined")
             }
+            if provider != nil && clearProvider {
+                throw CLIErrorJSON("bad_args", detail: "--provider and --clear-provider cannot be combined")
+            }
             let envelope = try await ctx.load()
             guard let resolved = resolveTarget(target, in: envelope) else { throw CLIErrorJSON("not_found", detail: target) }
             let inst = resolved.instance
@@ -50,8 +54,9 @@ struct ShareStart: AsyncParsableCommand {
             } else if let hostname {
                 hostnameChange = .some(hostname)
             }
-            let request = ShareRequest(provider: provider, hostname: hostnameChange, addAllow: allow,
-                                       clearAllow: clearAllow, resetPassword: resetPassword, noAuth: noAuth)
+            let request = ShareRequest(provider: provider, clearProvider: clearProvider, hostname: hostnameChange,
+                                       addAllow: allow, clearAllow: clearAllow, resetPassword: resetPassword,
+                                       noAuth: noAuth)
             let control = ShareControl(persistence: ctx.persistence)
             try await control.validate(instanceID: inst.instanceID, request)
 

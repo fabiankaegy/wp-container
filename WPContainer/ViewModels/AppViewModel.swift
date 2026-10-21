@@ -808,8 +808,8 @@ public final class AppViewModel {
         return share?.active == true
     }
 
-    /// Starts the instance when it is stopped, requests the share and waits for the
-    /// provider to report `live` or `down`.
+    /// Validates the request, starts the instance when it is stopped, requests the share
+    /// and waits for the provider to report `live` or `down`.
     public func startShare(_ instanceID: UUID, request: ShareRequest) async {
         guard !sharesStarting.contains(instanceID) else { return }
         sharesStarting.insert(instanceID)
@@ -820,8 +820,9 @@ public final class AppViewModel {
             shareCancelled.remove(instanceID)
         }
         do {
-            try await startInstanceForShare(instanceID)
             await ensureProxyRunning()
+            try await shareControl.validate(instanceID: instanceID, request)
+            try await startInstanceForShare(instanceID)
             guard !shareCancelled.contains(instanceID) else { throw ShareError.cancelled }
             let settings = try await shareControl.request(instanceID: instanceID, request)
             let status = try await shareControl.waitForStatus(instanceID: instanceID, requestID: settings.requestID)
@@ -912,7 +913,9 @@ public final class AppViewModel {
         for status in published { next[status.instanceID] = status }
         for (id, status) in next where status.state == .down && shareStatuses[id]?.state == .live {
             let instance: (any RunnableInstance)? = store.site(id: id) ?? store.env(id: id)
-            guard let instance, instance.share?.active == true else { continue }
+            // A share that went down is cleared in the store, so the request id tells it
+            // from one the user stopped or requested again.
+            guard let instance, let share = instance.share, share.requestID == status.requestID else { continue }
             let isUp = (store.site(id: id)?.status ?? store.env(id: id)?.status)?.isRunning == true
             guard isUp else { continue }
             let name = store.env(id: id).map { "\($0.parentSlug) · \($0.branch)" } ?? instance.displayName

@@ -182,8 +182,9 @@ Sites are provisioned automatically (no install wizard) and log in with
   a share keep local URLs, and every response carries
   `X-Robots-Tag: noindex, nofollow`. A proxy host (the app or
   `wp-container proxy serve`) from a build with sharing must be running; an
-  older app also drops share settings whenever it saves the store. A share that
-  goes down keeps its site exempt from idle-stop until it is stopped. Limits: the free ngrok plan
+  older app also drops share settings whenever it saves the store. A share ends
+  when its site starts or stops, and a share that goes down is not reopened
+  until it is requested again. Limits: the free ngrok plan
   allows one share at a time and shows ngrok's own warning page to browser
   visitors; subdomain multisite is not supported; application-password and
   Basic-auth REST requests do not pass through a share; static CSS/JS files are

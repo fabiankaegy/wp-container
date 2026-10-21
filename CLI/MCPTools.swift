@@ -153,6 +153,7 @@ enum MCPTools {
              inputSchema: obj([
                 "slug": str("Site or environment slug (defaults to the scoped site)."),
                 "provider": str("Tunnel provider: ngrok, cloudflared, or a custom provider name. Omit to keep the instance's saved provider or the default."),
+                "clear_provider": bool("Forget the instance's saved provider so the share uses the default provider. Cannot be combined with `provider`."),
                 "hostname": str("Fixed public hostname, when the provider supports one."),
                 "reset_password": bool("Generate a new password for the share."),
              ])),

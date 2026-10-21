@@ -117,7 +117,8 @@ enum MCPToolDispatch {
     // MARK: - Sharing
 
     /// Starts a public share. Only provider, hostname and a password reset can be
-    /// requested; the password gate and its exceptions stay under human control.
+    /// requested, or the saved provider cleared; the password gate and its exceptions
+    /// stay under human control.
     private static func shareStart(_ args: [String: Value], ctx: CLIContext, slug: String) async throws -> CallTool.Result {
         let target = args["slug"]?.stringValue ?? slug
         let envelope = try await ctx.load()
@@ -130,8 +131,12 @@ enum MCPToolDispatch {
         if let hostname = args["hostname"]?.stringValue {
             hostnameChange = .some(hostname)
         }
-        let request = ShareRequest(provider: args["provider"]?.stringValue, hostname: hostnameChange,
-                                   addAllow: [], clearAllow: false,
+        let clearProvider = args["clear_provider"]?.boolValue ?? false
+        if clearProvider && args["provider"]?.stringValue != nil {
+            throw ToolError("bad_args", "provider and clear_provider cannot be combined.")
+        }
+        let request = ShareRequest(provider: args["provider"]?.stringValue, clearProvider: clearProvider,
+                                   hostname: hostnameChange, addAllow: [], clearAllow: false,
                                    resetPassword: args["reset_password"]?.boolValue ?? false, noAuth: false)
         let control = ShareControl(persistence: ctx.persistence)
         try await control.validate(instanceID: instanceID, request)

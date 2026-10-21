@@ -572,7 +572,7 @@ site create+start+auto-provision another ~10s.
 Any site or branch environment can be put on a public URL behind a password.
 
 - **CLI**: `wp-container share [start] <site|env> [--provider P] [--hostname H]
-  [--clear-hostname] [--allow <entry>]... [--clear-allow] [--reset-password]
+  [--clear-hostname] [--clear-provider] [--allow <entry>]... [--clear-allow] [--reset-password]
   [--no-auth] [--json]`, `share stop <target>`, `share list`, `share default
   [<provider> | --clear]`. Starting a share checks its settings and the proxy
   host, starts a stopped target, and prints the URL, whether it is temporary,
@@ -663,13 +663,17 @@ exec my-tunnel-tool --to "$WPC_SHARE_UPSTREAM" ${WPC_SHARE_HOSTNAME:+--host "$WP
 
 ### Lifecycle
 
-- A share ends when it is stopped, when its site or env stops, or when the
-  provider process exits (reported as down and not restarted).
+- A share ends when it is stopped, when its site or env starts or stops (from any
+  surface, also while no proxy host runs), or when it fails: the provider fails
+  to start or exits, or another share holds its hostname. A failed share is
+  reported down with its error until it is requested again, and no proxy host
+  reopens it.
 - Shares reopen after the app or proxy host restarts if the site is still
   running.
 - An open share keeps its site from idle-stop and its env from being suggested
-  for settling. A share that is down stays open until it is stopped, so it keeps
-  that exemption.
+  for settling. A share that is down has ended, so it does not.
+- Stopping a provider also stops every process it started, such as the tunnel a
+  custom provider script runs.
 - A share requested for an instance that stopped before the share started is
   reported down with "The site isn't running."
 - Share settings live in `sites.json`, which is written with mode 0600 because it

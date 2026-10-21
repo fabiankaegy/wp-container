@@ -3,8 +3,9 @@ import WPContainerKit
 
 /// "Share" card: publishes the site or environment on a public URL behind a
 /// username and password. Starting a share on a stopped instance starts the
-/// instance first. The provider, fixed hostname and password exceptions apply
-/// the next time the share starts.
+/// instance first. The provider, fixed hostname, password exceptions and a password
+/// reset apply the next time the share starts; a live share's password can also be
+/// reset on demand. A share that went down shows its error and can be retried.
 struct ShareCard: View {
     @Environment(AppViewModel.self) private var vm
 
@@ -18,6 +19,7 @@ struct ShareCard: View {
     @State private var newAllow = ""
     @State private var allowError: String?
     @State private var noAuth = false
+    @State private var resetPassword = false
     @State private var revealPassword = false
     @State private var customProviders: [String] = []
     @State private var seeded = false
@@ -33,9 +35,14 @@ struct ShareCard: View {
     private var status: ShareStatus? { vm.shareStatus(for: instanceID) }
     private var isStarting: Bool { vm.sharesStarting.contains(instanceID) || status?.state == .starting }
     private var isLive: Bool { share?.active == true && status?.state == .live }
+    /// The share's last request ended `down`; the store no longer marks it active.
+    private var isDown: Bool {
+        guard let share, let status, status.state == .down else { return false }
+        return status.requestID == share.requestID
+    }
     private var errorText: String? {
         if let error = vm.shareErrors[instanceID] { return error }
-        guard share?.active == true, status?.state == .down else { return nil }
+        guard isDown else { return nil }
         return status?.error ?? "The share is down."
     }
 
@@ -104,9 +111,14 @@ struct ShareCard: View {
         } else if isLive {
             Button("Stop sharing") { Task { await vm.stopShare(instanceID) } }
         } else {
-            Button("Start sharing") { Task { await vm.startShare(instanceID, request: request()) } }
-                .buttonStyle(.borderedProminent)
-                .disabled(!seeded)
+            Button(isDown ? "Retry" : "Start sharing") {
+                Task {
+                    await vm.startShare(instanceID, request: request(resetPassword: resetPassword, noAuth: noAuth))
+                    resetPassword = false
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!seeded)
         }
     }
 
@@ -128,6 +140,13 @@ struct ShareCard: View {
             } else {
                 valueRow("Username", value: share.username, copyLabel: "Copy username") { EmptyView() }
                 passwordRow(share.password)
+                HStack {
+                    Spacer(minLength: 0)
+                    Button("Reset password") {
+                        Task { await vm.startShare(instanceID, request: request(resetPassword: true, noAuth: false)) }
+                    }
+                    .help("Generate a new password; the old one stops working at once.")
+                }
             }
         }
     }
@@ -238,6 +257,13 @@ struct ShareCard: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
+                Toggle("Generate a new password", isOn: $resetPassword)
+                Text("Applies when the share starts; the old password stops working.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
                 Toggle("Turn off password for this share", isOn: $noAuth)
                 if noAuth {
                     Label("This link is open to anyone who has the URL, including wp-admin.",
@@ -275,7 +301,7 @@ struct ShareCard: View {
         }
     }
 
-    private func request() -> ShareRequest {
+    private func request(resetPassword: Bool, noAuth: Bool) -> ShareRequest {
         let trimmedHostname = hostname.trimmingCharacters(in: .whitespaces)
         var hostnameChange: String?? = nil
         if !trimmedHostname.isEmpty {
@@ -284,6 +310,6 @@ struct ShareCard: View {
             hostnameChange = .some(nil)
         }
         return ShareRequest(provider: provider, clearProvider: provider == nil, hostname: hostnameChange, addAllow: allow,
-                            clearAllow: true, noAuth: noAuth)
+                            clearAllow: true, resetPassword: resetPassword, noAuth: noAuth)
     }
 }
