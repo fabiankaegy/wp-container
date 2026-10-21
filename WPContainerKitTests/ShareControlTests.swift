@@ -25,8 +25,8 @@ final class ShareControlTests: XCTestCase {
         do {
             _ = try await control.request(instanceID: site.id, ShareRequest())
             XCTFail("expected proxyNotRunning")
-        } catch let error as ShareError {
-            XCTAssertTrue(error.description.contains("wp-container proxy serve"))
+        } catch ShareError.proxyNotRunning {
+            // expected
         }
     }
 
@@ -460,7 +460,8 @@ final class ShareControlTests: XCTestCase {
         if running && !FileManager.default.fileExists(atPath: statusFile.path) {
             ProxyControl.writeShares([], file: statusFile)
         }
-        return ShareControl(persistence: persistence, statusFile: statusFile, proxyRunning: { running })
+        return ShareControl(persistence: persistence, statusFile: statusFile, proxyRunning: { running },
+                            customDirectory: tempRoot.appendingPathComponent("share-providers"))
     }
 
     @discardableResult

@@ -209,8 +209,8 @@ final class ShareProviderTests: XCTestCase {
         try makeScript("ngrok", body: "exit 0")
         let cf = CloudflaredProvider(searchPath: [dir])
         let ng = NgrokProvider(searchPath: [dir])
-        let badHosts = ["https://share.example.com", "share.example.com:8080", "-a.example.com", "a-.example.com", "a..example.com", "a b.example.com", "", String(repeating: "a", count: 254)]
-        for host in badHosts where !host.isEmpty {
+        let badHosts = ["https://share.example.com", "share.example.com:8080", "-a.example.com", "a-.example.com", "a..example.com", "a b.example.com", String(repeating: "a", count: 254)]
+        for host in badHosts {
             XCTAssertThrowsError(try ng.launchSpec(upstream: upstream, hostname: host, instanceSlug: "s", tunnelName: nil), host) { error in
                 guard case ShareError.invalidShareHostname(let value) = error else { return XCTFail("unexpected \(error)") }
                 XCTAssertEqual(value, host)

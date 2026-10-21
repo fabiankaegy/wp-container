@@ -354,7 +354,8 @@ final class HTTPSProxyShareTests: XCTestCase {
         XCTAssertTrue(refused)
     }
 
-    func testCloseDuringOpenLeavesNothingBound() async throws {
+    /// Invariant check: whichever of the open and the close lands first, no listener remains.
+    func testCloseRacingOpenLeavesNothingBound() async throws {
         let id = UUID()
         openedIDs.append(id)
         let opening = Task { [proxy, route, config = config()] in
@@ -369,7 +370,7 @@ final class HTTPSProxyShareTests: XCTestCase {
             let refused = await LoopbackClient.waitUntilRefused(port: port, timeout: 2)
             XCTAssertTrue(refused)
         case .failure:
-            break
+            XCTAssertFalse(proxy.isShareListenerOpen(instanceID: id))
         }
     }
 

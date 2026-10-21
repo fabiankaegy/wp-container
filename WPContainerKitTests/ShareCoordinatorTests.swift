@@ -905,7 +905,10 @@ final class ShareCoordinatorTests: XCTestCase {
         let launched = try await DefaultShareProcessLauncher(readyTimeout: .seconds(5))
             .launch(spec: spec, provider: provider) { _ in }
         XCTAssertEqual(launched.url, "http://127.0.0.1:9")
-        try await Task.sleep(for: .milliseconds(500))
+        let handle = try XCTUnwrap(launched.process as? LaunchedShareProcess)
+        let deadline = Date().addingTimeInterval(10)
+        while !handle.hasRecordedExit && Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(handle.hasRecordedExit, "script never exited")
 
         let exited = expectation(description: "exit reported")
         launched.process.onExit = { status, _ in

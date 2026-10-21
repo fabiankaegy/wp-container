@@ -155,14 +155,12 @@ final class CloudflaredTunnelsTests: XCTestCase {
     }
 
     func testRegistryWriteFailureSurfaces() async throws {
-        let locked = dir.appendingPathComponent("locked")
-        try FileManager.default.createDirectory(at: locked, withIntermediateDirectories: true)
-        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: locked.path)
-        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: locked.path) }
-        let exe = try tunnels()
-        _ = exe
+        // A regular file in place of a parent directory makes the path unwritable for any user, root included.
+        let blocker = dir.appendingPathComponent("blocker")
+        try "file".write(to: blocker, atomically: true, encoding: .utf8)
+        _ = try tunnels()
         let t = CloudflaredTunnels(executable: dir.appendingPathComponent("cloudflared"),
-                                   registryFile: locked.appendingPathComponent("sub/share-cloudflare.json"))
+                                   registryFile: blocker.appendingPathComponent("sub/share-cloudflare.json"))
         do {
             try await t.ensure(instanceID: id, tunnelName: tunnel, hostname: host)
             XCTFail("expected cloudflaredRegistryWriteFailed")
@@ -268,12 +266,24 @@ final class CloudflaredTunnelsTests: XCTestCase {
 
         XCTAssertEqual(t.records(), records)
         XCTAssertNil(t.routeTarget(of: host))
-        XCTAssertEqual(t.routeTarget(of: "third.example.com"), "wpc-third-site")
+        XCTAssertNil(t.routeTarget(of: "third.example.com"))
 
         try await t.ensure(instanceID: id, tunnelName: tunnel, hostname: host)
         XCTAssertEqual(calls(), ["tunnel route dns --overwrite-dns wpc-my-site share.example.com"])
         let saved = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: registry)) as? [String: Any])
         XCTAssertEqual(saved["routedHostnames"] as? [String], [host, "third.example.com"])
+    }
+
+    func testLegacyRegistryRoutesAgainEvenWithOneRecordedHolder() async throws {
+        let third = UUID()
+        let records = [CloudflareTunnelRecord(instanceID: third, tunnelName: "wpc-third-site", hostname: "third.example.com")]
+        try JSONEncoder().encode(records).write(to: registry)
+        let t = try tunnels()
+
+        XCTAssertNil(t.routeTarget(of: "third.example.com"))
+        try await t.ensure(instanceID: third, tunnelName: "wpc-third-site", hostname: "third.example.com")
+        XCTAssertEqual(calls(), ["tunnel route dns --overwrite-dns wpc-third-site third.example.com"])
+        XCTAssertEqual(t.routeTarget(of: "third.example.com"), "wpc-third-site")
     }
 
     func testTunnelNameForSlug() {

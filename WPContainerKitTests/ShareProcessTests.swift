@@ -53,7 +53,8 @@ final class ShareProcessTests: XCTestCase {
     }
 
     private func isGone(_ pid: Int32) -> Bool {
-        kill(pid, 0) != 0 && errno == ESRCH
+        guard pid > 0 else { return false }
+        return kill(pid, 0) != 0 && errno == ESRCH
     }
 
     func testStartReturnsFirstReportedURL() async throws {
@@ -242,8 +243,16 @@ final class ShareProcessTests: XCTestCase {
     func testCancellationMidStartStopsProcess() async throws {
         let spec = try script("echo waiting\nexec sleep 60")
         let process = ShareProcess(spec: spec, provider: StubProvider())
-        let task = Task<String, Error> { try await process.start(readyTimeout: .seconds(30)) }
-        try await Task.sleep(for: .milliseconds(300))
+        let launched = PIDBox()
+        let task = Task<String, Error> {
+            try await process.start(readyTimeout: .seconds(30), launched: { launched.set($0) })
+        }
+        let deadline = ContinuousClock.now + .seconds(10)
+        while launched.value == nil && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let pid = try XCTUnwrap(launched.value, "process never launched")
+        XCTAssertGreaterThan(pid, 0)
         let began = ContinuousClock.now
         task.cancel()
         do {
@@ -253,7 +262,7 @@ final class ShareProcessTests: XCTestCase {
             XCTAssertTrue(error is CancellationError)
         }
         XCTAssertLessThan(ContinuousClock.now - began, .seconds(5))
-        XCTAssertTrue(isGone(process.pid))
+        XCTAssertTrue(isGone(pid))
     }
 
     func testTerminateAfterNaturalExitIsPrompt() async throws {
