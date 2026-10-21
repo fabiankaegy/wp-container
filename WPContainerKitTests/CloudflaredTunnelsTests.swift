@@ -219,6 +219,63 @@ final class CloudflaredTunnelsTests: XCTestCase {
         XCTAssertEqual(t.routedHostnames(), [host])
     }
 
+    func testHostnameTakenBackFromAnotherTunnelIsRoutedAgain() async throws {
+        let t = try tunnels()
+        let other = UUID()
+        try await t.ensure(instanceID: id, tunnelName: tunnel, hostname: host)
+        try await t.ensure(instanceID: other, tunnelName: "wpc-other-site", hostname: host)
+        XCTAssertEqual(t.routeTarget(of: host), "wpc-other-site")
+        try? FileManager.default.removeItem(at: log)
+
+        try await t.ensure(instanceID: id, tunnelName: tunnel, hostname: host)
+
+        XCTAssertEqual(calls(), ["tunnel route dns --overwrite-dns wpc-my-site share.example.com"])
+        XCTAssertEqual(t.routeTarget(of: host), tunnel)
+        try? FileManager.default.removeItem(at: log)
+        try await t.ensure(instanceID: id, tunnelName: tunnel, hostname: host)
+        XCTAssertEqual(calls(), [])
+    }
+
+    func testCleanupWarnsOnlyAboutACNAMEThatStillPointsAtTheTunnel() async throws {
+        let t = try tunnels()
+        let other = UUID()
+        try await t.ensure(instanceID: id, tunnelName: tunnel, hostname: host)
+        try await t.ensure(instanceID: other, tunnelName: "wpc-other-site", hostname: host)
+        let mine = try XCTUnwrap(t.records().first { $0.instanceID == id })
+        let theirs = try XCTUnwrap(t.records().first { $0.instanceID == other })
+
+        let replaced = await t.cleanup(mine)
+        let current = await t.cleanup(theirs)
+
+        XCTAssertEqual(replaced, [])
+        XCTAssertEqual(current.count, 1)
+        XCTAssertTrue(current[0].contains("CNAME"))
+    }
+
+    func testRegistryWithoutRouteTargetsIsRead() async throws {
+        let other = UUID()
+        let records = [
+            CloudflareTunnelRecord(instanceID: id, tunnelName: tunnel, hostname: host),
+            CloudflareTunnelRecord(instanceID: other, tunnelName: "wpc-other-site", hostname: host),
+            CloudflareTunnelRecord(instanceID: UUID(), tunnelName: "wpc-third-site", hostname: "third.example.com"),
+        ]
+        let legacy: [String: Any] = [
+            "tunnels": try JSONSerialization.jsonObject(with: JSONEncoder().encode(records)),
+            "routedHostnames": [host, "third.example.com"],
+        ]
+        try JSONSerialization.data(withJSONObject: legacy).write(to: registry)
+        let t = try tunnels()
+
+        XCTAssertEqual(t.records(), records)
+        XCTAssertNil(t.routeTarget(of: host))
+        XCTAssertEqual(t.routeTarget(of: "third.example.com"), "wpc-third-site")
+
+        try await t.ensure(instanceID: id, tunnelName: tunnel, hostname: host)
+        XCTAssertEqual(calls(), ["tunnel route dns --overwrite-dns wpc-my-site share.example.com"])
+        let saved = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: registry)) as? [String: Any])
+        XCTAssertEqual(saved["routedHostnames"] as? [String], [host, "third.example.com"])
+    }
+
     func testTunnelNameForSlug() {
         XCTAssertEqual(CloudflaredTunnels.tunnelName(for: "my-site"), "wpc-my-site")
     }
