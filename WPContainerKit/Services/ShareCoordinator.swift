@@ -22,7 +22,9 @@ public protocol ShareProcessHandle: AnyObject, Sendable {
 
 /// Starts a provider process and returns its public URL once it is serving.
 public protocol ShareProcessLauncher: Sendable {
-    func launch(spec: ShareLaunchSpec, provider: any ShareProvider) async throws -> (url: String, process: any ShareProcessHandle)
+    /// `launched` is called with the pid as soon as the process runs, before it is ready.
+    func launch(spec: ShareLaunchSpec, provider: any ShareProvider,
+                launched: @escaping @Sendable (Int32) -> Void) async throws -> (url: String, process: any ShareProcessHandle)
 }
 
 /// Launches providers as `ShareProcess`es.
@@ -33,10 +35,11 @@ public struct DefaultShareProcessLauncher: ShareProcessLauncher {
         self.readyTimeout = readyTimeout
     }
 
-    public func launch(spec: ShareLaunchSpec, provider: any ShareProvider) async throws -> (url: String, process: any ShareProcessHandle) {
+    public func launch(spec: ShareLaunchSpec, provider: any ShareProvider,
+                       launched: @escaping @Sendable (Int32) -> Void) async throws -> (url: String, process: any ShareProcessHandle) {
         let process = ShareProcess(spec: spec, provider: provider)
         let handle = LaunchedShareProcess(process)
-        let url = try await process.start(readyTimeout: readyTimeout)
+        let url = try await process.start(readyTimeout: readyTimeout, launched: launched)
         return (url, handle)
     }
 }
@@ -96,10 +99,77 @@ struct ProcessStartTime: Codable, Sendable, Equatable {
 struct SharePIDRecord: Codable, Sendable, Equatable {
     let pid: Int32
     /// The process's executable path and start time when it was recorded. A process is
-    /// signalled only while both still match, so a reused pid is left alone.
+    /// signalled only while both still match, so a reused pid is left alone. A record
+    /// without a start time matches only a process whose parent is launchd (pid 1).
     let executable: String
     let startTime: ProcessStartTime?
     let instanceID: UUID
+}
+
+/// The provider processes this proxy host runs, written to the pid file on every change.
+/// A provider is recorded from its launch callback, on whatever thread launched it, so
+/// a crash while it starts up still leaves it in the file.
+final class SharePIDFile: @unchecked Sendable {
+    private static let log = Logger(subsystem: "com.fabiankaegy.wpcontainer", category: "share")
+
+    let file: URL
+    private let lock = NSLock()
+    private var records: [Int32: SharePIDRecord] = [:]
+
+    init(file: URL) {
+        self.file = file
+    }
+
+    func remember(_ pid: Int32, executable: String, instanceID: UUID) {
+        lock.withLock {
+            records[pid] = SharePIDRecord(pid: pid, executable: executable,
+                                          startTime: ShareCoordinator.startTime(of: pid), instanceID: instanceID)
+            writeLocked()
+        }
+    }
+
+    func forget(_ pid: Int32) {
+        lock.withLock {
+            guard records.removeValue(forKey: pid) != nil else { return }
+            writeLocked()
+        }
+    }
+
+    /// Forgets every provider of the instance.
+    func forget(instanceID: UUID) {
+        lock.withLock {
+            let pids = records.values.filter { $0.instanceID == instanceID }.map(\.pid)
+            guard !pids.isEmpty else { return }
+            for pid in pids { records.removeValue(forKey: pid) }
+            writeLocked()
+        }
+    }
+
+    func contains(_ pid: Int32) -> Bool {
+        lock.withLock { records[pid] != nil }
+    }
+
+    /// The records in the file, which a previous proxy host may have written.
+    func recorded() -> [SharePIDRecord] {
+        guard let data = try? Data(contentsOf: file) else { return [] }
+        return (try? JSONDecoder().decode([SharePIDRecord].self, from: data)) ?? []
+    }
+
+    /// Replaces the file with this host's records.
+    func write() {
+        lock.withLock { writeLocked() }
+    }
+
+    private func writeLocked() {
+        let sorted = records.values.sorted { $0.pid < $1.pid }
+        do {
+            let data = try JSONEncoder().encode(sorted)
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: file, options: .atomic)
+        } catch {
+            Self.log.error("share: could not write \(self.file.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
 }
 
 /// Makes the running shares match the desired state in the store.
@@ -177,13 +247,12 @@ public actor ShareCoordinator {
     private let launcher: any ShareProcessLauncher
     private let providers: @Sendable (String) throws -> any ShareProvider
     private let statusFile: URL?
-    private let pidsFile: URL
+    private let pids: SharePIDFile
     private let makeTunnels: @Sendable () -> CloudflaredTunnels?
 
     private var runtimes: [UUID: Runtime] = [:]
     private var nextAttempt = 0
     private var lastPublished: [ShareStatus]?
-    private var pidRecords: [Int32: SharePIDRecord] = [:]
     private var lastOperation: Task<Void, Never>?
     private var lastRegistryOperation: Task<Void, Never>?
     private var cleanupTasks: [String: Task<Void, Never>] = [:]
@@ -209,7 +278,7 @@ public actor ShareCoordinator {
         self.launcher = launcher
         self.providers = providers
         self.statusFile = statusFile
-        self.pidsFile = pidsFile ?? ProxyControl.directory.appendingPathComponent("share-pids.json")
+        self.pids = SharePIDFile(file: pidsFile ?? ProxyControl.directory.appendingPathComponent("share-pids.json"))
         self.makeTunnels = tunnels ?? {
             ShareProviders.findExecutable("cloudflared", in: ShareProviders.defaultSearchPath)
                 .map { CloudflaredTunnels(executable: $0) }
@@ -231,9 +300,10 @@ public actor ShareCoordinator {
         await runSerially { await self.performStopAll() }
     }
 
-    /// Stops provider processes a previous proxy host left running, found in the pid
-    /// file and matched by executable path. Runs once per coordinator; every call also
-    /// re-enables reconcile after `stopAll`.
+    /// Stops provider processes a previous proxy host left running, and every process
+    /// they started, found in the pid file and matched by executable path and start
+    /// time. Runs once per coordinator; every call also re-enables reconcile after
+    /// `stopAll`.
     public func reapOrphans() async {
         await runSerially { await self.performReap() }
     }
@@ -246,6 +316,16 @@ public actor ShareCoordinator {
         let length = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size)
         guard length == size else { return nil }
         return ProcessStartTime(seconds: info.pbi_start_tvsec, microseconds: info.pbi_start_tvusec)
+    }
+
+    /// The parent pid of a running process, or nil when there is none.
+    static func parentPID(of pid: Int32) -> Int32? {
+        guard pid > 0 else { return nil }
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        let length = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size)
+        guard length == size else { return nil }
+        return Int32(bitPattern: info.pbi_ppid)
     }
 
     /// The executable path of a running process, or nil when there is none.
@@ -467,10 +547,12 @@ public actor ShareCoordinator {
             let upstream = URL(string: "http://127.0.0.1:\(port)")!
             let spec = try provider.launchSpec(upstream: upstream, hostname: runtime.desired.hostname,
                                                instanceSlug: runtime.desired.slug, tunnelName: tunnelName)
-            let launched = try await launcher.launch(spec: spec, provider: provider)
+            let pids = self.pids
+            let launched = try await launcher.launch(spec: spec, provider: provider) { pid in
+                pids.remember(pid, executable: Self.executablePath(of: pid) ?? spec.executable.path, instanceID: id)
+            }
             process = launched.process
             let executable = Self.executablePath(of: launched.process.pid) ?? spec.executable.path
-            rememberPID(launched.process.pid, executable: executable, instanceID: id)
             runtime = try currentAttempt(id, attempt)
 
             let reportedHost = URLComponents(string: launched.url)?.host?.lowercased() ?? launched.url
@@ -501,10 +583,9 @@ public actor ShareCoordinator {
             }
             publish()
         } catch {
-            if let process {
-                await process.terminate()
-                forgetPID(process.pid)
-            }
+            // A launch that failed has already stopped its process.
+            if let process { await process.terminate() }
+            pids.forget(instanceID: id)
             if listenerOpened { host?.closeShareListener(instanceID: id) }
             if phpActivated { SharePHPService.deactivate(for: runtimes[id]?.instance ?? instance) }
             guard var runtime = runtimes[id], runtime.attempt == attempt else { return }
@@ -535,7 +616,7 @@ public actor ShareCoordinator {
         guard var runtime = runtimes[id], runtime.attempt == attempt, runtime.phase == .live else { return }
         host?.closeShareListener(instanceID: id)
         SharePHPService.deactivate(for: runtime.instance)
-        if let handle = runtime.handle { forgetPID(handle.pid) }
+        if let handle = runtime.handle { pids.forget(handle.pid) }
         fail(&runtime, ShareError.providerStopped(status: status, stderrTail: stderrTail))
         runtimes[id] = runtime
         publish()
@@ -593,7 +674,7 @@ public actor ShareCoordinator {
             runtimes[id] = runtime
             if let handle = runtime.handle {
                 await handle.terminate()
-                forgetPID(handle.pid)
+                pids.forget(handle.pid)
             }
             host?.closeShareListener(instanceID: id)
             SharePHPService.deactivate(for: runtime.instance)
@@ -713,28 +794,6 @@ public actor ShareCoordinator {
 
     // MARK: - Provider pids
 
-    private func rememberPID(_ pid: Int32, executable: String, instanceID: UUID) {
-        pidRecords[pid] = SharePIDRecord(pid: pid, executable: executable, startTime: Self.startTime(of: pid),
-                                         instanceID: instanceID)
-        writePIDs()
-    }
-
-    private func forgetPID(_ pid: Int32) {
-        guard pidRecords.removeValue(forKey: pid) != nil else { return }
-        writePIDs()
-    }
-
-    private func writePIDs() {
-        let records = pidRecords.values.sorted { $0.pid < $1.pid }
-        do {
-            let data = try JSONEncoder().encode(records)
-            try FileManager.default.createDirectory(at: pidsFile.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try data.write(to: pidsFile, options: .atomic)
-        } catch {
-            Self.log.error("share: could not write \(self.pidsFile.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
-        }
-    }
-
     private func performReap() async {
         halted = false
         guard !hasReaped else {
@@ -743,33 +802,35 @@ public actor ShareCoordinator {
         }
         hasReaped = true
 
-        let recorded: [SharePIDRecord] = (try? Data(contentsOf: pidsFile))
-            .flatMap { try? JSONDecoder().decode([SharePIDRecord].self, from: $0) } ?? []
-        let orphans = recorded.filter { pidRecords[$0.pid] == nil && Self.isRunning($0) }
-        for orphan in orphans {
-            Self.log.notice("share: stopping provider \(orphan.executable, privacy: .public) (pid \(orphan.pid)) left by a previous proxy")
-            kill(orphan.pid, SIGTERM)
+        var targets: [ProcessIdentity] = []
+        for record in pids.recorded() where !pids.contains(record.pid) {
+            guard let orphan = Self.runningProcess(record) else { continue }
+            Self.log.notice("share: stopping provider \(record.executable, privacy: .public) (pid \(record.pid)) left by a previous proxy")
+            // Collected before any signal, while the descendants still hang under the provider.
+            targets += [orphan] + ProcessIdentity.descendants(of: orphan.pid)
         }
+        targets.forEach { $0.signal(SIGTERM) }
         let deadline = Date().addingTimeInterval(3)
-        var alive = orphans
-        while !alive.isEmpty && Date() < deadline {
-            try? await Task.sleep(for: .milliseconds(100))
-            alive = alive.filter(Self.isRunning)
+        while targets.contains(where: \.isAlive) && Date() < deadline {
+            await ProcessIdentity.pause(.milliseconds(100))
         }
-        for survivor in alive where Self.isRunning(survivor) {
-            kill(survivor.pid, SIGKILL)
-        }
-        writePIDs()
+        targets.forEach { $0.signal(SIGKILL) }
+        pids.write()
         // Statuses a crashed host left behind describe shares that no longer run.
         publish()
     }
 
-    /// Whether the recorded process still runs: same pid, executable and start time.
-    private static func isRunning(_ record: SharePIDRecord) -> Bool {
-        guard let recordedStart = record.startTime else { return false }
+    /// The recorded provider when it still runs: same pid, executable and start time. A
+    /// record written without a start time matches only a process launchd adopted, which
+    /// a provider whose proxy host died is.
+    private static func runningProcess(_ record: SharePIDRecord) -> ProcessIdentity? {
         let path = executablePath(of: record.pid)
-        let start = startTime(of: record.pid)
-        return path == record.executable && start == recordedStart
+        guard path == record.executable, let current = ProcessIdentity.current(record.pid) else { return nil }
+        if let recordedStart = record.startTime {
+            return current.startTime == recordedStart ? current : nil
+        }
+        let parent = parentPID(of: record.pid)
+        return parent == 1 ? current : nil
     }
 
     // MARK: - Stop
@@ -790,7 +851,7 @@ public actor ShareCoordinator {
         for task in Array(cleanupTasks.values) {
             await task.value
         }
-        writePIDs()
+        pids.write()
         ProxyControl.clearShares(file: statusFile)
         lastPublished = nil
     }

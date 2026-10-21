@@ -26,6 +26,13 @@ private final class ExitBox: @unchecked Sendable {
     var all: [(Int32, [String])] { lock.withLock { recorded } }
 }
 
+private final class PIDBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Int32?
+    func set(_ pid: Int32) { lock.withLock { stored = pid } }
+    var value: Int32? { lock.withLock { stored } }
+}
+
 final class ShareProcessTests: XCTestCase {
     private var directory: URL!
 
@@ -141,6 +148,37 @@ final class ShareProcessTests: XCTestCase {
         _ = try await process.start(readyTimeout: .seconds(10))
         await process.terminate(grace: .seconds(5))
         XCTAssertTrue(isGone(process.pid))
+    }
+
+    func testTerminateStopsAChildTheScriptForked() async throws {
+        let spec = try script("echo https://forked.example.test\nsleep 30\necho done")
+        let process = ShareProcess(spec: spec, provider: StubProvider())
+        _ = try await process.start(readyTimeout: .seconds(10))
+        var children: [ProcessIdentity] = []
+        let deadline = Date().addingTimeInterval(5)
+        while children.isEmpty && Date() < deadline {
+            children = ProcessIdentity.descendants(of: process.pid)
+            if children.isEmpty { try await Task.sleep(for: .milliseconds(20)) }
+        }
+        let child = try XCTUnwrap(children.first)
+
+        await process.terminate(grace: .seconds(2))
+
+        XCTAssertTrue(isGone(process.pid))
+        let gone = Date().addingTimeInterval(2)
+        while child.isAlive && Date() < gone { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertFalse(child.isAlive)
+        if child.isAlive { kill(child.pid, SIGKILL) }
+    }
+
+    func testLaunchedReportsThePIDBeforeTheProviderIsReady() async throws {
+        let spec = try script("sleep 0.3\necho https://slow.example.test\nexec sleep 60")
+        let process = ShareProcess(spec: spec, provider: StubProvider())
+        let reported = PIDBox()
+        let url = try await process.start(readyTimeout: .seconds(10)) { pid in reported.set(pid) }
+        XCTAssertEqual(url, "https://slow.example.test")
+        XCTAssertEqual(reported.value, process.pid)
+        await process.terminate(grace: .seconds(2))
     }
 
     func testOnExitFiresAfterLive() async throws {

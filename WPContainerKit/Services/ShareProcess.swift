@@ -1,7 +1,8 @@
+import Darwin
 import Foundation
 
 /// Runs one tunnel provider process: reads its output until it reports a public URL, reports
-/// its exit, and stops it with SIGTERM followed by SIGKILL.
+/// its exit, and stops it and every process it started with SIGTERM followed by SIGKILL.
 public final class ShareProcess: @unchecked Sendable {
     /// Called once when the process exits, with its status and the last stderr lines.
     public var onExit: (@Sendable (_ status: Int32, _ stderrTail: [String]) -> Void)? {
@@ -39,8 +40,10 @@ public final class ShareProcess: @unchecked Sendable {
     }
 
     /// Launches the process and returns the public URL: `spec.fixedPublicURL` once the provider
-    /// reports readiness, otherwise the first URL it announces.
-    public func start(readyTimeout: Duration = .seconds(30)) async throws -> String {
+    /// reports readiness, otherwise the first URL it announces. `launched` is called with the
+    /// pid as soon as the process runs, before it is ready.
+    public func start(readyTimeout: Duration = .seconds(30),
+                      launched: (@Sendable (Int32) -> Void)? = nil) async throws -> String {
         let timeout = Task { [weak self] in
             try await Task.sleep(for: readyTimeout)
             self?.settleStart(throwing: { tail in ShareError.providerTimedOut(stderrTail: tail) })
@@ -49,7 +52,7 @@ public final class ShareProcess: @unchecked Sendable {
         do {
             return try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
-                    launch(continuation)
+                    launch(continuation, launched: launched)
                 }
             } onCancel: {
                 self.settleStart(throwing: { _ in CancellationError() })
@@ -60,18 +63,28 @@ public final class ShareProcess: @unchecked Sendable {
         }
     }
 
-    /// Sends SIGTERM, then SIGKILL once `grace` has passed. Returns after the process has exited
-    /// and `onExit` has run.
+    /// Sends SIGTERM to the process and its descendants, then SIGKILL to those still alive once
+    /// `grace` has passed. A script provider's tunnel runs as its child, so it is stopped too.
+    /// Returns after the process has exited and `onExit` has run.
     public func terminate(grace: Duration = .seconds(5)) async {
-        let isStarted = lock.withLock { started }
+        let (isStarted, runningPID): (Bool, Int32?) = lock.withLock { (started, started && !reaped ? processID : nil) }
         guard isStarted else { return }
+        // Collected before any signal, while the descendants still hang under the provider.
+        let descendants = runningPID.map(ProcessIdentity.descendants(of:)) ?? []
+        let deadline = ContinuousClock.now.advanced(by: grace)
         signalIfRunning(SIGTERM)
-        if await waitForExit(within: grace) { return }
+        descendants.forEach { $0.signal(SIGTERM) }
+        let exited = await waitForExit(within: grace)
+        while descendants.contains(where: \.isAlive) && ContinuousClock.now < deadline {
+            await ProcessIdentity.pause(.milliseconds(50))
+        }
+        descendants.forEach { $0.signal(SIGKILL) }
+        if exited { return }
         signalIfRunning(SIGKILL)
         _ = await waitForExit(within: .seconds(5))
     }
 
-    private func launch(_ continuation: CheckedContinuation<String, Error>) {
+    private func launch(_ continuation: CheckedContinuation<String, Error>, launched: (@Sendable (Int32) -> Void)?) {
         lock.withLock { startContinuation = continuation }
         if Task.isCancelled {
             settleStart(throwing: { _ in CancellationError() })
@@ -109,10 +122,12 @@ public final class ShareProcess: @unchecked Sendable {
             settleStart(throwing: { _ in error })
             return
         }
+        let pid = process.processIdentifier
         lock.withLock {
-            processID = process.processIdentifier
+            processID = pid
             started = true
         }
+        launched?(pid)
     }
 
     /// Reads one pipe on its own serial queue. The cancel handler runs after any in-flight read,
@@ -266,5 +281,63 @@ public final class ShareProcess: @unchecked Sendable {
             buffer = Data(buffer[buffer.index(after: newline)...])
         }
         return lines
+    }
+}
+
+/// A running process together with the start time it had when it was found, so a pid the
+/// OS has since given to another process is never signalled.
+struct ProcessIdentity: Sendable, Equatable {
+    let pid: Int32
+    let startTime: ProcessStartTime
+
+    /// The process running as `pid` now, or nil when there is none.
+    static func current(_ pid: Int32) -> ProcessIdentity? {
+        ShareCoordinator.startTime(of: pid).map { ProcessIdentity(pid: pid, startTime: $0) }
+    }
+
+    /// Every process descended from `pid`, found by walking the child lists recursively.
+    static func descendants(of pid: Int32) -> [ProcessIdentity] {
+        var found: [ProcessIdentity] = []
+        var seen: Set<Int32> = [pid]
+        var queue = [pid]
+        while !queue.isEmpty {
+            let parent = queue.removeFirst()
+            for child in children(of: parent) where seen.insert(child).inserted {
+                guard let identity = current(child) else { continue }
+                found.append(identity)
+                queue.append(child)
+            }
+        }
+        return found
+    }
+
+    /// Whether the same process still runs: same pid and start time.
+    var isAlive: Bool {
+        ShareCoordinator.startTime(of: pid) == startTime
+    }
+
+    func signal(_ signal: Int32) {
+        guard isAlive else { return }
+        kill(pid, signal)
+    }
+
+    /// Sleeps for `duration` even when the calling task is cancelled, so a shutdown
+    /// started from a cancelled task still waits for its processes.
+    static func pause(_ duration: Duration) async {
+        let seconds = Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { continuation.resume() }
+        }
+    }
+
+    private static func children(of pid: Int32) -> [Int32] {
+        var capacity = 64
+        while true {
+            var buffer = [Int32](repeating: 0, count: capacity)
+            let count = Int(proc_listchildpids(pid, &buffer, Int32(capacity * MemoryLayout<Int32>.size)))
+            guard count > 0 else { return [] }
+            if count < capacity { return buffer.prefix(count).filter { $0 > 0 } }
+            capacity *= 4
+        }
     }
 }

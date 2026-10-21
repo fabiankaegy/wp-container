@@ -16,6 +16,7 @@ final class ShareCoordinatorTests: XCTestCase {
     private var cloudflaredLog: URL!
     private var cloudflared: URL!
     private var spawned: [Process] = []
+    private var spawnedPIDs: [Int32] = []
 
     override func setUp() async throws {
         tempRoot = FileManager.default.temporaryDirectory
@@ -40,6 +41,7 @@ final class ShareCoordinatorTests: XCTestCase {
 
     override func tearDown() async throws {
         for process in spawned where process.isRunning { process.terminate() }
+        for pid in spawnedPIDs { kill(pid, SIGKILL) }
         try? FileManager.default.removeItem(at: tempRoot)
     }
 
@@ -544,6 +546,50 @@ final class ShareCoordinatorTests: XCTestCase {
         XCTAssertEqual(pidRecords(), [])
     }
 
+    func testReapOrphansStopsTheProcessesAnOrphanStarted() async throws {
+        let provider = try spawn("/bin/sh", ["-c", "sleep 30; echo done"])
+        try await waitUntil { !ProcessIdentity.descendants(of: provider.processIdentifier).isEmpty }
+        let child = try XCTUnwrap(ProcessIdentity.descendants(of: provider.processIdentifier).first)
+        spawnedPIDs.append(child.pid)
+        let path = try XCTUnwrap(ShareCoordinator.executablePath(of: provider.processIdentifier))
+        let records = [SharePIDRecord(pid: provider.processIdentifier, executable: path,
+                                      startTime: ShareCoordinator.startTime(of: provider.processIdentifier),
+                                      instanceID: UUID())]
+        try JSONEncoder().encode(records).write(to: pidsFile)
+
+        await makeCoordinator().reapOrphans()
+
+        try await waitUntil { !provider.isRunning && !child.isAlive }
+    }
+
+    func testReapOrphansStopsALegacyRecordOnlyWhenLaunchdAdoptedIt() async throws {
+        let adopted = try spawnAdoptedSleep()
+        let child = try spawnSleep()
+        let path = try XCTUnwrap(ShareCoordinator.executablePath(of: child.processIdentifier))
+        XCTAssertEqual(ShareCoordinator.parentPID(of: adopted.pid), 1)
+        let records = [
+            SharePIDRecord(pid: adopted.pid, executable: path, startTime: nil, instanceID: UUID()),
+            SharePIDRecord(pid: child.processIdentifier, executable: path, startTime: nil, instanceID: UUID()),
+        ]
+        try JSONEncoder().encode(records).write(to: pidsFile)
+
+        await makeCoordinator().reapOrphans()
+
+        try await waitUntil { !adopted.isAlive }
+        XCTAssertTrue(child.isRunning)
+        XCTAssertEqual(pidRecords(), [])
+    }
+
+    func testReapOrphansLeavesALegacyRecordWithAnotherExecutable() async throws {
+        let adopted = try spawnAdoptedSleep()
+        let records = [SharePIDRecord(pid: adopted.pid, executable: "/usr/bin/true", startTime: nil, instanceID: UUID())]
+        try JSONEncoder().encode(records).write(to: pidsFile)
+
+        await makeCoordinator().reapOrphans()
+
+        XCTAssertTrue(adopted.isAlive)
+    }
+
     func testReapOrphansReplacesStatusesLeftByACrashedHost() async throws {
         let stale = ShareStatus(instanceID: UUID(), slug: "my-site", state: .live, url: "https://my-site.example.com",
                                 provider: "fixture")
@@ -806,6 +852,27 @@ final class ShareCoordinatorTests: XCTestCase {
         XCTAssertEqual(statuses(), [])
         XCTAssertTrue(host.closed.contains(site.id))
         XCTAssertEqual(launcher.handles.count, 0)
+        XCTAssertEqual(pidRecords(), [])
+    }
+
+    func testProviderIsRecordedAsSoonAsItLaunches() async throws {
+        let site = makeSite("my-site", share: activeShare(provider: "fixture"))
+        launcher.held = ["my-site"]
+        try await save([site])
+        let coordinator = makeCoordinator()
+        let envelope = try await persistence.load()
+        await coordinator.reconcile(envelope: envelope, routes: HTTPSProxy.routes(from: envelope), running: ["my-site"])
+        try await waitUntil { self.launcher.launches.count == 1 }
+
+        XCTAssertEqual(statuses().first?.state, .starting)
+        let record = try XCTUnwrap(pidRecords().first)
+        XCTAssertEqual(record.instanceID, site.id)
+        XCTAssertEqual(record.executable, "/usr/local/bin/fake-fixture")
+
+        launcher.held = []
+        await coordinator.waitUntilIdle()
+        XCTAssertEqual(pidRecords().map(\.pid), [record.pid])
+        XCTAssertEqual(statuses().first?.pid, record.pid)
     }
 
     func testStopAllTerminatesProvidersAndClearsTheStatusFile() async throws {
@@ -835,7 +902,8 @@ final class ShareCoordinatorTests: XCTestCase {
         let spec = try provider.launchSpec(upstream: URL(string: "http://127.0.0.1:1")!, hostname: nil,
                                            instanceSlug: "my-site", tunnelName: nil)
 
-        let launched = try await DefaultShareProcessLauncher(readyTimeout: .seconds(5)).launch(spec: spec, provider: provider)
+        let launched = try await DefaultShareProcessLauncher(readyTimeout: .seconds(5))
+            .launch(spec: spec, provider: provider) { _ in }
         XCTAssertEqual(launched.url, "http://127.0.0.1:9")
         try await Task.sleep(for: .milliseconds(500))
 
@@ -969,12 +1037,33 @@ final class ShareCoordinatorTests: XCTestCase {
     }
 
     private func spawnSleep() throws -> Process {
+        try spawn("/bin/sleep", ["30"])
+    }
+
+    private func spawn(_ executable: String, _ arguments: [String]) throws -> Process {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
-        process.arguments = ["30"]
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
         try process.run()
         spawned.append(process)
         return process
+    }
+
+    /// A `sleep` whose parent exited, so launchd adopted it.
+    private func spawnAdoptedSleep() throws -> ProcessIdentity {
+        let output = Pipe()
+        let parent = Process()
+        parent.executableURL = URL(fileURLWithPath: "/bin/sh")
+        parent.arguments = ["-c", "sleep 30 >/dev/null 2>&1 & echo $!"]
+        parent.standardOutput = output
+        try parent.run()
+        parent.waitUntilExit()
+        let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        let pid = try XCTUnwrap(Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)))
+        spawnedPIDs.append(pid)
+        let deadline = Date().addingTimeInterval(5)
+        while ShareCoordinator.parentPID(of: pid) != 1 && Date() < deadline { usleep(20_000) }
+        return try XCTUnwrap(ProcessIdentity.current(pid))
     }
 }
 
@@ -1063,19 +1152,21 @@ private final class FakeShareLauncher: ShareProcessLauncher, @unchecked Sendable
     var launches: [Launch] { lock.withLock { _launches } }
     var handles: [FakeShareHandle] { lock.withLock { _handles } }
 
-    func launch(spec: ShareLaunchSpec, provider: any ShareProvider) async throws -> (url: String, process: any ShareProcessHandle) {
+    func launch(spec: ShareLaunchSpec, provider: any ShareProvider,
+                launched: @escaping @Sendable (Int32) -> Void) async throws -> (url: String, process: any ShareProcessHandle) {
         let slug = spec.environment["SLUG"] ?? ""
-        let (url, isHeld) = lock.withLock { () -> (String, Bool) in
+        let (url, isHeld, pid) = lock.withLock { () -> (String, Bool, Int32) in
             _launches.append(Launch(slug: slug, upstream: spec.environment["UPSTREAM"] ?? "",
                                     tunnelName: spec.environment["TUNNEL"] ?? ""))
-            return (_urls[slug] ?? "https://\(slug).example.com", _held.contains(slug))
+            nextPID += 1
+            return (_urls[slug] ?? "https://\(slug).example.com", _held.contains(slug), nextPID)
         }
+        launched(pid)
         if isHeld {
             while held.contains(slug) { try await Task.sleep(for: .milliseconds(10)) }
         }
         let handle = lock.withLock { () -> FakeShareHandle in
-            nextPID += 1
-            let handle = FakeShareHandle(pid: nextPID)
+            let handle = FakeShareHandle(pid: pid)
             _handles.append(handle)
             return handle
         }
