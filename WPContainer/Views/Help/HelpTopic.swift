@@ -346,7 +346,7 @@ extension HelpTopic {
                 bullets: [
                     "`.git`, `node_modules` and similar folders are left out by default; the list is editable and remembered.",
                     "Project folders mounted into the site are copied in as plain folders.",
-                    "Symlinks that point outside the site are reported, because import drops them.",
+                    "Symlinks that point outside the site are left out and reported, because import drops them.",
                 ]
             ),
             HelpSection(

@@ -174,7 +174,6 @@ public actor SiteArchiveService {
         warnings += try await Self.package(
             wordpressFolder: site.wordpressFolder, stagingFolder: staging, destination: destination,
             manifest: manifest, excludes: excludes, mounts: inlined, overwrite: overwrite)
-        warnings += Self.unsafeSymlinks(in: site.wordpressFolder).map(Self.symlinkWarning)
         if !WPConfigService.dbHostFollowsEnvironment(wordpressFolder: site.wordpressFolder) {
             warnings.append("wp-config.php hardcodes DB_HOST; the imported site may not reach its database")
         }
@@ -387,19 +386,29 @@ public actor SiteArchiveService {
         return SiteArchiveInfo(manifest: manifest, uncompressedBytes: bytes, entryCount: names.count)
     }
 
-    /// Unzips `archive` into `folder`, then deletes top-level symlinks and every
-    /// symlink under `folder/wordpress` that resolves outside it or does not resolve.
+    /// Unzips every entry of `archive` but its symlinks into `folder`, then
+    /// recreates the symlinks under `folder/wordpress` and deletes each one that
+    /// resolves outside it or does not resolve. Top-level symlinks are dropped.
+    /// Throws `.unsafeEntry` for an entry stored under a symlink entry.
     public static func extract(archive: URL, into folder: URL) async throws {
         let fm = FileManager.default
+        let links = try await symlinkEntries(in: archive)
         try fm.createDirectory(at: folder, withIntermediateDirectories: true)
-        try await runTool(unzipPath, args: ["-q", "-o", archive.path, "-d", folder.path], cwd: nil)
+        var args = ["-q", "-o", archive.path, "-d", folder.path]
+        if !links.isEmpty {
+            args += ["-x"] + links.map(literalPattern)
+        }
+        try await runTool(unzipPath, args: args, cwd: nil)
 
-        for name in [SiteArchiveLayout.manifestName, SiteArchiveLayout.databaseName, SiteArchiveLayout.wordpressFolder] {
-            let entry = folder.appendingPathComponent(name)
-            let linkTarget = try? fm.destinationOfSymbolicLink(atPath: entry.path)
-            if linkTarget != nil {
-                try fm.removeItem(at: entry)
-            }
+        for name in links {
+            guard let path = safeRelativePath(name) else { continue }
+            let components = path.split(separator: "/")
+            guard components.count > 1, components[0] == SiteArchiveLayout.wordpressFolder else { continue }
+            // A symlink entry's data is its destination.
+            let destination = try await runTool(unzipPath, args: ["-p", archive.path, literalPattern(name)], cwd: nil).stdout
+            let link = folder.appendingPathComponent(path)
+            try fm.createDirectory(at: link.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? fm.createSymbolicLink(atPath: link.path, withDestinationPath: destination)
         }
         let wordpress = folder.appendingPathComponent(SiteArchiveLayout.wordpressFolder, isDirectory: true)
         for link in unsafeSymlinks(in: wordpress) {
@@ -512,7 +521,9 @@ public actor SiteArchiveService {
     /// `database.sql`, and `wordpressFolder` (which must be named `wordpress`)
     /// into `destination`. Each mount is copied in at its relative path.
     /// The archive is built beside `destination` and moved into place only on
-    /// success. Returns warnings for mounts skipped because of an unsafe path.
+    /// success. Symlinks that import would drop are left out, except those in
+    /// a mount that stay inside the tree. Returns warnings for every symlink
+    /// import would drop and for mounts skipped because of an unsafe path.
     public static func package(
         wordpressFolder: URL,
         stagingFolder: URL,
@@ -545,24 +556,32 @@ public actor SiteArchiveService {
         try manifest.encoded().write(to: stagingFolder.appendingPathComponent(SiteArchiveLayout.manifestName))
 
         let root = SiteArchiveLayout.wordpressFolder
+        let unsafeLinks = unsafeSymlinks(in: wordpressFolder)
         var wordpressArgs = ["-r", "-y", "-q", "-X", partial.path, root] + zipExcludeArgs(excludes, under: root)
         for mount in safeMounts {
             wordpressArgs += ["-x", "\(root)/\(mount.relativePath)/*"]
         }
+        for link in unsafeLinks {
+            wordpressArgs += ["-x", literalPattern("\(root)/\(link.path)")]
+        }
         try await runTool(zipPath, args: wordpressArgs, cwd: wordpressFolder.deletingLastPathComponent())
 
         let rsyncExcludes = (excludes + alwaysExcluded).map { "--exclude=\($0)" }
+        let stagedWordpress = stagingFolder.appendingPathComponent(root, isDirectory: true)
         for mount in safeMounts {
-            let target = stagingFolder.appendingPathComponent(root, isDirectory: true)
-                .appendingPathComponent(mount.relativePath, isDirectory: true)
+            let target = stagedWordpress.appendingPathComponent(mount.relativePath, isDirectory: true)
             // A nested mount replaces whatever the outer mount holds at its path.
             try? fm.removeItem(at: target)
             try fm.createDirectory(at: target, withIntermediateDirectories: true)
             try await runTool(rsyncPath, args: ["-a"] + rsyncExcludes + [mount.hostPath + "/", target.path + "/"], cwd: nil)
-            warnings += mountSymlinks(
+            let links = mountSymlinks(
                 in: target, mountPath: mount.relativePath,
-                stagedWordpress: stagingFolder.appendingPathComponent(root, isDirectory: true),
-                hostWordpress: wordpressFolder).map(symlinkWarning)
+                stagedWordpress: stagedWordpress, hostWordpress: wordpressFolder)
+            // unzip can refuse to create a link that leaves the extraction folder.
+            for link in links where link.reason == .leavesTree {
+                try fm.removeItem(at: stagedWordpress.appendingPathComponent(link.path))
+            }
+            warnings += links.map(symlinkWarning)
         }
 
         var stagingArgs = ["-r", "-y", "-q", "-X", partial.path, SiteArchiveLayout.manifestName, SiteArchiveLayout.databaseName]
@@ -575,7 +594,7 @@ public actor SiteArchiveService {
             try fm.moveItem(at: partial, to: destination)
         }
         succeeded = true
-        return warnings
+        return warnings + unsafeLinks.map(symlinkWarning)
     }
 
     /// Symlinks under `wordpressFolder` that resolve outside it or do not resolve.
@@ -660,6 +679,42 @@ public actor SiteArchiveService {
         case .unresolvable:
             return "Symlink wordpress/\(link.path) does not resolve; the imported site will not have it."
         }
+    }
+
+    /// `name` as a zip/unzip pattern that matches only itself.
+    private static func literalPattern(_ name: String) -> String {
+        var pattern = ""
+        for character in name {
+            if "\\*?[".contains(character) { pattern.append("\\") }
+            pattern.append(character)
+        }
+        return pattern
+    }
+
+    /// Names of the symlink entries in `archive`, read from the `zipinfo` listing.
+    /// Throws `.unsafeEntry` for an entry stored under one of them.
+    private static func symlinkEntries(in archive: URL) async throws -> [String] {
+        let listing = try await runTool(zipinfoPath, args: [archive.path], cwd: nil).stdout
+        // permissions, version, system, size, type, method, date, time, name
+        let entryLine = /^(\S)\S*\s+\d+\.\d+\s+\S+\s+\d+\s+\S+\s+\S+\s+\S+\s+\S+ (.+)$/
+        var links: [String] = []
+        var names: [String] = []
+        for line in listing.split(whereSeparator: \.isNewline) {
+            guard let match = line.firstMatch(of: entryLine) else { continue }
+            let name = String(match.2)
+            names.append(name)
+            if match.1 == "l" { links.append(name) }
+        }
+        let linkPaths = Set(links.compactMap(safeRelativePath))
+        for name in names {
+            guard let path = safeRelativePath(name) else { continue }
+            let components = path.split(separator: "/")
+            for depth in components.indices.dropLast() {
+                let parent = components[...depth].joined(separator: "/")
+                if linkPaths.contains(parent) { throw SiteArchiveError.unsafeEntry(name) }
+            }
+        }
+        return links
     }
 
     /// Symlinks under the staged mount folder `mountFolder` that import would drop.

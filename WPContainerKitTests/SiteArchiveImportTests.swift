@@ -149,6 +149,55 @@ final class SiteArchiveImportTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appendingPathComponent("wordpress/index.php").path))
     }
 
+    func testExtractMatchesSymlinkNamesLiterally() async throws {
+        try write(try makeManifest().encoded(), to: "wpc-site.json")
+        try write("-- example dump\n", to: "database.sql")
+        try write("<?php // index\n", to: "wordpress/index.php")
+        try write("<?php // lib\n", to: "wordpress/lib.php")
+        let fm = FileManager.default
+        let wordpressSource = source.appendingPathComponent("wordpress")
+        try fm.createSymbolicLink(atPath: wordpressSource.appendingPathComponent("l*").path, withDestinationPath: "/etc")
+        try fm.createSymbolicLink(atPath: wordpressSource.appendingPathComponent("[in] ?").path,
+                                  withDestinationPath: "index.php")
+        let archive = try await makeZip()
+        let folder = tempRoot.appendingPathComponent("extracted", isDirectory: true)
+
+        try await SiteArchiveService.extract(archive: archive, into: folder)
+
+        let wordpress = folder.appendingPathComponent("wordpress")
+        XCTAssertNil(try? fm.destinationOfSymbolicLink(atPath: wordpress.appendingPathComponent("l*").path))
+        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: wordpress.appendingPathComponent("[in] ?").path), "index.php")
+        XCTAssertTrue(fm.fileExists(atPath: wordpress.appendingPathComponent("lib.php").path))
+    }
+
+    func testExtractRefusesEntriesStoredUnderASymlink() async throws {
+        let fm = FileManager.default
+        try write(try makeManifest().encoded(), to: "wpc-site.json")
+        try write("-- example dump\n", to: "database.sql")
+        try write("<?php // index\n", to: "wordpress/index.php")
+        let target = tempRoot.appendingPathComponent("target", isDirectory: true)
+        try fm.createDirectory(at: target, withIntermediateDirectories: true)
+        try fm.createSymbolicLink(atPath: source.appendingPathComponent("wordpress/plugins").path,
+                                  withDestinationPath: target.path)
+        let archive = try await makeZip()
+        let payload = tempRoot.appendingPathComponent("payload", isDirectory: true)
+        try fm.createDirectory(at: payload.appendingPathComponent("wordpress/plugins"), withIntermediateDirectories: true)
+        try "<?php // x\n".write(to: payload.appendingPathComponent("wordpress/plugins/x.php"), atomically: true, encoding: .utf8)
+        let appended = try await ProcessRunner.run(
+            executable: "/usr/bin/zip", args: ["-r", "-y", "-q", "-X", archive.path, "wordpress/plugins"], cwd: payload)
+        XCTAssertTrue(appended.succeeded, appended.stderr)
+        let folder = tempRoot.appendingPathComponent("extracted", isDirectory: true)
+
+        do {
+            try await SiteArchiveService.extract(archive: archive, into: folder)
+            XCTFail("expected .unsafeEntry")
+        } catch let error as SiteArchiveError {
+            guard case .unsafeEntry(let name) = error else { return XCTFail("\(error)") }
+            XCTAssertTrue(name.hasPrefix("wordpress/plugins/"), name)
+        }
+        XCTAssertTrue(try fm.contentsOfDirectory(atPath: target.path).isEmpty)
+    }
+
     // MARK: - importSite (checks that run before any container work)
 
     func testImportRejectsArchiveDomainThatDoesNotNormalize() async throws {
@@ -175,7 +224,7 @@ final class SiteArchiveImportTests: XCTestCase {
     // MARK: - importSite rollback
 
     func testImportRollsBackWhenWordPressFolderIsASymlink() async throws {
-        // unzip refuses to write `wordpress/…` entries through the top-level `wordpress` link.
+        // Extraction refuses `wordpress/…` entries stored under a top-level `wordpress` link.
         let fm = FileManager.default
         try write(try makeManifest().encoded(), to: "wpc-site.json")
         try write("-- example dump\n", to: "database.sql")

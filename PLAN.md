@@ -591,7 +591,8 @@ mounts, agent-tools state and the `database/`, `.backups/`, `php/`, `.envs/` and
 is dumped through the wp-cli one-shot container into a transient `.wpc-export/`,
 and the zip is written to a temp file next to the destination and renamed into
 place. Temp files are removed on every exit path. Symlinks pointing outside
-`wordpress/` are reported as warnings because import drops them.
+`wordpress/` are reported as warnings because import drops them, and are left out
+of the archive (a mount's links are left out only when their path climbs out).
 
 **Import order.**
 1. Validate the zip: manifest present, `schemaVersion` <= 1, safe entry paths (no
@@ -599,9 +600,10 @@ place. Temp files are removed on every exit path. Symlinks pointing outside
    `wordpress/`), free disk >= 1.2x the uncompressed size.
 2. Resolve a unique slug and the domain choice (keep, set or none).
 3. Create the store record with `provisioned = true`.
-4. Extract on the same volume, move `wordpress/` into the site folder, drop
-   symlinks that resolve outside it or do not resolve, write the `wp` shim, enable
-   Mailpit, start the site.
+4. Extract on the same volume with symlink entries held back (refusing entries
+   stored under one), recreate the links under `wordpress/` and drop those that
+   resolve outside it or do not resolve, move `wordpress/` into the site folder,
+   write the `wp` shim, enable Mailpit, start the site.
 5. `wp db import`, then `EnvURLMigrator.migrate` rewrites the source URLs to the new
    site's authority (multisite, `DOMAIN_CURRENT_SITE`, `WP_HOME`/`WP_SITEURL`,
    forwarded-proto).

@@ -121,6 +121,33 @@ final class SiteArchivePackageTests: XCTestCase {
         XCTAssertTrue(warnings.contains { $0.contains("\(base)/abs ") && $0.contains(outside) }, "\(warnings)")
         XCTAssertTrue(warnings.contains { $0.contains("\(base)/up ") && $0.contains(outside) }, "\(warnings)")
         XCTAssertTrue(warnings.contains { $0.contains("\(base)/gone ") && $0.contains("does not resolve") }, "\(warnings)")
+        let entries = try await zipEntries(destination)
+        XCTAssertFalse(entries.contains("\(base)/abs"), "\(entries)")
+        XCTAssertFalse(entries.contains("\(base)/up"), "\(entries)")
+        for kept in ["gone", "ok", "theme", "acme.php"] {
+            XCTAssertTrue(entries.contains("\(base)/\(kept)"), "\(kept): \(entries)")
+        }
+    }
+
+    func testPackageLeavesOutSymlinksImportDrops() async throws {
+        let fm = FileManager.default
+        try write("<?php // real\n", to: "wp-content/plugins/linked-real.php")
+        try fm.createSymbolicLink(atPath: wordpress.appendingPathComponent("wp-content/plugins/linked*").path,
+                                  withDestinationPath: "/tmp/elsewhere")
+        try fm.createSymbolicLink(atPath: wordpress.appendingPathComponent("wp-content/index-link.php").path,
+                                  withDestinationPath: "../index.php")
+        let destination = outputFolder.appendingPathComponent("example.zip")
+
+        let warnings = try await SiteArchiveService.package(
+            wordpressFolder: wordpress, stagingFolder: staging, destination: destination,
+            manifest: makeManifest(), excludes: [], mounts: [], overwrite: false)
+
+        XCTAssertEqual(warnings.count, 1, "\(warnings)")
+        XCTAssertTrue(warnings[0].contains("wordpress/wp-content/plugins/linked* "), "\(warnings)")
+        let entries = try await zipEntries(destination)
+        XCTAssertFalse(entries.contains("wordpress/wp-content/plugins/linked*"), "\(entries)")
+        XCTAssertTrue(entries.contains("wordpress/wp-content/plugins/linked-real.php"), "\(entries)")
+        XCTAssertTrue(entries.contains("wordpress/wp-content/index-link.php"), "\(entries)")
     }
 
     func testNestedMountReplacesOuterContentAtItsPath() async throws {
