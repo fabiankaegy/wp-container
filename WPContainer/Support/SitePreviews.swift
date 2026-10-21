@@ -16,6 +16,11 @@ final class SitePreviews {
 
     static let maxAge: TimeInterval = 30 * 60
 
+    /// Whether a site or env is running right now. A queued capture checks it
+    /// just before loading, so a site stopped or idle-parked while it waited
+    /// isn't woken by the request (or kept awake by its activity stamp).
+    @ObservationIgnored var isRunning: (UUID) -> Bool = { _ in false }
+
     @ObservationIgnored private var capturedAt: [UUID: Date] = [:]
     @ObservationIgnored private var loadedFromDisk: Set<UUID> = []
     @ObservationIgnored private var pending: Set<UUID> = []
@@ -40,8 +45,9 @@ final class SitePreviews {
             await previous?.value
             // Give a freshly started site a moment to finish booting PHP.
             try? await Task.sleep(for: .seconds(2))
-            let image = await PreviewCapture.snapshot(url)
-            self?.store(image, for: id)
+            guard let self else { return }
+            let image = self.isRunning(id) ? await PreviewCapture.snapshot(url) : nil
+            self.store(image, for: id)
         }
     }
 

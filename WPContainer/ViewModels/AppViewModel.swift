@@ -136,7 +136,9 @@ public final class AppViewModel {
         // a wake against a concurrent UI start.
         self.proxy = HTTPSProxy(ca: ca, lifecycle: lifecycle)
         self.dbImporter = DatabaseImportService(cli: cli, lifecycle: lifecycle)
-        self.store = SiteStore()
+        let store = SiteStore()
+        self.store = store
+        previews.isRunning = { id in (store.site(id: id)?.status ?? store.env(id: id)?.status)?.isRunning == true }
     }
 
     public var sites: [Site] { store.sites }
@@ -1100,11 +1102,7 @@ public final class AppViewModel {
             // idle sweep can't park it before they've done anything with it. Wakes
             // deliberately don't stamp — that would let the sweep feed itself.
             await store.recordActivity(id: site.id)
-            // Starting an archived site unarchives it, so it is listed and routed again.
-            if site.isArchived {
-                await store.setArchived(nil, siteID: site.id)
-                await refreshProxyRouting()
-            }
+            await unarchiveIfNeeded(siteID: site.id)
             // Settled envs stay parked; starting one restores it.
             let envs = includeEnvs ? store.envs(forSite: site.id).filter { !$0.isSettled } : []
             // An HTTPS/custom-domain site is unreachable without the reverse
@@ -1116,8 +1114,9 @@ public final class AppViewModel {
                 await ensureProxyRunning()
             }
             let outcome = await lifecycle.startSiteWithEnvs(site, envs: envs)
-            if outcome.provisioned != site.provisioned {
-                var updated = site
+            // From the store's current record: `site` may predate the unarchive
+            // above, and upserting it would archive the running site again.
+            if outcome.provisioned != site.provisioned, var updated = store.site(id: site.id) {
                 updated.provisioned = outcome.provisioned
                 await store.upsertSite(updated)
             }
@@ -1275,6 +1274,7 @@ public final class AppViewModel {
             // one is already in flight is silently ignored by the lifecycle.
             // The parent rides along as `dbProvider` so a shared-database env can
             // boot the server it borrows when the parent site is down (#17).
+            await unarchiveIfNeeded(siteID: env.parentSiteID)
             let parent = store.site(id: env.parentSiteID)
             await store.recordActivity(id: env.id)
             do { _ = try await lifecycle.startInstance(env, dbProvider: parent) }
@@ -1299,19 +1299,29 @@ public final class AppViewModel {
     /// Delete an env. The git branch is ALWAYS kept; `keepWorktree` optionally
     /// leaves the worktree checkout on disk (§2b context-menu option).
     public func deleteEnv(_ env: WorktreeEnv, keepWorktree: Bool = false) {
+        Task { await removeEnv(env, keepWorktree: keepWorktree) }
+    }
+
+    /// Delete several envs one at a time: concurrent `git worktree remove`s on
+    /// one repo collide on its locks and leave stale checkouts behind.
+    public func deleteEnvs(_ envs: [WorktreeEnv]) {
         Task {
-            let parent = store.site(id: env.parentSiteID)
-            let outcome = await worktrees.delete(env, parent: parent, keepBranch: true, keepWorktree: keepWorktree)
-            await store.removeEnv(id: env.id)
-            if let parent {
-                // The DB server was down, so the schemas are still there (#17) —
-                // tombstone them for the next shared-env create to reap.
-                await store.updatePendingSchemaDrops(siteID: parent.id, adding: outcome.tombstonedSchemas)
-                await lifecycle.stopSharedDatabaseIfUnused(parent: parent)
-            }
-            if selection == env.id { selection = env.parentSiteID }
-            try? await ca.removeLeafCoverage([env.domainHost])
+            for env in envs { await removeEnv(env) }
         }
+    }
+
+    private func removeEnv(_ env: WorktreeEnv, keepWorktree: Bool = false) async {
+        let parent = store.site(id: env.parentSiteID)
+        let outcome = await worktrees.delete(env, parent: parent, keepBranch: true, keepWorktree: keepWorktree)
+        await store.removeEnv(id: env.id)
+        if let parent {
+            // The DB server was down, so the schemas are still there (#17) —
+            // tombstone them for the next shared-env create to reap.
+            await store.updatePendingSchemaDrops(siteID: parent.id, adding: outcome.tombstonedSchemas)
+            await lifecycle.stopSharedDatabaseIfUnused(parent: parent)
+        }
+        if selection == env.id { selection = env.parentSiteID }
+        try? await ca.removeLeafCoverage([env.domainHost])
     }
 
     // MARK: - Archiving
@@ -1321,26 +1331,33 @@ public final class AppViewModel {
     /// from the proxy's routes so nothing wakes it. Files and databases stay.
     public func archiveSite(_ site: Site) {
         Task {
+            // Unroute first: settling takes a few seconds, and a request from an
+            // open tab in that window would otherwise wake the site again.
+            await store.setArchived(Date(), siteID: site.id)
+            await refreshProxyRouting()
             let envs = store.envs(forSite: site.id)
             await lifecycle.stopSiteWithEnvs(site, envs: envs)
             for env in envs where !env.isSettled {
                 do { try await settler.settle(env, parent: site) }
                 catch { lastError = SiteLifecycleErrorText(error) }
             }
-            await store.setArchived(Date(), siteID: site.id)
             await store.reload()
-            await refreshProxyRouting()
         }
     }
 
     /// Bring an archived site back into the library and the proxy's routes. Its
     /// branch environments stay settled until restored one by one.
     public func unarchiveSite(_ site: Site) {
-        Task {
-            await store.setArchived(nil, siteID: site.id)
-            await store.reload()
-            await refreshProxyRouting()
-        }
+        Task { await unarchiveIfNeeded(siteID: site.id) }
+    }
+
+    /// Starting an archived site, or one of its branch environments, brings
+    /// the site back. The proxy skips archived sites and their envs, so
+    /// anything started without this would run unrouted.
+    private func unarchiveIfNeeded(siteID: UUID) async {
+        guard store.site(id: siteID)?.isArchived == true else { return }
+        await store.setArchived(nil, siteID: siteID)
+        await refreshProxyRouting()
     }
 
     // MARK: - Settling (see `EnvSettlement`)
@@ -1362,6 +1379,7 @@ public final class AppViewModel {
     /// on a new port gets its URLs migrated onto its domain.
     public func restoreEnv(_ env: WorktreeEnv) {
         Task {
+            await unarchiveIfNeeded(siteID: env.parentSiteID)
             await ensureProxyRunning()
             do {
                 let (_, warnings) = try await settler.restore(env, parent: store.site(id: env.parentSiteID))
@@ -1396,7 +1414,7 @@ public final class AppViewModel {
         for env in due {
             let dirty = await git.hasUncommittedChanges(at: env.worktreePath)
             if dirty { kept += 1 }
-            deleteEnv(env, keepWorktree: dirty)
+            await removeEnv(env, keepWorktree: dirty)
         }
         notifications.notifyEnvsPurged(branches: due.map(\.branch), keptCheckouts: kept)
     }

@@ -110,7 +110,7 @@ struct BranchTable: View {
                             isPresented: Binding(get: { !confirmingDelete.isEmpty }, set: { if !$0 { confirmingDelete = [] } }),
                             titleVisibility: .visible) {
             Button("Delete", role: .destructive) {
-                confirmingDelete.forEach { vm.deleteEnv($0) }
+                vm.deleteEnvs(confirmingDelete)
                 vm.branchSelection.subtract(confirmingDelete.map(\.id))
                 confirmingDelete = []
             }

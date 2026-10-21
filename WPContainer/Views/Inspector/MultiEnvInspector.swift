@@ -49,7 +49,7 @@ struct MultiEnvInspector: View {
         }
         .confirmationDialog("Delete \(envs.count) branch environments?", isPresented: $confirmingDelete, titleVisibility: .visible) {
             Button("Delete \(envs.count) Environments", role: .destructive) {
-                envs.forEach { vm.deleteEnv($0) }
+                vm.deleteEnvs(envs)
                 vm.branchSelection = []
             }
             Button("Cancel", role: .cancel) {}
