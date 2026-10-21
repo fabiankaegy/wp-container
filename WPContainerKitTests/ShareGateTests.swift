@@ -99,6 +99,13 @@ final class ShareGateTests: XCTestCase {
         XCTAssertFalse(out.contains("X-Robots-Tag: all"))
     }
 
+    func testResponseHeadersDropXPingback() throws {
+        let header = "HTTP/1.1 200 OK\r\nX-Pingback: http://my-site.localhost/xmlrpc.php\r\nContent-Length: 0\r\n\r\n"
+        let out = ShareGate.rewriteResponseHeader(header, config: try config())
+        XCTAssertFalse(out.lowercased().contains("x-pingback"))
+        XCTAssertTrue(out.contains("Content-Length: 0\r\n"))
+    }
+
     func testThrottleLocksAfterTenFailures() {
         let throttle = ShareAuthThrottle()
         let start = Date(timeIntervalSince1970: 1_000)
@@ -129,8 +136,21 @@ final class ShareGateTests: XCTestCase {
         XCTAssertEqual(try decide("GET /wp-json/wc/?rest_route HTTP/1.1", allow: ["/wp-json/wc/"]), .challenge)
     }
 
-    func testQueryExceptionStillPassesWithRestRoute() throws {
-        XCTAssertEqual(try decide("GET /wp-json/wc/?rest_route=/x&wc-api=hook HTTP/1.1", allow: ["/wp-json/wc/", "?wc-api"]), .exempt)
+    func testOtherQueryExceptionRefusesRestRouteOverride() throws {
+        XCTAssertEqual(try decide("GET /wp-json/wc/?rest_route=/x&wc-api=hook HTTP/1.1", allow: ["/wp-json/wc/", "?wc-api"]), .challenge)
+        for key in ["rest_route", "rest.route", "rest%5Froute", "rest+route"] {
+            let line = "GET /?wc-api=1&\(key)=/wp/v2/users HTTP/1.1"
+            XCTAssertEqual(try decide(line, allow: ["?wc-api"]), .challenge, key)
+        }
+    }
+
+    func testRestRouteExceptionCoversOnlyTheLiteralKey() throws {
+        let allow = ["?rest_route=/stripe/v1/webhook"]
+        XCTAssertEqual(try decide("GET /?rest_route=/stripe/v1/webhook HTTP/1.1", allow: allow), .exempt)
+        XCTAssertEqual(try decide("GET /?rest_route=/wp/v2/users HTTP/1.1", allow: allow), .challenge)
+        XCTAssertEqual(try decide("GET /?rest_route=/stripe/v1/webhook&rest.route=/wp/v2/users HTTP/1.1", allow: allow), .challenge)
+        XCTAssertEqual(try decide("GET /?rest_route=/stripe/v1/webhook&rest_route=/wp/v2/users HTTP/1.1", allow: allow), .challenge)
+        XCTAssertEqual(try decide("GET /wp-json/x/?rest_route=/stripe/v1/webhook HTTP/1.1", allow: ["/wp-json/x/"]), .challenge)
     }
 
     func testPathExceptionStillPassesWithoutRestRoute() throws {

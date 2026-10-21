@@ -69,12 +69,15 @@ public enum SharePHPService {
     }
 
     if ( ! function_exists( 'wpc_share_is_origin' ) ) {
+        /** Whether the value is a bare http(s) origin without path or query. */
         function wpc_share_is_origin( $value ) {
-            return is_string( $value ) && 1 === preg_match( '~^https?://[A-Za-z0-9._-]+(:[0-9]+)?$~', $value );
+            $matched = is_string( $value ) ? preg_match( '~^https?://[A-Za-z0-9._-]+(:[0-9]+)?$~', $value ) : 0;
+            return 1 === $matched;
         }
     }
 
     if ( ! function_exists( 'wpc_share_load_config' ) ) {
+        /** Reads wpc-share.json when the request carries the matching share origin header; null otherwise. */
         function wpc_share_load_config() {
             $file = dirname( __DIR__, 2 ) . '/wpc-share.json';
             if ( ! is_file( $file ) ) {
@@ -109,6 +112,7 @@ public enum SharePHPService {
     }
 
     if ( ! function_exists( 'wpc_share_escape_slashes' ) ) {
+        /** Escapes forward slashes the way JSON encodes them. */
         function wpc_share_escape_slashes( $value ) {
             return str_replace( '/', '\/', $value );
         }
@@ -129,6 +133,7 @@ public enum SharePHPService {
     }
 
     if ( ! function_exists( 'wpc_share_to_public_map' ) ) {
+        /** Origin map that rewrites local origins to the public origin. */
         function wpc_share_to_public_map() {
             static $map = null;
             if ( null === $map ) {
@@ -182,12 +187,14 @@ public enum SharePHPService {
     }
 
     if ( ! function_exists( 'wpc_share_compare_length' ) ) {
+        /** usort callback that orders strings longest first. */
         function wpc_share_compare_length( $a, $b ) {
             return strlen( $b ) - strlen( $a );
         }
     }
 
     if ( ! function_exists( 'wpc_share_filter_output' ) ) {
+        /** Output buffer callback that rewrites local origins in textual response bodies. */
         function wpc_share_filter_output( $buffer, $phase = PHP_OUTPUT_HANDLER_FINAL ) {
             $type = '';
             foreach ( headers_list() as $header ) {
@@ -211,7 +218,7 @@ public enum SharePHPService {
                 'application/atom+xml',
             );
             $is_text = 0 === strpos( $type, 'text/' );
-            if ( '' !== $type && ! $is_text && ! in_array( $type, $allowed, true ) ) {
+            if ( '' === $type || ( ! $is_text && ! in_array( $type, $allowed, true ) ) ) {
                 return $buffer;
             }
 
@@ -226,6 +233,7 @@ public enum SharePHPService {
     }
 
     if ( ! function_exists( 'wpc_share_rewrite_location' ) ) {
+        /** Rewrites local origins in the Location response header. */
         function wpc_share_rewrite_location() {
             foreach ( headers_list() as $header ) {
                 $is_location = 0 === stripos( $header, 'location:' );
@@ -243,6 +251,7 @@ public enum SharePHPService {
     }
 
     if ( ! function_exists( 'wpc_share_boot' ) ) {
+        /** Activates link rewriting for a request that carries the share origin header. */
         function wpc_share_boot() {
             $config = wpc_share_load_config();
             if ( null === $config || defined( 'WPC_SHARE_ORIGIN' ) ) {
@@ -291,6 +300,7 @@ public enum SharePHPService {
     }
 
     if ( ! function_exists( 'wpc_share_to_local_map' ) ) {
+        /** Origin map that rewrites the public origin to the local origin. */
         function wpc_share_to_local_map() {
             static $map = null;
             if ( null === $map ) {
@@ -301,6 +311,7 @@ public enum SharePHPService {
     }
 
     if ( ! function_exists( 'wpc_share_contains_incomplete_class' ) ) {
+        /** Whether the value holds an object whose class could not be loaded. */
         function wpc_share_contains_incomplete_class( $value, $depth = 0 ) {
             if ( $value instanceof __PHP_Incomplete_Class ) {
                 return true;
@@ -333,7 +344,10 @@ public enum SharePHPService {
                     return $swapped;
                 }
 
-                $data      = @unserialize( $value, array( 'allowed_classes' => false ) );
+                // Malformed serialized data is detected by the false return, so the notice is muted.
+                set_error_handler( '__return_true' );
+                $data = unserialize( $value, array( 'allowed_classes' => false ) );
+                restore_error_handler();
                 $trimmed   = trim( $value );
                 $is_failed = false === $data && 'b:0;' !== $trimmed;
                 if ( $is_failed || wpc_share_contains_incomplete_class( $data ) ) {
@@ -372,12 +386,14 @@ public enum SharePHPService {
     }
 
     if ( ! function_exists( 'wpc_share_swap_back_slashed' ) ) {
+        /** Swaps the public origin back to the local one in a slashed value. */
         function wpc_share_swap_back_slashed( $value ) {
             return wp_slash( wpc_share_swap_back( wp_unslash( $value ) ) );
         }
     }
 
     if ( ! function_exists( 'wpc_share_filter_post_data' ) ) {
+        /** Swaps the public origin back in the text fields of a post before it is saved. */
         function wpc_share_filter_post_data( $data ) {
             $fields = array( 'post_content', 'post_excerpt', 'post_content_filtered', 'post_title' );
             foreach ( $fields as $field ) {
@@ -390,24 +406,28 @@ public enum SharePHPService {
     }
 
     if ( ! function_exists( 'wpc_share_filter_option' ) ) {
+        /** Swaps the public origin back in an option value before it is saved. */
         function wpc_share_filter_option( $value ) {
             return wpc_share_swap_back( $value );
         }
     }
 
     if ( ! function_exists( 'wpc_share_filter_site_option' ) ) {
+        /** Swaps the public origin back in a network option value before it is saved. */
         function wpc_share_filter_site_option( $value ) {
             return wpc_share_swap_back( $value );
         }
     }
 
     if ( ! function_exists( 'wpc_share_filter_slashed' ) ) {
+        /** Swaps the public origin back in a slashed value. */
         function wpc_share_filter_slashed( $value ) {
             return wpc_share_swap_back_slashed( $value );
         }
     }
 
     if ( ! function_exists( 'wpc_share_filter_unslashed' ) ) {
+        /** Swaps the public origin back in an unslashed value. */
         function wpc_share_filter_unslashed( $value ) {
             return wpc_share_swap_back( $value );
         }
@@ -475,6 +495,7 @@ public enum SharePHPService {
     }
 
     if ( ! function_exists( 'wpc_share_validate_site_data' ) ) {
+        /** Rejects edits to a site’s domain or path made through a share link. */
         function wpc_share_validate_site_data( $errors, $data, $old_site ) {
             if ( ! $old_site || ! ( $errors instanceof WP_Error ) ) {
                 return;
@@ -494,6 +515,7 @@ public enum SharePHPService {
     }
 
     if ( ! function_exists( 'wpc_share_register_hooks' ) ) {
+        /** Registers the filters that swap the public origin back before content is stored. */
         function wpc_share_register_hooks() {
             add_filter( 'wp_insert_post_data', 'wpc_share_filter_post_data' );
             add_filter( 'pre_update_option', 'wpc_share_filter_option' );

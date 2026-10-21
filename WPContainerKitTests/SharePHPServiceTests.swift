@@ -72,8 +72,23 @@ final class SharePHPServiceTests: XCTestCase {
         }
     }
 
-    func testDeactivateWithNothingActiveIsANoOp() {
-        SharePHPService.deactivate(for: makeSite())
+    func testDeactivateWithNothingActiveIsANoOp() throws {
+        let site = makeSite()
+        let folder = site.phpConfFolder
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let unrelated = folder.appendingPathComponent("custom.php")
+        try "<?php // user file".write(to: unrelated, atomically: true, encoding: .utf8)
+        let before = try FileManager.default.subpathsOfDirectory(atPath: folder.path).sorted()
+
+        SharePHPService.deactivate(for: site)
+
+        let after = try FileManager.default.subpathsOfDirectory(atPath: folder.path).sorted()
+        XCTAssertEqual(after, before)
+        XCTAssertEqual(try String(contentsOf: unrelated, encoding: .utf8), "<?php // user file")
+    }
+
+    func testEarlyHandlerSkipsRewriteWithoutContentType() {
+        XCTAssertTrue(SharePHPService.earlyContents.contains("if ( '' === $type || ( ! $is_text && ! in_array( $type, $allowed, true ) ) ) {"))
     }
 
     func testEarlyHandlerRefusesPostRestRouteOnExemptRequests() {

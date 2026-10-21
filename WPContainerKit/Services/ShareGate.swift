@@ -59,11 +59,12 @@ public enum ShareGate {
         let path = parts.first.map(String.init) ?? "/"
         let query = parts.count > 1 ? String(parts[1]) : nil
         if reachesLoginEndpoint(path) { return .challenge }
-        // WordPress serves `rest_route` from the query string whatever the path, so a
-        // path-prefix exception cannot cover a request that carries it.
-        let overridesRoute = hasRestRoute(query)
+        // WordPress serves `rest_route` from the query string whatever the path, so only an
+        // exception on the `rest_route` key itself can cover a request that carries it, and
+        // only when that key is spelled literally once (PHP lets a later mangled spelling win).
+        let routeKeys = restRouteKeys(query)
         let exempt = config.allow.contains { exception in
-            if overridesRoute && exception.description.hasPrefix("/") { return false }
+            if !routeKeys.isEmpty && !(routeKeys == ["rest_route"] && isRestRouteException(exception)) { return false }
             return exception.matches(path: path, query: query)
         }
         return exempt ? .exempt : .challenge
@@ -95,7 +96,7 @@ public enum ShareGate {
         return requestLine + "\r\n" + kept.joined(separator: "\r\n") + "\r\n\r\n"
     }
 
-    /// Points redirect and link headers at the public origin and marks the response non-indexable.
+    /// Points redirect and link headers at the public origin, drops `X-Pingback` (it names the local host) and marks the response non-indexable.
     public static func rewriteResponseHeader(_ header: String, config: ShareGateConfig) -> String {
         let origins = config.localOrigins.sorted { $0.count > $1.count }
         let rewritten: Set<String> = ["location", "link", "content-location", "refresh"]
@@ -105,7 +106,7 @@ public enum ShareGate {
         var out: [String] = []
         for line in lines {
             guard let name = headerName(line) else { out.append(line); continue }
-            if name == "x-robots-tag" { continue }
+            if name == "x-robots-tag" || name == "x-pingback" { continue }
             if rewritten.contains(name) {
                 var updated = line
                 for origin in origins {
@@ -141,7 +142,9 @@ public enum ShareGate {
     private static func hasValidCredentials(_ headerLines: [String], config: ShareGateConfig) -> Bool {
         guard let value = headerValue("authorization", in: headerLines) else { return false }
         let pieces = value.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
-        guard pieces.count == 2, pieces[0].lowercased() == "basic",
+        guard pieces.count == 2 else { return false }
+        let scheme = pieces[0].lowercased()
+        guard scheme == "basic",
               let decoded = Data(base64Encoded: pieces[1].trimmingCharacters(in: .whitespaces)) else {
             return false
         }
@@ -160,12 +163,22 @@ public enum ShareGate {
         }
     }
 
-    private static func hasRestRoute(_ query: String?) -> Bool {
-        guard let query else { return false }
-        return query.split(separator: "&").contains { part in
+    /// The raw spellings of every query key that PHP turns into `rest_route`.
+    private static func restRouteKeys(_ query: String?) -> [String] {
+        guard let query else { return [] }
+        return query.split(separator: "&").compactMap { part in
             let key = part.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
-            return phpVariableName(key) == "rest_route"
+            let variable = phpVariableName(key)
+            return variable == "rest_route" ? key : nil
         }
+    }
+
+    /// Whether the exception is a query exception on the `rest_route` key.
+    private static func isRestRouteException(_ exception: ShareException) -> Bool {
+        let text = exception.description
+        guard text.hasPrefix("?") else { return false }
+        let key = text.dropFirst().split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init)
+        return key == "rest_route"
     }
 
     /// The `$_GET` name PHP derives from a raw query key: percent-decoded and cut at the first NUL byte, leading spaces dropped,
@@ -210,7 +223,9 @@ public enum ShareGate {
     }
 
     private static func headerValue(_ name: String, in lines: [String]) -> String? {
-        for line in lines where headerName(line) == name {
+        for line in lines {
+            let lineName = headerName(line)
+            guard lineName == name else { continue }
             guard let colon = line.firstIndex(of: ":") else { continue }
             return line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
         }
