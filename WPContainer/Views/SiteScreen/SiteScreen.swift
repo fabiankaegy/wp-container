@@ -342,7 +342,7 @@ private struct RunningBranchCard: View {
                 StatusDot(status: env.status, size: 7)
                 Text(env.branch).font(.system(.callout, design: .monospaced, weight: .semibold)).lineLimit(1).truncationMode(.middle)
             }
-            Text("\((env.repoRelPath as NSString).lastPathComponent) · \(env.url.host() ?? ""):\(env.url.port.map(String.init) ?? "")")
+            Text("\((env.repoRelPath as NSString).lastPathComponent) · \(env.url.host() ?? "")\(env.url.port.map { ":\($0)" } ?? "")")
                 .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             HStack(alignment: .bottom, spacing: 8) {
                 Sparkline(values: samples.map(\.cpuPercent), color: .blue).frame(height: 22)

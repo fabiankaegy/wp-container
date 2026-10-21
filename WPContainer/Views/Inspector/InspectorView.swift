@@ -24,15 +24,15 @@ struct InspectorView: View {
     private var content: some View {
         let envs = vm.selectedEnvs
         if envs.count > 1 {
-            MultiEnvInspector(envs: envs)
+            MultiEnvInspector(envs: envs).environment(\.sectionCardScope, "envs")
         } else if let env = envs.first {
-            EnvInspector(env: env).id(env.id)
+            EnvInspector(env: env).id(env.id).environment(\.sectionCardScope, "env")
         } else if vm.screen == nil && vm.library == .branches {
             placeholder("Select branch environments to see their settings.")
         } else if let env = vm.selectedEnv {
-            EnvInspector(env: env).id(env.id)
+            EnvInspector(env: env).id(env.id).environment(\.sectionCardScope, "env")
         } else if let site = vm.selectedSite {
-            SiteInspector(site: site).id(site.id)
+            SiteInspector(site: site).id(site.id).environment(\.sectionCardScope, "site")
         } else {
             placeholder("Select a site to see its settings.")
         }

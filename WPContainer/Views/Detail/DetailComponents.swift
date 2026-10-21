@@ -113,6 +113,9 @@ enum SectionCardStyle { case card, inspector }
 
 extension EnvironmentValues {
     @Entry var sectionCardStyle: SectionCardStyle = .card
+    /// Which inspector a section sits in ("site", "env", "envs"), so folding a
+    /// section in one inspector doesn't fold the same-titled one in another.
+    @Entry var sectionCardScope: String = ""
 }
 
 /// A card section with a title (optionally a trailing accessory) and content.
@@ -125,6 +128,7 @@ struct SectionCard<Content: View, Accessory: View>: View {
     @ViewBuilder var content: () -> Content
 
     @Environment(\.sectionCardStyle) private var style
+    @Environment(\.sectionCardScope) private var scope
     @AppStorage("inspectorFoldedSections") private var foldedRaw = ""
 
     var body: some View {
@@ -151,12 +155,15 @@ struct SectionCard<Content: View, Accessory: View>: View {
         .card()
     }
 
-    private var folded: Bool { foldedRaw.split(separator: "|").contains { $0 == title } }
+    /// The section's entry in `foldedRaw`: "scope/title".
+    private var foldKey: String { "\(scope)/\(title)" }
+
+    private var folded: Bool { foldedRaw.split(separator: "|").contains { $0 == foldKey } }
 
     private func toggleFolded() {
-        var titles = foldedRaw.split(separator: "|").map(String.init).filter { $0 != title }
-        if !folded { titles.append(title) }
-        withAnimation(.easeOut(duration: 0.18)) { foldedRaw = titles.joined(separator: "|") }
+        var keys = foldedRaw.split(separator: "|").map(String.init).filter { $0 != foldKey }
+        if !folded { keys.append(foldKey) }
+        withAnimation(.easeOut(duration: 0.18)) { foldedRaw = keys.joined(separator: "|") }
     }
 
     private var inspectorSection: some View {

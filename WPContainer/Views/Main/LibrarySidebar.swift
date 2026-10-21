@@ -4,7 +4,8 @@ import WPContainerKit
 /// The window's source list: the library (all sites, running, every branch
 /// environment), every branch environment that is running right now, and the
 /// user's groups, each with a colored icon, plus live CPU and memory for all
-/// running containers at the bottom. Sites can be dragged onto a group.
+/// running containers at the bottom. Sites can be dragged onto a group, or
+/// onto All Sites to take them out of their group.
 struct LibrarySidebar: View {
     @Environment(AppViewModel.self) private var vm
 
@@ -19,6 +20,7 @@ struct LibrarySidebar: View {
         List(selection: selection) {
             Section("Library") {
                 row(.allSites, "All Sites", "square.grid.2x2", .blue, count: vm.activeSites.count)
+                    .dropDestination(for: String.self) { items, _ in move(items, to: nil) }
                 row(.running, "Running", "play.fill", .green, count: vm.activeSites.filter { $0.status.isRunning }.count)
                 row(.branches, "Branches", "arrow.triangle.branch", .purple, count: vm.activeEnvs.count,
                     stale: vm.activeEnvs.filter { EnvSettlement.isStale($0) }.count)
