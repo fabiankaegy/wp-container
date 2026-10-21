@@ -862,7 +862,9 @@ final class ShareCoordinatorTests: XCTestCase {
         let coordinator = makeCoordinator()
         let envelope = try await persistence.load()
         await coordinator.reconcile(envelope: envelope, routes: HTTPSProxy.routes(from: envelope), running: ["my-site"])
-        try await waitUntil { self.launcher.launches.count == 1 }
+        // The launch callback records the pid on the coordinator's actor, after the
+        // fake launcher has already counted the launch.
+        try await waitUntil { self.launcher.launches.count == 1 && !self.pidRecords().isEmpty }
 
         XCTAssertEqual(statuses().first?.state, .starting)
         let record = try XCTUnwrap(pidRecords().first)
