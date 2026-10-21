@@ -46,10 +46,9 @@ public enum ProxyControl {
         guard let port, isPortAccepting(port) else {
             try? FileManager.default.removeItem(at: pidURL)
             try? FileManager.default.removeItem(at: portURL)
-            // The env-port report belongs to that dead owner too; a stale one
-            // would claim ports nothing is serving.
-            // With an overridden pidfile the sibling reports live next to it,
-            // so isolated callers never touch the default directory.
+            // The env-port and share reports belong to that dead owner too; with
+            // an overridden pidfile they live next to it, so isolated callers
+            // never touch the default directory.
             let reportDir = pidFile?.deletingLastPathComponent()
             clearEnvPorts(file: reportDir?.appendingPathComponent("proxy-env-ports.json"))
             clearShares(file: sharesFile ?? reportDir?.appendingPathComponent("proxy-shares.json"))

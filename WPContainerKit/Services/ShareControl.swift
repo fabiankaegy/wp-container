@@ -30,12 +30,16 @@ public struct ShareControl: Sendable {
     private let persistence: StorePersistence
     private let statusFile: URL?
     private let proxyRunning: @Sendable () -> Bool
+    private let customDirectory: URL
 
+    /// `customDirectory` holds the custom provider executables.
     public init(persistence: StorePersistence, statusFile: URL? = nil,
-                proxyRunning: @escaping @Sendable () -> Bool = { ProxyControl.isRunning }) {
+                proxyRunning: @escaping @Sendable () -> Bool = { ProxyControl.isRunning },
+                customDirectory: URL = ProxyControl.directory.appendingPathComponent("share-providers")) {
         self.persistence = persistence
         self.statusFile = statusFile
         self.proxyRunning = proxyRunning
+        self.customDirectory = customDirectory
     }
 
     /// What `share list` and `share_status` report while no proxy host is running.
@@ -148,7 +152,7 @@ public struct ShareControl: Sendable {
 
     /// Sets the provider used by shares that name none; nil restores the built-in default.
     public func setDefaultProvider(_ name: String?) async throws {
-        if let name { _ = try ShareProviders.resolve(name) }
+        if let name { _ = try ShareProviders.resolve(name, customDirectory: customDirectory) }
         try await persistence.mutate { env in env.shareDefaultProvider = name }
     }
 
@@ -177,7 +181,7 @@ public struct ShareControl: Sendable {
         let statusPath = (statusFile ?? ProxyControl.sharesFileURL).path
         guard FileManager.default.fileExists(atPath: statusPath) else { throw ShareError.proxyTooOld }
 
-        if !req.clearProvider, let provider = req.provider { _ = try ShareProviders.resolve(provider) }
+        if !req.clearProvider, let provider = req.provider { _ = try ShareProviders.resolve(provider, customDirectory: customDirectory) }
         if let hostname = req.hostname, let value = hostname {
             _ = try ShareProviders.fixedURL(forHostname: value)
         }
@@ -227,13 +231,16 @@ public struct ShareControl: Sendable {
                                       statuses: [ShareStatus]) -> ShareError? {
         let wanted = hostname.lowercased()
         for status in statuses where status.instanceID != instanceID && status.state != .down {
-            guard status.hostname?.lowercased() == wanted else { continue }
+            let statusHostname = status.hostname?.lowercased()
+            guard statusHostname == wanted else { continue }
             let holder = instances.first { $0.instanceID == status.instanceID }
             guard holder?.share?.active == true else { continue }
             return .hostnameInUse(hostname: hostname, by: status.slug, providerAssigned: holder?.share?.hostname == nil)
         }
         for other in instances where other.instanceID != instanceID {
-            guard let share = other.share, share.active, share.hostname?.lowercased() == wanted else { continue }
+            guard let share = other.share, share.active else { continue }
+            let shareHostname = share.hostname?.lowercased()
+            guard shareHostname == wanted else { continue }
             let ended = statuses.contains { status in
                 status.instanceID == other.instanceID && status.state == .down && status.requestID == share.requestID
             }

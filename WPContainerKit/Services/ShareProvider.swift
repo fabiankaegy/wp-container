@@ -204,10 +204,10 @@ public struct NgrokProvider: ShareProvider {
 
     public func publicURL(fromOutputLine line: String) -> String? {
         guard let data = line.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              object["msg"] as? String == "started tunnel",
-              let url = object["url"] as? String
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
+        let message = object["msg"] as? String
+        guard message == "started tunnel", let url = object["url"] as? String else { return nil }
         return ShareProviders.validatedOrigin(url, schemes: ["https"])
     }
 
@@ -261,14 +261,17 @@ public struct CloudflaredProvider: ShareProvider {
     }
 
     public func publicURL(fromOutputLine line: String) -> String? {
-        guard let url = ShareProviders.firstURL(in: line, schemes: ["https"], hostSuffix: ".trycloudflare.com", allowPort: false),
-              URL(string: url)?.host != "api.trycloudflare.com"
+        guard let url = ShareProviders.firstURL(in: line, schemes: ["https"], hostSuffix: ".trycloudflare.com", allowPort: false)
         else { return nil }
+        let host = URL(string: url)?.host
+        guard host != "api.trycloudflare.com" else { return nil }
         return url
     }
 
     public func isReady(outputLine line: String) -> Bool {
-        line.contains("Registered tunnel connection") || publicURL(fromOutputLine: line) != nil
+        if line.contains("Registered tunnel connection") { return true }
+        let url = publicURL(fromOutputLine: line)
+        return url != nil
     }
 
     private func executable() throws -> URL {

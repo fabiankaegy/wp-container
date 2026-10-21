@@ -60,6 +60,9 @@ final class LaunchedShareProcess: ShareProcessHandle, @unchecked Sendable {
 
     var pid: Int32 { process.pid }
 
+    /// Whether the exit has been recorded, whether or not a handler has received it.
+    var hasRecordedExit: Bool { lock.withLock { exitResult != nil } }
+
     var onExit: (@Sendable (Int32, [String]) -> Void)? {
         get { lock.withLock { handler } }
         set {
@@ -130,7 +133,8 @@ final class SharePIDFile: @unchecked Sendable {
 
     func forget(_ pid: Int32) {
         lock.withLock {
-            guard records.removeValue(forKey: pid) != nil else { return }
+            let removed = records.removeValue(forKey: pid)
+            guard removed != nil else { return }
             writeLocked()
         }
     }
@@ -811,7 +815,9 @@ public actor ShareCoordinator {
         }
         targets.forEach { $0.signal(SIGTERM) }
         let deadline = Date().addingTimeInterval(3)
-        while targets.contains(where: \.isAlive) && Date() < deadline {
+        while targets.contains(where: \.isAlive) {
+            let now = Date()
+            if now >= deadline { break }
             await ProcessIdentity.pause(.milliseconds(100))
         }
         targets.forEach { $0.signal(SIGKILL) }

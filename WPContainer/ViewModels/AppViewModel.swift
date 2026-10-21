@@ -908,7 +908,8 @@ public final class AppViewModel {
 
     /// Reads the published share statuses and notifies when a share that was live goes down.
     private func refreshShares() {
-        let published = ProxyControl.current() != nil ? ProxyControl.shares() : []
+        let proxy = ProxyControl.current()
+        let published = proxy == nil ? [] : ProxyControl.shares()
         var next: [UUID: ShareStatus] = [:]
         for status in published { next[status.instanceID] = status }
         for (id, status) in next where status.state == .down && shareStatuses[id]?.state == .live {

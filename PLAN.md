@@ -663,8 +663,8 @@ exec my-tunnel-tool --to "$WPC_SHARE_UPSTREAM" ${WPC_SHARE_HOSTNAME:+--host "$WP
 
 ### Lifecycle
 
-- A share ends when it is stopped, when its site or env starts or stops (from any
-  surface, also while no proxy host runs), or when it fails: the provider fails
+- A share ends when it is stopped, when its site or env stops or is started from
+  stopped (from any surface, also while no proxy host runs), or when it fails: the provider fails
   to start or exits, or another share holds its hostname. A failed share is
   reported down with its error until it is requested again, and no proxy host
   reopens it.

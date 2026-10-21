@@ -893,9 +893,8 @@ public actor SiteLifecycle {
     /// Whether a running worktree env is currently borrowing this site's database
     /// container (issue #17).
     ///
-    /// Read from live container LABELS rather than the store, because the
-    /// lifecycle has no store access — and labels are the reconciliation ground
-    /// truth anyway.
+    /// Read from live container LABELS rather than the store, because labels are
+    /// the reconciliation ground truth for which containers are running.
     ///
     /// FAILS CLOSED: if `container list` errors we report a dependent, because
     /// mistaking "I can't tell" for "nothing needs it" takes a live env's database

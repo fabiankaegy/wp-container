@@ -1664,7 +1664,8 @@ public final class HTTPSProxy: @unchecked Sendable {
 
     private static func isAuthorizationHeader(_ line: String) -> Bool {
         guard let colon = line.firstIndex(of: ":") else { return false }
-        return line[line.startIndex..<colon].trimmingCharacters(in: .whitespaces).lowercased() == "authorization"
+        let name = line[line.startIndex..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+        return name == "authorization"
     }
 
     /// Whether a header block holds a CR or LF that is not part of a CRLF pair.

@@ -72,6 +72,7 @@ public struct CloudflaredTunnels: Sendable {
             throw ShareError.cloudflaredHostnameChanged(tunnel: tunnelName, recorded: routed, requested: hostname)
         }
 
+        let recordedHostname = recorded?.hostname
         if recorded == nil {
             do {
                 try await run(["tunnel", "create", tunnelName])
@@ -85,7 +86,7 @@ public struct CloudflaredTunnels: Sendable {
             try update { registry in
                 registry.tunnels.append(CloudflareTunnelRecord(instanceID: instanceID, tunnelName: tunnelName, hostname: nil))
             }
-        } else if recorded?.hostname == hostname {
+        } else if recordedHostname == hostname {
             let target = readRegistry().routeTargets[hostname]
             if target == tunnelName { return }
         }
@@ -160,22 +161,18 @@ public struct CloudflaredTunnels: Sendable {
 
     /// The registry, or an empty one when the file is missing or unreadable. A bare array
     /// of tunnel records is read as a registry whose routed hostnames are theirs. A routed
-    /// hostname with no recorded target points at the one tunnel recorded with it; with
-    /// none or several, its target stays unknown.
+    /// hostname with no recorded target keeps an unknown target, so the next `ensure`
+    /// routes it again.
     private func readRegistry() -> Registry {
         guard let data = try? Data(contentsOf: registryFile) else { return Registry() }
         let decoder = JSONDecoder()
-        var registry: Registry
+        let registry: Registry
         if let decoded = try? decoder.decode(Registry.self, from: data) {
             registry = decoded
         } else if let tunnels = try? decoder.decode([CloudflareTunnelRecord].self, from: data) {
             registry = Registry(tunnels: tunnels, routedHostnames: tunnels.compactMap(\.hostname))
         } else {
             return Registry()
-        }
-        for hostname in registry.routedHostnames where registry.routeTargets[hostname] == nil {
-            let holders = registry.tunnels.filter { $0.hostname == hostname }
-            if holders.count == 1 { registry.routeTargets[hostname] = holders[0].tunnelName }
         }
         return registry
     }
