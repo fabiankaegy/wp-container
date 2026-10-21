@@ -262,7 +262,7 @@ struct ProxyServe: AsyncParsableCommand {
                     }
                     if alreadyStopping {
                         ProxyControl.releaseIfOwned()
-                        Darwin.exit(1)
+                        _exit(1)
                     }
                     DispatchQueue.global().async {
                         proxy.stop()

@@ -123,7 +123,7 @@ final class ShareGateTests: XCTestCase {
     func testPathExceptionRefusesRestRouteOverride() throws {
         XCTAssertEqual(try decide("GET /wp-json/wc/?rest_route=/wp/v2/posts HTTP/1.1", allow: ["/wp-json/wc/"]), .challenge)
         XCTAssertEqual(try decide("GET /wp-json/wc/?a=1&rest%5Froute=/wp/v2/posts HTTP/1.1", allow: ["/wp-json/wc/"]), .challenge)
-        for key in ["rest.route", "rest%20route", "rest+route", "rest%2Eroute", "%20rest_route", "rest[route", "rest_route[x]", "rest_route%5Bx%5D"] {
+        for key in ["rest.route", "rest%20route", "rest+route", "rest%2Eroute", "%20rest_route", "rest[route", "rest_route[x]", "rest_route%5Bx%5D", "rest_route%00", "rest_route%00x", "rest.route%00junk", "rest_route%00[x]"] {
             XCTAssertEqual(try decide("GET /wp-json/wc/?\(key)=/wp/v2/posts HTTP/1.1", allow: ["/wp-json/wc/"]), .challenge, key)
         }
         XCTAssertEqual(try decide("GET /wp-json/wc/?rest_route HTTP/1.1", allow: ["/wp-json/wc/"]), .challenge)

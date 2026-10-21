@@ -168,11 +168,12 @@ public enum ShareGate {
         }
     }
 
-    /// The `$_GET` name PHP derives from a raw query key: percent-decoded, leading spaces dropped,
+    /// The `$_GET` name PHP derives from a raw query key: percent-decoded and cut at the first NUL byte, leading spaces dropped,
     /// array suffix removed, and spaces, dots and an unmatched `[` turned into `_`.
     private static func phpVariableName(_ rawKey: String) -> String {
         let plusDecoded = rawKey.replacingOccurrences(of: "+", with: " ")
-        let decoded = plusDecoded.removingPercentEncoding ?? plusDecoded
+        let percentDecoded = plusDecoded.removingPercentEncoding ?? plusDecoded
+        let decoded = percentDecoded.split(separator: "\0", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
         let trimmed = String(decoded.drop { $0 == " " })
         func normalise(_ text: Substring) -> String {
             String(text.map { $0 == " " || $0 == "." ? "_" : $0 })
