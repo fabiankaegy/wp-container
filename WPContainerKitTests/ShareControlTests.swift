@@ -178,9 +178,10 @@ final class ShareControlTests: XCTestCase {
     }
 
     func testWaitReturnsLiveStatus() async throws {
-        let id = UUID()
-        let requestID = UUID()
+        let site = try await seed("my-site")
         let control = makeControl()
+        let id = site.id
+        let requestID = try await control.request(instanceID: id, ShareRequest()).requestID
         let file = statusFile!
         let writer = Task {
             try await Task.sleep(for: .milliseconds(300))
@@ -194,12 +195,14 @@ final class ShareControlTests: XCTestCase {
     }
 
     func testWaitIgnoresStatusOfAnEarlierRequest() async throws {
-        let id = UUID()
+        let site = try await seed("my-site")
         let control = makeControl()
+        let id = site.id
+        let requestID = try await control.request(instanceID: id, ShareRequest()).requestID
         ProxyControl.writeShares([ShareStatus(instanceID: id, slug: "my-site", state: .down, provider: "ngrok",
                                               error: "old", requestID: UUID())], file: statusFile)
         do {
-            _ = try await control.waitForStatus(instanceID: id, requestID: UUID(), timeout: .milliseconds(700))
+            _ = try await control.waitForStatus(instanceID: id, requestID: requestID, timeout: .milliseconds(700))
             XCTFail("expected timedOut")
         } catch ShareError.timedOut {
         }
@@ -252,8 +255,11 @@ final class ShareControlTests: XCTestCase {
     }
 
     func testWaitTimesOut() async throws {
+        let site = try await seed("my-site")
+        let control = makeControl()
+        let requestID = try await control.request(instanceID: site.id, ShareRequest()).requestID
         do {
-            _ = try await makeControl().waitForStatus(instanceID: UUID(), requestID: nil, timeout: .milliseconds(600))
+            _ = try await control.waitForStatus(instanceID: site.id, requestID: requestID, timeout: .milliseconds(600))
             XCTFail("expected timedOut")
         } catch ShareError.timedOut {
         }
@@ -389,6 +395,55 @@ final class ShareControlTests: XCTestCase {
                                                      timeout: .seconds(2))
         XCTAssertEqual(status.state, .down)
         XCTAssertEqual(status.error, "The site isn't running.")
+    }
+
+    func testWaitThrowsInstanceNotFoundWhenTheInstanceIsDeleted() async throws {
+        let site = try await seed("my-site")
+        let control = makeControl()
+        let settings = try await control.request(instanceID: site.id, ShareRequest())
+        try await persistence.mutate { env in env.sites.removeAll() }
+        do {
+            _ = try await control.waitForStatus(instanceID: site.id, requestID: settings.requestID, timeout: .seconds(5))
+            XCTFail("expected instanceNotFound")
+        } catch ShareError.instanceNotFound(let id) {
+            XCTAssertEqual(id, site.id)
+        }
+    }
+
+    func testWaitThrowsCancelledWhenTheShareIsRemoved() async throws {
+        let site = try await seed("my-site")
+        let control = makeControl()
+        let settings = try await control.request(instanceID: site.id, ShareRequest())
+        try await persistence.mutate { env in env.sites[0].share = nil }
+        do {
+            _ = try await control.waitForStatus(instanceID: site.id, requestID: settings.requestID, timeout: .seconds(5))
+            XCTFail("expected cancelled")
+        } catch ShareError.cancelled {
+        }
+    }
+
+    func testShareThatEndedDownDoesNotHoldItsHostname() async throws {
+        let requestID = UUID()
+        let other = try await seed("other-site", share: ShareSettings(hostname: "share.example.com", username: "share",
+                                                                      password: "x", active: true, requestID: requestID))
+        let site = try await seed("my-site", port: 8882)
+        ProxyControl.writeShares([ShareStatus(instanceID: other.id, slug: "other-site", state: .down, provider: "ngrok",
+                                              hostname: "share.example.com", error: "The share provider exited.",
+                                              requestID: requestID)], file: statusFile)
+
+        let saved = try await makeControl().request(instanceID: site.id, ShareRequest(hostname: .some("share.example.com")))
+
+        XCTAssertEqual(saved.hostname, "share.example.com")
+        XCTAssertTrue(saved.active)
+    }
+
+    func testEndedShareIsListedDownWithItsError() {
+        let down = ShareStatus(instanceID: UUID(), slug: "my-site", state: .down, provider: "ngrok",
+                               error: "The share provider exited.")
+        let listed = ShareControl.listedState(active: false, status: down, proxyRunning: true)
+        XCTAssertEqual(listed.state, "down")
+        XCTAssertEqual(listed.error, "The share provider exited.")
+        XCTAssertEqual(ShareControl.listedState(active: false, status: down, proxyRunning: false).state, "inactive")
     }
 
     func testStoreIsReadableOnlyByTheUser() async throws {

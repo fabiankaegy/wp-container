@@ -71,9 +71,9 @@ public struct ShareControl: Sendable {
     }
 
     /// Polls until the instance publishes a `live` or `down` status for `requestID`, the id
-    /// `request` returned in its settings. Statuses of earlier requests are ignored. Throws
-    /// `ShareError.cancelled` when the share is stopped while waiting and no status for
-    /// `requestID` was published.
+    /// `request` returned in its settings. Statuses of earlier requests are ignored. When no
+    /// status for `requestID` was published, throws `ShareError.instanceNotFound` once the
+    /// instance is deleted and `ShareError.cancelled` once its share is stopped or removed.
     public func waitForStatus(instanceID: UUID, requestID: UUID?,
                               timeout: Duration = .seconds(120)) async throws -> ShareStatus {
         let clock = ContinuousClock()
@@ -88,9 +88,13 @@ public struct ShareControl: Sendable {
             if let status = answer() { return status }
             guard proxyRunning() else { throw ShareError.proxyNotRunning }
             let envelope = try await persistence.load()
-            let stillActive = Self.instances(in: envelope).first { $0.instanceID == instanceID }?.share?.active
-            if stillActive == false {
-                // The proxy host publishes a refusal before it clears the share.
+            let instance = Self.instances(in: envelope).first { $0.instanceID == instanceID }
+            // The proxy host publishes a `down` status before it clears the share.
+            guard let instance else {
+                if let status = answer() { return status }
+                throw ShareError.instanceNotFound(instanceID)
+            }
+            guard let share = instance.share, share.active else {
                 if let status = answer() { return status }
                 throw ShareError.cancelled
             }
@@ -129,9 +133,14 @@ public struct ShareControl: Sendable {
 
     /// The state and error a listing shows for one share: `inactive`, the published state,
     /// `starting` until the proxy host publishes one, or `down` while no proxy host runs.
+    /// A share that ended on a failure is inactive in the store and listed `down` while
+    /// its status stays published.
     public static func listedState(active: Bool, status: ShareStatus?,
                                    proxyRunning: Bool) -> (state: String, error: String?) {
-        guard active else { return ("inactive", status?.error) }
+        guard active else {
+            let ended = proxyRunning && status?.state == .down
+            return (ended ? ShareStatus.State.down.rawValue : "inactive", status?.error)
+        }
         guard proxyRunning else { return (ShareStatus.State.down.rawValue, noProxyMessage) }
         guard let status else { return (ShareStatus.State.starting.rawValue, nil) }
         return (status.state.rawValue, status.error)
@@ -212,7 +221,8 @@ public struct ShareControl: Sendable {
     }
 
     /// The error for another active share that holds `hostname`, from its published status or
-    /// its configured hostname.
+    /// its configured hostname. A share that ended `down` holds nothing, also while the
+    /// proxy host has not cleared it in the store yet.
     private static func hostnameClash(_ hostname: String, instanceID: UUID, among instances: [any RunnableInstance],
                                       statuses: [ShareStatus]) -> ShareError? {
         let wanted = hostname.lowercased()
@@ -224,6 +234,10 @@ public struct ShareControl: Sendable {
         }
         for other in instances where other.instanceID != instanceID {
             guard let share = other.share, share.active, share.hostname?.lowercased() == wanted else { continue }
+            let ended = statuses.contains { status in
+                status.instanceID == other.instanceID && status.state == .down && status.requestID == share.requestID
+            }
+            if ended { continue }
             return .hostnameInUse(hostname: hostname, by: other.containerSlug, providerAssigned: false)
         }
         return nil

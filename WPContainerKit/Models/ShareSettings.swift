@@ -172,6 +172,8 @@ public enum ShareError: Error, Sendable, CustomStringConvertible {
     case instanceNotFound(UUID)
     /// The instance stopped before its share could start.
     case instanceNotRunning
+    /// The proxy has no route to the instance, so a share listener has nothing to forward to.
+    case noProxyRoute
     /// The running proxy host was built without sharing support.
     case proxyTooOld
 
@@ -219,6 +221,8 @@ public enum ShareError: Error, Sendable, CustomStringConvertible {
             return "No site or environment with id \(id.uuidString) exists."
         case .instanceNotRunning:
             return "The site isn't running."
+        case .noProxyRoute:
+            return "The proxy has no route for this site yet."
         case .proxyTooOld:
             return "The running WP Container proxy doesn't support sharing; update or quit the app, or run `wp-container proxy serve` from this build."
         case .providerStopped(let status, let tail):

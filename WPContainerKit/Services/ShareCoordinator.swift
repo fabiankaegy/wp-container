@@ -110,9 +110,12 @@ struct SharePIDRecord: Codable, Sendable, Equatable {
 /// the status file. Starting a share runs in a child task, so a slow provider never
 /// holds up the proxy's tick or other shares; the status reads `starting` meanwhile.
 ///
-/// Reconcile, `stopAll` and `reapOrphans` run one at a time in call order. A failed
-/// share stays `down` and is retried only when its settings change or it is toggled
-/// off and on. The coordinator is the only writer of the Cloudflare tunnel registry.
+/// Reconcile, `stopAll` and `reapOrphans` run one at a time in call order. A share that
+/// fails to start, loses a hostname clash or whose provider exits ends for good: it is
+/// reported `down` and its desired state (with its `--no-auth`) is cleared in the store,
+/// so no later proxy host reopens it. The `down` status stays published with its request
+/// id until the share is requested again or the instance is deleted. The coordinator is
+/// the only writer of the Cloudflare tunnel registry.
 public actor ShareCoordinator {
     /// What a share should look like, derived from the store.
     private struct Desired: Equatable {
@@ -163,9 +166,6 @@ public actor ShareCoordinator {
         var error: String?
         var warnings: [String] = []
         var updatedAt = Date()
-        /// For a refusal that cleared the desired share: the cleared settings. The
-        /// status stays published until the instance's settings differ from these.
-        var refusedSettings: ShareSettings?
     }
 
     /// Public origin given to a share listener until the provider reports its URL.
@@ -191,6 +191,9 @@ public actor ShareCoordinator {
     private var failedCleanups: [CloudflareTunnelRecord] = []
     private var halted = false
     private var hasReaped = false
+    /// Consecutive container listings that omitted an instance with a share starting
+    /// or live.
+    private var missedListings: [UUID: Int] = [:]
 
     public init(
         host: any ShareListenerHost,
@@ -284,54 +287,68 @@ public actor ShareCoordinator {
         let instances: [any RunnableInstance] = envelope.sites.map { $0 } + envelope.envs.map { $0 }
         cleanUpTunnels(instances: instances)
 
-        // Settings as read when deciding to clear them; a newer request is left alone.
-        var cleared: [UUID: ShareSettings] = [:]
+        // The request each ended share answered; a newer request is left alone.
+        var ended: [UUID: UUID?] = [:]
         for instance in instances {
             let id = instance.instanceID
             guard let share = instance.share, share.active else {
+                missedListings[id] = nil
                 await dropInactive(id, settings: instance.share)
                 continue
             }
             let desired = Self.desired(for: instance, share: share, envelope: envelope)
             guard running.contains(instance.containerSlug) else {
+                // One listing can omit an instance that still runs, so a share starting
+                // or live ends only after two listings in a row miss its instance.
+                let misses = (missedListings[id] ?? 0) + 1
+                let phase = runtimes[id]?.phase
+                if misses < 2 && (phase == .live || phase == .starting) {
+                    missedListings[id] = misses
+                    continue
+                }
+                missedListings[id] = nil
                 // A request this coordinator has not answered yet gets a `down` status, so
                 // the client waiting on it learns why; an answered share just ends.
-                var answered = false
-                if let runtime = runtimes[id], runtime.desired.requestID == share.requestID {
-                    answered = runtime.phase == .live || (runtime.phase == .down && runtime.refusedSettings == nil)
-                }
-                if answered {
-                    cleared[id] = share
+                if let runtime = runtimes[id], runtime.phase == .live, runtime.desired.requestID == share.requestID {
+                    ended[id] = share.requestID
                     await tearDown(id)
                 } else if await refuse(instance, desired: desired, share: share, error: .instanceNotRunning) {
-                    cleared[id] = share
+                    ended[id] = share.requestID
                 }
                 continue
             }
+            missedListings[id] = nil
             if instance.networkType.isSubdomain {
                 if await refuse(instance, desired: desired, share: share, error: .subdomainMultisite) {
-                    cleared[id] = share
+                    ended[id] = share.requestID
                 }
                 continue
             }
-            await reconcileActive(instance, desired: desired, routes: routes)
+            if await reconcileActive(instance, desired: desired, routes: routes) {
+                ended[id] = share.requestID
+            }
         }
 
         let known = Set(instances.map(\.instanceID))
         for id in Array(runtimes.keys) where !known.contains(id) {
             await tearDown(id)
         }
+        for id in Array(missedListings.keys) where !known.contains(id) {
+            missedListings[id] = nil
+        }
         // Published first, so a client that sees its share cleared also finds the reason.
         publish()
-        if !cleared.isEmpty { await clearDesired(cleared) }
+        if !ended.isEmpty { await clearDesired(ended) }
     }
 
-    private func reconcileActive(_ instance: any RunnableInstance, desired: Desired, routes: [String: HTTPSProxy.Route]) async {
+    /// Returns true when the share has ended and its desired state should be cleared.
+    private func reconcileActive(_ instance: any RunnableInstance, desired: Desired,
+                                 routes: [String: HTTPSProxy.Route]) async -> Bool {
         let id = instance.instanceID
         if let current = runtimes[id] {
             switch current.phase {
             case .stopping:
-                return
+                return false
             case .starting:
                 if current.desired.launchKey != desired.launchKey {
                     await tearDown(id)
@@ -339,20 +356,22 @@ public actor ShareCoordinator {
                     runtimes[id]?.desired = desired
                     runtimes[id]?.instance = instance
                 }
-                return
+                return false
             case .live:
                 let listenerOpen = host?.isShareListenerOpen(instanceID: id) ?? false
                 if current.desired.launchKey == desired.launchKey && listenerOpen {
                     if current.desired != desired { applyGateChange(instance, desired: desired) }
-                    return
+                    return false
                 }
                 await tearDown(id)
             case .down:
-                if current.refusedSettings == nil && current.desired == desired { return }
+                // An ended share whose store entry is still active (its clear failed or
+                // has not landed yet) stays down until a new request arrives.
+                if current.desired.requestID == desired.requestID { return true }
                 await tearDown(id)
             }
         }
-        start(instance, desired: desired, routes: routes)
+        return start(instance, desired: desired, routes: routes)
     }
 
     /// Settings that only affect the gate or the PHP origin map are applied to the live
@@ -372,28 +391,33 @@ public actor ShareCoordinator {
         runtimes[id] = runtime
     }
 
-    /// Records a new `starting` share and launches it in a child task. An instance the
-    /// proxy has no route for yet is left for a later tick.
-    private func start(_ instance: any RunnableInstance, desired: Desired, routes: [String: HTTPSProxy.Route]) {
+    /// Records a new `starting` share and launches it in a child task. Returns true when
+    /// the share ended at once: no proxy route, an unknown provider, or a hostname clash.
+    private func start(_ instance: any RunnableInstance, desired: Desired, routes: [String: HTTPSProxy.Route]) -> Bool {
         let id = instance.instanceID
-        guard runtimes[id] == nil, let route = HTTPSProxy.route(for: instance, in: routes) else { return }
+        guard runtimes[id] == nil else { return false }
         // A share being torn down still holds its hostname until it is released.
         if let hostname = desired.hostname,
            runtimes.contains(where: { $0.key != id && $0.value.phase == .stopping && $0.value.hostname == hostname }) {
-            return
+            return false
         }
         nextAttempt += 1
         let attempt = nextAttempt
         var runtime = Runtime(attempt: attempt, instance: instance, desired: desired, phase: .starting,
                               hostname: desired.hostname)
 
+        guard let route = HTTPSProxy.route(for: instance, in: routes) else {
+            fail(&runtime, ShareError.noProxyRoute)
+            runtimes[id] = runtime
+            return true
+        }
         let provider: any ShareProvider
         do {
             provider = try providers(desired.provider)
         } catch {
             fail(&runtime, error)
             runtimes[id] = runtime
-            return
+            return true
         }
         runtime.temporary = desired.hostname == nil && provider.randomURLsAreTemporary
         if provider.name == "cloudflared", desired.hostname != nil {
@@ -403,10 +427,11 @@ public actor ShareCoordinator {
             fail(&runtime, ShareError.hostnameInUse(hostname: hostname, by: holder.desired.slug,
                                                     providerAssigned: holder.desired.hostname == nil))
             runtimes[id] = runtime
-            return
+            return true
         }
         runtime.task = Task { await self.performStart(id: id, attempt: attempt, instance: instance, provider: provider, route: route) }
         runtimes[id] = runtime
+        return false
     }
 
     /// Preflight, Cloudflare tunnel, listener, provider launch, clash check, then live.
@@ -485,11 +510,13 @@ public actor ShareCoordinator {
             guard var runtime = runtimes[id], runtime.attempt == attempt else { return }
             if runtime.phase == .stopping {
                 runtimes.removeValue(forKey: id)
-            } else {
-                fail(&runtime, error)
-                runtimes[id] = runtime
+                publish()
+                return
             }
+            fail(&runtime, error)
+            runtimes[id] = runtime
             publish()
+            await clearDesired([id: runtime.desired.requestID])
         }
     }
 
@@ -503,8 +530,8 @@ public actor ShareCoordinator {
     }
 
     /// A provider exit after the share went live: the share is reported down with the
-    /// provider's last output and left for the user to stop or retry.
-    private func providerExited(id: UUID, attempt: Int, status: Int32, stderrTail: [String]) {
+    /// provider's last output and ends; the user retries it with a new request.
+    private func providerExited(id: UUID, attempt: Int, status: Int32, stderrTail: [String]) async {
         guard var runtime = runtimes[id], runtime.attempt == attempt, runtime.phase == .live else { return }
         host?.closeShareListener(instanceID: id)
         SharePHPService.deactivate(for: runtime.instance)
@@ -512,13 +539,14 @@ public actor ShareCoordinator {
         fail(&runtime, ShareError.providerStopped(status: status, stderrTail: stderrTail))
         runtimes[id] = runtime
         publish()
+        await clearDesired([id: runtime.desired.requestID])
     }
 
-    /// Removes a share whose desired state is inactive. A refusal stays published while
-    /// the settings it cleared are unchanged.
+    /// Removes a share whose desired state is inactive. A share that ended stays
+    /// published as `down` while the store still holds the request it answered.
     private func dropInactive(_ id: UUID, settings: ShareSettings?) async {
         guard let runtime = runtimes[id] else { return }
-        if let refused = runtime.refusedSettings, refused == settings { return }
+        if runtime.phase == .down, let settings, settings.requestID == runtime.desired.requestID { return }
         await tearDown(id)
     }
 
@@ -528,12 +556,9 @@ public actor ShareCoordinator {
     /// no entry replaces one whose resources are still held.
     private func refuse(_ instance: any RunnableInstance, desired: Desired, share: ShareSettings, error: ShareError) async -> Bool {
         let id = instance.instanceID
-        var cleared = share
-        cleared.active = false
-        cleared.authDisabled = false
         if let existing = runtimes[id] {
             switch existing.phase {
-            case .down where existing.refusedSettings == cleared:
+            case .down where existing.desired.requestID == share.requestID:
                 return true
             case .starting, .stopping:
                 await tearDown(id)
@@ -545,7 +570,6 @@ public actor ShareCoordinator {
         await tearDown(id)
         nextAttempt += 1
         var runtime = Runtime(attempt: nextAttempt, instance: instance, desired: desired, phase: .down)
-        runtime.refusedSettings = cleared
         fail(&runtime, error)
         runtimes[id] = runtime
         return true
@@ -596,18 +620,22 @@ public actor ShareCoordinator {
         }?.value
     }
 
-    /// Turns off the desired share (and its `--no-auth`) of each instance in `snapshots`
-    /// whose stored settings still equal the snapshot taken when the decision was made.
-    private func clearDesired(_ snapshots: [UUID: ShareSettings]) async {
+    /// Turns off the desired share (and its `--no-auth`) of each instance in `requests`
+    /// whose stored share still carries the request id the decision was made for.
+    private func clearDesired(_ requests: [UUID: UUID?]) async {
         do {
             try await persistence.mutateIfChanged { envelope in
                 var changed = false
                 for i in envelope.sites.indices {
-                    guard let snapshot = snapshots[envelope.sites[i].id], envelope.sites[i].share == snapshot else { continue }
+                    guard let request = requests[envelope.sites[i].id] else { continue }
+                    let stored = envelope.sites[i].share?.requestID
+                    guard stored == request else { continue }
                     if Self.clear(&envelope.sites[i].share) { changed = true }
                 }
                 for i in envelope.envs.indices {
-                    guard let snapshot = snapshots[envelope.envs[i].id], envelope.envs[i].share == snapshot else { continue }
+                    guard let request = requests[envelope.envs[i].id] else { continue }
+                    let stored = envelope.envs[i].share?.requestID
+                    guard stored == request else { continue }
                     if Self.clear(&envelope.envs[i].share) { changed = true }
                 }
                 return changed

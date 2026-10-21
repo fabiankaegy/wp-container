@@ -169,6 +169,31 @@ public actor StorePersistence {
         return (updated, envelope)
     }
 
+    // MARK: - Sharing
+
+    /// Turn off the instance's share and its `--no-auth`, keeping its credentials,
+    /// hostname and exceptions. Writes nothing when the share is already inactive or
+    /// the instance is gone.
+    public func endShare(instanceID: UUID) throws {
+        try mutateIfChanged { envelope in
+            if let i = envelope.sites.firstIndex(where: { $0.id == instanceID }) {
+                return Self.endShare(&envelope.sites[i].share)
+            }
+            if let i = envelope.envs.firstIndex(where: { $0.id == instanceID }) {
+                return Self.endShare(&envelope.envs[i].share)
+            }
+            return false
+        }
+    }
+
+    private static func endShare(_ share: inout ShareSettings?) -> Bool {
+        guard var settings = share, settings.active || settings.authDisabled else { return false }
+        settings.active = false
+        settings.authDisabled = false
+        share = settings
+        return true
+    }
+
     // MARK: - Settling (see `EnvSettlement`)
 
     /// Mark an env settled at `now`, which releases its ports to the allocator

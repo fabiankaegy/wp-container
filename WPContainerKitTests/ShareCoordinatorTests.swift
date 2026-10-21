@@ -88,6 +88,9 @@ final class ShareCoordinatorTests: XCTestCase {
         XCTAssertEqual(statuses().first?.state, .live)
 
         try await reconcile(coordinator, running: [])
+        XCTAssertFalse(launcher.handles[0].terminated)
+        XCTAssertEqual(statuses().first?.state, .live)
+        try await reconcile(coordinator, running: [])
 
         XCTAssertTrue(launcher.handles[0].terminated)
         XCTAssertTrue(host.closed.contains(site.id))
@@ -140,7 +143,11 @@ final class ShareCoordinatorTests: XCTestCase {
     }
 
     func testProviderExitMarksDownWithoutRestart() async throws {
-        let site = makeSite("my-site", share: activeShare(provider: "fixture"))
+        let request = UUID()
+        var share = activeShare(provider: "fixture")
+        share.authDisabled = true
+        share.requestID = request
+        let site = makeSite("my-site", share: share)
         try await save([site])
         let coordinator = makeCoordinator()
         try await reconcile(coordinator, running: ["my-site"])
@@ -149,21 +156,117 @@ final class ShareCoordinatorTests: XCTestCase {
         let down = try await waitForStatus { $0.first?.state == .down }
 
         XCTAssertTrue(try XCTUnwrap(down.first?.error).contains("err"))
+        XCTAssertEqual(down.first?.requestID, request)
         XCTAssertTrue(host.closed.contains(site.id))
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: site.phpConfFolder.appendingPathComponent(SharePHPService.originFileName).path))
-        let storedActive = try await persistence.load().sites.first?.share?.active
-        XCTAssertEqual(storedActive, true)
+        let stored = try await waitForStoredShare(site.id) { !$0.active }
+        XCTAssertFalse(stored.authDisabled)
+        XCTAssertEqual(stored.requestID, request)
 
+        try await setShare(site.id) { $0.allow = [try! ShareException(parsing: "?example-callback")] }
         try await reconcile(coordinator, running: ["my-site"])
         try await reconcile(coordinator, running: ["my-site"])
         XCTAssertEqual(launcher.launches.count, 1)
         XCTAssertEqual(statuses().first?.state, .down)
+        XCTAssertEqual(statuses().first?.requestID, request)
 
-        try await setShare(site.id) { $0.allow = [try! ShareException(parsing: "?example-callback")] }
+        try await setShare(site.id) {
+            $0.active = true
+            $0.requestID = UUID()
+        }
         try await reconcile(coordinator, running: ["my-site"])
         XCTAssertEqual(launcher.launches.count, 2)
         XCTAssertEqual(statuses().first?.state, .live)
+    }
+
+    func testProviderExitIsNotReopenedByTheNextHost() async throws {
+        var share = activeShare(provider: "fixture")
+        share.authDisabled = true
+        let site = makeSite("my-site", share: share)
+        try await save([site])
+        let first = makeCoordinator()
+        try await reconcile(first, running: ["my-site"])
+        launcher.handles[0].exit(status: 1, stderrTail: ["err"])
+        _ = try await waitForStoredShare(site.id) { !$0.active }
+
+        launcher = FakeShareLauncher()
+        try await reconcile(makeCoordinator(), running: ["my-site"])
+
+        XCTAssertEqual(launcher.launches.count, 0)
+        let stored = try await persistence.load().sites.first?.share
+        XCTAssertEqual(stored?.active, false)
+        XCTAssertEqual(stored?.authDisabled, false)
+    }
+
+    func testFailedStartEndsTheShareAndIsNotReopenedByTheNextHost() async throws {
+        let request = UUID()
+        var share = activeShare(provider: "broken")
+        share.authDisabled = true
+        share.requestID = request
+        let site = makeSite("my-site", share: share)
+        try await save([site])
+        let coordinator = makeCoordinator()
+
+        try await reconcile(coordinator, running: ["my-site"])
+
+        let stored = try await persistence.load().sites.first?.share
+        XCTAssertEqual(stored?.active, false)
+        XCTAssertEqual(stored?.authDisabled, false)
+        try await reconcile(coordinator, running: ["my-site"])
+        XCTAssertEqual(statuses().first?.state, .down)
+        XCTAssertEqual(statuses().first?.requestID, request)
+
+        try await setShare(site.id) { $0.provider = "fixture" }
+        try await reconcile(makeCoordinator(), running: ["my-site"])
+        XCTAssertEqual(launcher.launches.count, 0)
+    }
+
+    func testClashLoserEndsAndDoesNotWinTheHostnameOnTheNextHost() async throws {
+        let request = UUID()
+        var loserShare = activeShare(provider: "fixture", hostname: "share.example.com")
+        loserShare.authDisabled = true
+        loserShare.requestID = request
+        let first = makeSite("site-one", port: 8881, share: activeShare(provider: "fixture", hostname: "share.example.com"))
+        let second = makeSite("site-two", port: 8882, share: loserShare)
+        launcher.urls = ["site-one": "https://share.example.com", "site-two": "https://share.example.com"]
+        try await save([first, second])
+        let coordinator = makeCoordinator()
+        try await reconcile(coordinator, running: ["site-one", "site-two"])
+
+        let loser = try XCTUnwrap(statuses().first { $0.slug == "site-two" })
+        XCTAssertEqual(loser.state, .down)
+        XCTAssertEqual(loser.requestID, request)
+        let stored = try await persistence.load().sites.first { $0.id == second.id }?.share
+        XCTAssertEqual(stored?.active, false)
+        XCTAssertEqual(stored?.authDisabled, false)
+
+        try await setShare(first.id) { $0.active = false }
+        launcher = FakeShareLauncher()
+        launcher.urls = ["site-one": "https://share.example.com", "site-two": "https://share.example.com"]
+        try await reconcile(makeCoordinator(), running: ["site-one", "site-two"])
+        XCTAssertEqual(launcher.launches.count, 0)
+    }
+
+    func testActiveShareWithoutAProxyRouteIsReportedDown() async throws {
+        let request = UUID()
+        var share = activeShare(provider: "fixture")
+        share.requestID = request
+        let site = makeSite("my-site", share: share)
+        try await save([site])
+        let coordinator = makeCoordinator()
+
+        let envelope = try await persistence.load()
+        await coordinator.reconcile(envelope: envelope, routes: [:], running: ["my-site"])
+        await coordinator.waitUntilIdle()
+
+        let status = try XCTUnwrap(statuses().first)
+        XCTAssertEqual(status.state, .down)
+        XCTAssertEqual(status.error, "The proxy has no route for this site yet.")
+        XCTAssertEqual(status.requestID, request)
+        XCTAssertEqual(launcher.launches.count, 0)
+        let stored = try await persistence.load().sites.first?.share
+        XCTAssertEqual(stored?.active, false)
     }
 
     func testFixedHostnameClashIsRefused() async throws {
@@ -199,7 +302,10 @@ final class ShareCoordinatorTests: XCTestCase {
         try await reconcile(coordinator, running: ["site-one", "site-two"])
         XCTAssertEqual(statuses().first { $0.slug == "site-two" }?.state, .down)
 
-        try await setShare(second.id) { $0.requestID = UUID() }
+        try await setShare(second.id) {
+            $0.active = true
+            $0.requestID = UUID()
+        }
         try await reconcile(coordinator, running: ["site-one", "site-two"])
 
         XCTAssertEqual(statuses().first { $0.slug == "site-two" }?.state, .live)
@@ -841,6 +947,19 @@ final class ShareCoordinatorTests: XCTestCase {
         }
         XCTFail("status condition not met: \(statuses())")
         return statuses()
+    }
+
+    private func waitForStoredShare(_ id: UUID, _ condition: (ShareSettings) -> Bool) async throws -> ShareSettings {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if let share = try await persistence.load().sites.first(where: { $0.id == id })?.share, condition(share) {
+                return share
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("stored share condition not met")
+        let share = try await persistence.load().sites.first { $0.id == id }?.share
+        return try XCTUnwrap(share)
     }
 
     private func waitUntil(_ condition: () -> Bool) async throws {

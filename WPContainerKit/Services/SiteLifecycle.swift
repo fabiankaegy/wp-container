@@ -56,6 +56,8 @@ public actor SiteLifecycle {
     }
 
     private let cli: ContainerCLI
+    /// Where a start or stop ends the instance's share.
+    private let persistence: StorePersistence
     private let xdebug: XdebugImageService
     /// Shared across every caller in the process — parent site, every env,
     /// `WorktreeEnvService.create` — so image-pull dedupe spans the whole
@@ -106,8 +108,9 @@ public actor SiteLifecycle {
     public nonisolated let events: AsyncStream<StatusEvent>
     private let continuation: AsyncStream<StatusEvent>.Continuation
 
-    public init(cli: ContainerCLI) {
+    public init(cli: ContainerCLI, persistence: StorePersistence = StorePersistence()) {
         self.cli = cli
+        self.persistence = persistence
         self.xdebug = XdebugImageService(cli: cli)
         self.images = ImagePullService(cli: cli)
         var cont: AsyncStream<StatusEvent>.Continuation!
@@ -310,6 +313,7 @@ public actor SiteLifecycle {
             // surfacing that same error.
             let existingWP = try? await cli.inspect(inst.wpContainerName).first
             if existingWP?.isRunning != true {
+                await endShare(of: inst)
                 if existingWP != nil {
                     _ = try? await cli.run(SiteRecipe.deleteArgs(inst.wpContainerName))
                 }
@@ -702,6 +706,7 @@ public actor SiteLifecycle {
 
     private func stopCore(_ inst: any RunnableInstance, verify: Bool = true) async {
         emit(inst.instanceID, .stopping)
+        await endShare(of: inst)
         // Containers run with --rm, so `stop` SHOULD make them vanish — but
         // issue #16 caught one reported `stopped` by `container ls` whose shim
         // and `com.apple.Virtualization.VirtualMachine` xpc process were still
@@ -780,6 +785,20 @@ public actor SiteLifecycle {
         // (addon toggles, `site_restart`) genuinely waits for teardown instead of
         // racing a half-dead VM for the container name.
         emit(inst.instanceID, .stopped)
+    }
+
+    /// A share lives only as long as the run of its instance it was opened on, so every
+    /// start of a stopped instance and every stop turns it off in the store. A host that
+    /// was not running when the instance stopped (app quit, reboot, a CLI stop) then
+    /// never reopens it. An explicit start of an instance that is already running keeps
+    /// its share. A failed write is logged; the proxy host also ends shares of instances
+    /// it sees stopped.
+    private func endShare(of inst: any RunnableInstance) async {
+        do {
+            try await persistence.endShare(instanceID: inst.instanceID)
+        } catch {
+            Self.log.error("share: could not end the share of \(inst.containerSlug, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Confirm the named containers are really gone, escalating anything that
