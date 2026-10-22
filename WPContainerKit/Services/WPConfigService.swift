@@ -75,12 +75,17 @@ public enum WPConfigService {
         return out
     }
 
+    /// The table prefix: the last string literal assigned to `$table_prefix`,
+    /// which covers both `'wp_'` and the official image's
+    /// `getenv_docker('WORDPRESS_TABLE_PREFIX', 'wp_')`. nil when absent or not
+    /// `[A-Za-z0-9_]+`, so callers can inline a non-nil prefix into SQL.
     static func parseTablePrefix(_ text: String) -> String? {
-        let pattern = #"\$table_prefix\s*=\s*['\"]([^'\"]*)['\"]\s*;"#
-        guard let re = try? NSRegularExpression(pattern: pattern) else { return nil }
-        let ns = text as NSString
-        guard let m = re.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)) else { return nil }
-        return ns.substring(with: m.range(at: 1))
+        // Split on any line ending: in Swift "\r\n" is ONE character, so a
+        // CRLF wp-config.php never splits on "\n" alone.
+        guard let line = text.split(whereSeparator: \.isNewline).first(where: { $0.contains("$table_prefix") && $0.contains("=") }),
+              let assignment = line.split(separator: "=", maxSplits: 1).last else { return nil }
+        let literals = assignment.matches(of: #/['"]([A-Za-z0-9_]*)['"]/#).map { String($0.output.1) }
+        return literals.last.flatMap { $0.isEmpty ? nil : $0 }
     }
 
     private static func unquote(_ value: String) -> String {

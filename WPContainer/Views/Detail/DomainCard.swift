@@ -21,14 +21,14 @@ struct DomainCard: View {
                 if showNotRegistered { notRegisteredRow }
                 editor
                 if site.networkType.isSubdomain {
-                    Label("Subdomain multisite on a custom domain needs a hosts entry per subsite; subdirectory mode is recommended for custom domains.",
+                    Label("Subdomain networks need a hosts entry for each subsite. Use subdirectories with a custom domain.",
                           systemImage: "info.circle")
                         .font(.caption2).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Text(HostsHelperClient.isEnabled
-                     ? "Setting a domain edits /etc/hosts (confirm with Touch ID) and re-issues the local certificate."
-                     : "Setting a domain edits /etc/hosts (one admin approval) and re-issues the local certificate. Enable the Touch ID helper in Settings to skip the password.")
+                     ? "Setting a domain edits /etc/hosts, which you confirm with Touch ID."
+                     : "Setting a domain edits /etc/hosts, which needs your admin password. Turn on the Touch ID helper in Settings to skip it.")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -43,22 +43,22 @@ struct DomainCard: View {
     /// Shown when a domain is configured but has no /etc/hosts entry (e.g. the
     /// admin prompt was skipped during creation) — offers a one-click re-trigger.
     private var notRegisteredRow: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Not registered in /etc/hosts").font(.callout.weight(.medium))
-                Text("\(site.customDomain ?? "") won't resolve until it's added to /etc/hosts (one approval — Touch ID supported).")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 8)
-            Button("Register now") {
-                Task {
-                    _ = await vm.registerCustomDomain(site)
-                    registered = vm.isDomainRegistered(site)
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 12) {
+                Label("Not in /etc/hosts", systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout.weight(.medium)).foregroundStyle(.orange)
+                Spacer(minLength: 8)
+                Button("Add to Hosts") {
+                    Task {
+                        _ = await vm.registerCustomDomain(site)
+                        registered = vm.isDomainRegistered(site)
+                    }
                 }
+                .buttonStyle(.borderedProminent).controlSize(.small)
             }
-            .buttonStyle(.borderedProminent).controlSize(.small)
+            Text("\(site.customDomain ?? "") won’t load until it’s added.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -72,7 +72,7 @@ struct DomainCard: View {
 
     private var editor: some View {
         HStack(spacing: 8) {
-            TextField("mysite.local", text: $field)
+            TextField("mysite.test", text: $field)
                 .textFieldStyle(.roundedBorder)
                 .autocorrectionDisabled()
             Button("Set") {

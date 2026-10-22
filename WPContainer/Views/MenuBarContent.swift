@@ -23,7 +23,7 @@ struct MenuBarContent: View {
                 localNetworkWarning
                 Divider()
             }
-            if vm.sites.isEmpty {
+            if vm.activeSites.isEmpty {
                 emptyState
             } else if rowCount <= 9 {
                 // Plain VStack so the popover window sizes to the content.
@@ -48,9 +48,9 @@ struct MenuBarContent: View {
 
     /// Row-ish units used to decide between intrinsic sizing and scrolling.
     private var rowCount: Int {
-        var count = vm.sites.count + runningEnvs.count
+        var count = vm.activeSites.count + runningEnvs.count
         count += vm.store.sortedGroups.filter { group in
-            vm.sites.contains { $0.groupID == group.id }
+            vm.activeSites.contains { $0.groupID == group.id }
         }.count
         return count
     }
@@ -61,12 +61,12 @@ struct MenuBarContent: View {
     private var list: some View {
         VStack(alignment: .leading, spacing: 1) {
             // Ungrouped sites first.
-            ForEach(vm.sites.filter { $0.groupID == nil }) { site in
+            ForEach(vm.activeSites.filter { $0.groupID == nil }) { site in
                 siteBlock(site)
             }
             // Grouped sites, in sidebar order, with tiny headers.
             ForEach(vm.store.sortedGroups) { group in
-                let sites = vm.sites.filter { $0.groupID == group.id }
+                let sites = vm.activeSites.filter { $0.groupID == group.id }
                 if !sites.isEmpty {
                     sectionHeader(group.name)
                     ForEach(sites) { site in
@@ -91,8 +91,8 @@ struct MenuBarContent: View {
         HStack(spacing: 6) {
             Text("WP Container").font(.headline)
             Spacer()
-            let running = vm.sites.filter { $0.status.isRunning }.count
-            Text("\(running)/\(vm.sites.count) running")
+            let running = vm.activeSites.filter { $0.status.isRunning }.count
+            Text("\(running)/\(vm.activeSites.count) running")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
@@ -140,7 +140,7 @@ struct MenuBarContent: View {
     private var emptyState: some View {
         VStack(spacing: 6) {
             Text("No sites yet").font(.callout).foregroundStyle(.secondary)
-            Button("Add a Site…") { vm.presentingAddSite = true; focusMainWindow(select: nil) }
+            Button("Add Site…") { vm.presentingAddSite = true; focusMainWindow(select: nil) }
                 .buttonStyle(.link)
         }
         .frame(maxWidth: .infinity).padding(.vertical, 18)
@@ -148,7 +148,7 @@ struct MenuBarContent: View {
 
     /// Bring the main window forward, optionally selecting a site.
     private func focusMainWindow(select siteID: UUID?) {
-        if let siteID { vm.selection = siteID }
+        if let siteID { vm.openScreen(siteID) }
         NSApplication.shared.activate(ignoringOtherApps: true)
         // Order an existing content window front, or open one if it was closed.
         if let window = NSApplication.shared.windows.first(where: { $0.canBecomeMain && $0.contentView != nil && $0.styleMask.contains(.titled) }) {

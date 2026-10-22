@@ -148,7 +148,7 @@ extension HelpTopic {
                 bullets: [
                     "Files are cloned instantly with an APFS copy-on-write clone — no waiting, no wasted disk.",
                     "The database is cloned from the parent too: a live copy if the parent is running, or a fast on-disk clone if it's stopped.",
-                    "The env gets its own port and its own containers; URLs are rewritten to the new port automatically.",
+                    "The environment gets its own port and WordPress container; by default its database lives on the parent's database server. URLs are rewritten automatically.",
                 ]
             ),
             HelpSection(
@@ -162,8 +162,8 @@ extension HelpTopic {
             ),
             HelpSection(
                 title: "Cleaning up",
-                body: "Delete an environment when you're done. Its containers and cloned files are removed — but the git branch is always kept.",
-                tip: "Deleting an environment never deletes your branch or your work."
+                body: "An environment nobody visits for 3 hours stops to free memory, and the next visit starts it again (new environments get 6 hours first; change it under Idle stop). Settle one to stop it and free its port, or delete it when you're done: its containers and cloned files are removed, but the git branch is always kept.",
+                tip: "Deleting keeps the git branch but removes the worktree checkout unless you choose to keep it, so commit or push first."
             ),
         ]
     )
@@ -342,7 +342,7 @@ extension HelpTopic {
         sections: [
             HelpSection(
                 title: "Exporting",
-                body: "Right-click a site in the sidebar and choose Export Site…. The site starts if it is stopped. Pick what to leave out, choose where to save, and reveal the finished archive in Finder.",
+                body: "Right-click a site in the gallery or list and choose Export Site…. The site starts if it is stopped. Pick what to leave out, choose where to save, and reveal the finished archive in Finder.",
                 bullets: [
                     "`.git`, `node_modules` and similar folders are left out by default; the list is editable and remembered.",
                     "Project folders mounted into the site are copied in as plain folders.",
