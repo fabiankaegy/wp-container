@@ -37,6 +37,7 @@ struct EnvDetailView: View {
                     IdleStopCard(configured: env.idleStopMinutes, isEnv: true, envPort: env.port) { minutes in
                         vm.setIdleStop(env, minutes: minutes)
                     }
+                    ShareCard(instanceID: env.id, share: env.share, networkType: env.networkType)
                     LogsView(env: env)
                     dangerZone
                 }

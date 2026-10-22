@@ -108,6 +108,10 @@ public protocol RunnableInstance: Sendable {
     /// override on `WorktreeEnv` would be invisible to `SiteRecipe`'s and
     /// `SiteLifecycle`'s `any RunnableInstance` call sites.
     var publishesPort: Bool { get }
+    /// Public-sharing settings, or nil when sharing was never configured.
+    var share: ShareSettings? { get }
+    /// The URL the instance advertises locally.
+    var url: URL { get }
 }
 
 public extension RunnableInstance {
@@ -172,4 +176,28 @@ public extension RunnableInstance {
     var loopbackHosts: [String] { ["\(containerSlug).localhost"] }
     /// Default: the container publishes its own host port. `WorktreeEnv` opts out.
     var publishesPort: Bool { true }
+    /// Origins a browser may use to reach the instance locally; a share maps
+    /// them to its public hostname.
+    var shareLocalOrigins: [String] {
+        var origins: [String] = []
+        for host in loopbackHosts {
+            origins.append("http://\(host)")
+            origins.append("https://\(host)")
+        }
+        origins.append("http://127.0.0.1:\(port)")
+        origins.append("https://127.0.0.1:\(port)")
+        return origins
+    }
+    /// The instance URL without a trailing slash.
+    var sharePrimaryOrigin: String {
+        var origin = url.absoluteString
+        while origin.hasSuffix("/") { origin.removeLast() }
+        return origin
+    }
+    /// `host[:port]` of the instance URL.
+    var shareUpstreamHost: String {
+        let host = url.host ?? "127.0.0.1"
+        guard let port = url.port else { return host }
+        return "\(host):\(port)"
+    }
 }

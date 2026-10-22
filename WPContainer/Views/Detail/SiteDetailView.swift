@@ -82,6 +82,7 @@ struct SiteDetailView: View {
                 IdleStopCard(configured: site.idleStopMinutes, isEnv: false) { minutes in
                     vm.setIdleStop(site, minutes: minutes)
                 }
+                ShareCard(instanceID: site.id, share: site.share, networkType: site.networkType)
                 SoftwareCard(site: site)
                 DomainCard(site: site)
                 dangerZone

@@ -104,11 +104,13 @@ Sites are provisioned automatically (no install wizard) and log in with
 - **MCP agent tools** — `wp-container agent-tools enable <site> [--root …]` writes
   `.mcp.json` (+ Cursor/VS Code configs) and a marked `AGENTS.md` block into a
   chosen root (site folder, or your `wp-content` repo root for IDE discovery);
-  the bundled MCP stdio server (`wp-container mcp --site <slug>`) exposes 26 tools
+  the bundled MCP stdio server (`wp-container mcp --site <slug>`) exposes 29 tools
   in the spirit of [10up/localwp-agent-tools](https://github.com/10up/localwp-agent-tools):
   `wp_cli`, `run_command`, `run_tests`, log readers, `wp-config` editing, site info/health, start/stop/status,
   `list_sites`, `worktree_*`, `xdebug_toggle` / `elasticsearch_toggle`, plus
-  `login_link` / `create_user`.
+  `login_link` / `create_user`, and `share_start` / `share_stop` / `share_status`
+  (public password-protected link; turning the password off and gate exceptions
+  stay CLI/app-only).
 - **Agent-friendly login** — `wp-container login <site>` prints a one-time magic
   login link (single-use, 15-minute expiry) that opens straight into a logged-in
   wp-admin — no `wp-login.php` form for agents to fumble. `--open` opens it, and
@@ -175,6 +177,31 @@ Sites are provisioned automatically (no install wizard) and log in with
   address. `wpc export` / `wpc import`, the `site_export` / `site_import` MCP
   tools, or in the app: Export Site… from a site's right-click menu, and File ▸
   Import Site… (⇧⌘I) or a `.zip` dropped on the window.
+- **Site sharing** — put a site or branch environment on a public URL behind a
+  password: `wp-container share <site|env>` prints the link plus generated
+  credentials (kept across shares; `--reset-password` rotates them), the app has
+  a Share card, and the MCP `share_*` tools do the same for agents. Providers:
+  **ngrok** (default; `brew install ngrok`, then `ngrok config add-authtoken`),
+  **cloudflared** (a temporary `*.trycloudflare.com` link needs no account; a
+  fixed `--hostname` uses a named tunnel after `cloudflared tunnel login`), or
+  your own executable in `~/Library/Application Support/WPContainer/share-providers/`.
+  `--allow /wp-json/wc/v3/webhooks` or `--allow '?wc-api'` lets payment and
+  webhook callbacks through without the password. A `?key` exception applies on
+  every path, and requests that skip the password reach the site without
+  cookies, as a logged-out visitor; `/wp-login.php` and `/xmlrpc.php` always ask
+  for it. Links are rewritten to the public URL on the fly, edits saved through
+  a share keep local URLs, and every response carries
+  `X-Robots-Tag: noindex, nofollow`. A proxy host (the app or
+  `wp-container proxy serve`) from a build with sharing must be running; an
+  older app also drops share settings whenever it saves the store. A share ends
+  when its site stops or is started from stopped; an app relaunch while the
+  site keeps running reopens the share. A share that goes down is not reopened
+  until it is requested again. Limits: the free ngrok plan
+  allows one share at a time and shows ngrok's own warning page to browser
+  visitors; subdomain multisite is not supported; application-password and
+  Basic-auth REST requests do not pass through a share; static CSS/JS files are
+  not rewritten. Details and the custom-provider contract:
+  [PLAN.md §2o](PLAN.md#2o-site-sharing).
 - **Touch ID for privileged actions** — the optional signed hosts-helper
   makes custom-domain changes a Touch ID dialog instead of a password prompt
   (one-time enable in Settings → General).

@@ -172,5 +172,20 @@ enum MCPTools {
                 "domain": str("Custom domain for the new site, e.g. mysite.local. Omit to keep the archive's domain."),
                 "no_domain": bool("Give the new site no custom domain. Cannot be combined with `domain`."),
              ], required: ["file"])),
+        Tool(name: "share_start",
+             description: "Share a site or worktree environment on a public URL through a tunnel provider: ngrok, cloudflared, or a custom provider. Without `provider`, the instance's saved provider is used, or else the default provider (ngrok unless changed). WARNING: the link exposes the site to the public internet; it is protected by a username and password, which this tool returns and the user must be told to pass on only to intended visitors. Auto-starts the instance. The WP Container app or `wp-container proxy serve` must be running. Turning the password off and changing password exceptions are human-only actions (`wp-container share` CLI or the app); this tool cannot do either. Exceptions saved earlier stay in force and are listed in `allow`. A share that was opened without a password is reopened with the password on. A provider failure is returned as an error with the provider's message. Returns {url, temporary, provider, username, password, instance, allow, state}.",
+             inputSchema: obj([
+                "slug": str("Site or environment slug (defaults to the scoped site)."),
+                "provider": str("Tunnel provider: ngrok, cloudflared, or a custom provider name. Omit to keep the instance's saved provider or the default."),
+                "clear_provider": bool("Forget the instance's saved provider so the share uses the default provider. Cannot be combined with `provider`."),
+                "hostname": str("Fixed public hostname, when the provider supports one."),
+                "reset_password": bool("Generate a new password for the share."),
+             ])),
+        Tool(name: "share_stop",
+             description: "Stop sharing a site or worktree environment; the public URL stops working. Its saved credentials are kept for the next share_start. Returns {ok, instance}.",
+             inputSchema: obj(["slug": str("Site or environment slug (defaults to the scoped site).")])),
+        Tool(name: "share_status",
+             description: "Show whether a site or environment is shared publicly and on which URL. Without `slug`, lists every site and environment that has share settings. The password is never included; share_start returns it. Returns a list of {instance, state, url, provider, temporary, error}.",
+             inputSchema: obj(["slug": str("Site or environment slug. Omit to list all shares.")])),
     ]
 }

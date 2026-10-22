@@ -304,6 +304,7 @@ struct SidebarSiteRow: View {
         // The trailing status dot is a start/stop control; its clicks are
         // consumed by its own Button so they never change row selection.
         SiteRow(site: site, envCount: envCount,
+                isShared: vm.isShareLive(site.id),
                 onToggleRun: toggleRun,
                 isExpanded: isExpanded,
                 onToggleExpanded: onToggleExpanded)

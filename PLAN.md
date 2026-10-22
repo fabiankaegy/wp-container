@@ -632,6 +632,134 @@ machine, import warns and points to the trust step.
 **Non-goals.** Zips from LocalWP or other tools (a zip without `wpc-site.json` fails
 with "not a wpc export"); exporting worktree envs.
 
+## 2o. Site sharing
+
+Any site or branch environment can be put on a public URL behind a password.
+
+- **CLI**: `wp-container share [start] <site|env> [--provider P] [--hostname H]
+  [--clear-hostname] [--clear-provider] [--allow <entry>]... [--clear-allow] [--reset-password]
+  [--no-auth] [--json]`, `share stop <target>`, `share list`, `share default
+  [<provider> | --clear]`. Starting a share checks its settings and the proxy
+  host, starts a stopped target, and prints the URL, whether it is temporary,
+  and the credentials. A proxy host (the app or `wp-container proxy serve`) must
+  be running; it owns the share listeners (bound to `127.0.0.1`) and the
+  provider processes. A share-capable proxy host keeps `proxy-shares.json`
+  present while it runs (`[]` when nothing is shared); when a proxy host runs
+  without it, `share` fails at once because that host was built without
+  sharing. While no proxy host runs, `share list` and `share_status` report
+  active shares as down.
+- **MCP**: `share_start`, `share_stop`, `share_status`. Agents cannot turn the
+  password off or change exceptions.
+- **App**: a Share card on the site and env detail pages, a default-provider
+  setting, share indicators on links, and a notification when a live share goes
+  down.
+
+### Providers
+
+- **ngrok** (default): `brew install ngrok`, then `ngrok config add-authtoken
+  <token>`. The free plan provides one fixed domain, so one share at a time, and
+  ngrok shows its own warning page to browser visitors.
+- **cloudflared**: without `--hostname` it opens a quick tunnel on a temporary
+  `*.trycloudflare.com` URL and needs no account. With `--hostname` it creates a
+  named tunnel (`wpc-<slug>`) and a DNS route, after `cloudflared tunnel login`.
+  The registry (`share-cloudflare.json`) records the tunnels and every hostname
+  WP Container routed. A DNS record it did not create is never overwritten; a
+  hostname it routed before is pointed at the new tunnel. The tunnel is deleted
+  when the hostname is cleared or changed, or the site is deleted; switching
+  provider keeps it. cloudflared cannot delete DNS records, so after a hostname
+  is cleared or a site is deleted, remove the CNAME in the Cloudflare dashboard;
+  the CLI and app warn with the record name.
+- **Custom**: an executable named `<name>` in
+  `~/Library/Application Support/WPContainer/share-providers/`, selected with
+  `--provider <name>`.
+
+### Custom-provider contract
+
+- Environment: `WPC_SHARE_UPSTREAM` (the local listener, e.g.
+  `http://127.0.0.1:PORT`), `WPC_SHARE_HOSTNAME` (the requested public host,
+  empty when none), `WPC_SHARE_INSTANCE` (the site or env slug).
+- The script stays in the foreground while the tunnel is up.
+- The first valid origin URL printed on stdout or stderr is the public URL: an
+  `http://` or `https://` origin with no path, query or credentials. When
+  `WPC_SHARE_HOSTNAME` is set, the URL's host must match it. Without a hostname
+  the URL is labelled temporary.
+- The script is stopped with SIGTERM, then SIGKILL; it should `exec` its tunnel
+  so the signal reaches it.
+
+```bash
+#!/bin/sh
+# share-providers/mytunnel
+# my-tunnel-tool must print its public URL, e.g. https://abc.example.com.
+exec my-tunnel-tool --to "$WPC_SHARE_UPSTREAM" ${WPC_SHARE_HOSTNAME:+--host "$WPC_SHARE_HOSTNAME"}
+```
+
+### Password gate
+
+- On by default. The username is `share`; the password is generated once per
+  site and kept across shares (`--reset-password` replaces it).
+- `--no-auth` turns the gate off for that share only. It is available from the
+  CLI and app, not MCP.
+- 10 wrong passwords within 60 seconds lock the share for 30 seconds (HTTP 429). Requests on exception paths that carry a wrong or foreign `Authorization` header also count toward the lockout.
+- **Exceptions** (`--allow`, repeatable, saved per site; `--clear-allow` removes
+  them): a path prefix (`/wp-json/wc/v3/webhooks`) or a query parameter
+  (`?wc-api`, `?wc-api=wc_stripe`). A query exception applies on every path, so
+  `?wc-api` also matches `/wp-admin/?wc-api=1`. A path-prefix exception does not
+  apply to a request carrying `rest_route` in its query, and a request that
+  skipped the password with a POST `rest_route` is refused with 401 by the share
+  PHP handler; either would reach any REST endpoint. `/wp-login.php` and
+  `/xmlrpc.php` are never exempt, under any prefix or with path info. Anyone
+  with the link can reach listed addresses without the password.
+- A request that skips the password through an exception reaches the site
+  without its `Cookie` header, as a logged-out visitor, and carries
+  `X-WPC-Share-Exempt: 1`. Valid share credentials on the same request keep the
+  cookies.
+
+### URL handling
+
+- Links and redirects in responses are rewritten to the public URL per request;
+  the site keeps its local URLs in the database.
+- Edits saved through a share are stored with local URLs (posts, options, post
+  meta including serialized values). `home` and `siteurl` cannot be changed
+  through a share.
+- Every response through a share carries `X-Robots-Tag: noindex, nofollow`;
+  incoming `X-WPC-Share-*` headers are stripped on every proxy listener.
+- The PHP side lives in the instance's `php/prepend.d/` as marked files; nothing
+  is written into the project tree.
+
+### Lifecycle
+
+- A share ends when it is stopped, when its site or env stops or is started from
+  stopped (from any surface, also while no proxy host runs), or when it fails: the provider fails
+  to start or exits, or another share holds its hostname. A failed share is
+  reported down with its error until it is requested again, and no proxy host
+  reopens it.
+- Shares reopen after the app or proxy host restarts if the site is still
+  running.
+- An open share keeps its site from idle-stop and its env from being suggested
+  for settling. A share that is down has ended, so it does not.
+- Stopping a provider also stops every process it started, such as the tunnel a
+  custom provider script runs.
+- A share requested for an instance that stopped before the share started is
+  reported down with "The site isn't running."
+- Share settings live in `sites.json`, which is written with mode 0600 because it
+  holds share passwords. An older app build that saves the store drops share
+  settings and the default provider.
+
+### Limits
+
+- Subdomain multisite is refused.
+- Application-password and Basic-auth REST authentication does not pass through
+  a share (the share gate uses the same header).
+- Static CSS/JS files and URL-encoded origins are not rewritten.
+
+### Validation
+
+`scripts/validate-share.sh` drives a disposable site through a fixture provider
+and asserts the gate, exceptions (including that `/wp-login.php`, `/xmlrpc.php`
+and a POST `rest_route` stay behind the password), robots header, link rewriting, saved-URL
+handling and passthrough of gzip/binary responses. It needs a proxy host running
+the current build.
+
 ## 3. App architecture (MVVM, Swift 6 concurrency)
 
 ```

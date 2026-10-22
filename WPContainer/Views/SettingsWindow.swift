@@ -489,7 +489,25 @@ private struct SitesSettingsPane: View {
                     }
                 }
             }
+            SectionCard(title: "Sharing", systemImage: "link") {
+                SettingRow(title: "Default share provider",
+                           explanation: "The tunnel used by shares that don’t pick their own. Custom providers are executables in the share-providers folder.") {
+                    Picker("", selection: Binding(
+                        get: { vm.shareDefaultProvider },
+                        set: { name in Task { await vm.setDefaultShareProvider(name) } }
+                    )) {
+                        Text("Built-in (ngrok)").tag(String?.none)
+                        Text("ngrok").tag(String?.some("ngrok"))
+                        Text("cloudflared").tag(String?.some("cloudflared"))
+                        ForEach(vm.customShareProviders(), id: \.self) { name in
+                            Text(name).tag(String?.some(name))
+                        }
+                    }
+                    .labelsHidden().fixedSize()
+                }
+            }
         }
+        .task { await vm.loadShareDefaultProvider() }
         .fileImporter(isPresented: $choosingFolder, allowedContentTypes: [.folder]) { result in
             if case .success(let url) = result { defaultSitesRoot = url.path(percentEncoded: false) }
         }

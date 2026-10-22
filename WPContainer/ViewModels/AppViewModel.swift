@@ -47,6 +47,19 @@ public final class AppViewModel {
     /// itself rather than by that set's short create-flow timer.
     @ObservationIgnored private var suppressIdleStopNotify: Set<UUID> = []
 
+    /// Runtime state of each shared instance, refreshed with the reconcile tick.
+    public private(set) var shareStatuses: [UUID: ShareStatus] = [:]
+    /// Instances whose share request is in flight (start, request, wait for the provider).
+    public private(set) var sharesStarting: Set<UUID> = []
+    /// The last failure of a share request, per instance.
+    public private(set) var shareErrors: [UUID: String] = [:]
+    /// The store-wide default share provider; nil means the built-in default.
+    public private(set) var shareDefaultProvider: String?
+
+    /// Instances whose pending share start was stopped by the user.
+    @ObservationIgnored private var shareCancelled: Set<UUID> = []
+    @ObservationIgnored private let shareControl = ShareControl(persistence: StorePersistence())
+
     public var selection: UUID?
     public var systemStatus: SystemCheckResult?
     public var lastError: String?
@@ -875,6 +888,137 @@ public final class AppViewModel {
         }
     }
 
+    // MARK: - Site sharing
+
+    public func shareStatus(for instanceID: UUID) -> ShareStatus? {
+        shareStatuses[instanceID]
+    }
+
+    /// Whether the instance's share is live and still wanted, which keeps a status the proxy
+    /// has not yet withdrawn from showing after a stop.
+    public func isShareLive(_ instanceID: UUID) -> Bool {
+        guard shareStatuses[instanceID]?.state == .live else { return false }
+        let share = store.site(id: instanceID)?.share ?? store.env(id: instanceID)?.share
+        return share?.active == true
+    }
+
+    /// Validates the request, starts the instance when it is stopped, requests the share
+    /// and waits for the provider to report `live` or `down`.
+    public func startShare(_ instanceID: UUID, request: ShareRequest) async {
+        guard !sharesStarting.contains(instanceID) else { return }
+        sharesStarting.insert(instanceID)
+        shareErrors[instanceID] = nil
+        shareCancelled.remove(instanceID)
+        defer {
+            sharesStarting.remove(instanceID)
+            shareCancelled.remove(instanceID)
+        }
+        do {
+            await ensureProxyRunning()
+            try await shareControl.validate(instanceID: instanceID, request)
+            try await startInstanceForShare(instanceID)
+            guard !shareCancelled.contains(instanceID) else { throw ShareError.cancelled }
+            let settings = try await shareControl.request(instanceID: instanceID, request)
+            let status = try await shareControl.waitForStatus(instanceID: instanceID, requestID: settings.requestID)
+            shareStatuses[instanceID] = status
+            if status.state == .down {
+                shareErrors[instanceID] = status.error ?? "The share could not start."
+            }
+        } catch ShareError.cancelled {
+            shareErrors[instanceID] = nil
+        } catch {
+            shareErrors[instanceID] = "\(error)"
+        }
+        await store.reload()
+    }
+
+    public func stopShare(_ instanceID: UUID) async {
+        if sharesStarting.contains(instanceID) { shareCancelled.insert(instanceID) }
+        do {
+            try await shareControl.stop(instanceID: instanceID)
+            shareStatuses[instanceID] = nil
+            shareErrors[instanceID] = nil
+        } catch {
+            shareErrors[instanceID] = "\(error)"
+        }
+        await store.reload()
+    }
+
+    /// Writes the store-wide default provider; nil restores the built-in default.
+    public func setDefaultShareProvider(_ name: String?) async {
+        do {
+            try await shareControl.setDefaultProvider(name)
+            shareDefaultProvider = name
+        } catch {
+            lastError = "\(error)"
+        }
+    }
+
+    public func loadShareDefaultProvider() async {
+        shareDefaultProvider = (try? await StorePersistence().load())?.shareDefaultProvider
+    }
+
+    /// Names of the executables in the custom share-providers directory.
+    public func customShareProviders() -> [String] {
+        let directory = ProxyControl.directory.appendingPathComponent("share-providers", isDirectory: true)
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        return names
+            .filter { !$0.hasPrefix(".") && FileManager.default.isExecutableFile(atPath: directory.appendingPathComponent($0).path) }
+            .sorted()
+    }
+
+    /// Whether this app hosts the proxy, and with it every share's provider.
+    public var ownsProxy: Bool { proxy.boundPort != nil }
+
+    /// Tears down the proxy and its shares off the main thread; bounded by the proxy's own timeout.
+    public func stopProxyForQuit() async {
+        guard ownsProxy else { return }
+        let proxy = self.proxy
+        await Task.detached { proxy.stop() }.value
+    }
+
+    private func startInstanceForShare(_ instanceID: UUID) async throws {
+        if let site = store.site(id: instanceID) {
+            if site.status.isRunning { return }
+            if !site.status.isTransitional { startSite(site) }
+        } else if let env = store.env(id: instanceID) {
+            if env.status.isRunning { return }
+            if !env.status.isTransitional { startEnv(env) }
+        } else {
+            throw ShareError.instanceNotFound(instanceID)
+        }
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(180))
+        while clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(500))
+            if shareCancelled.contains(instanceID) { throw ShareError.cancelled }
+            let status = store.site(id: instanceID)?.status ?? store.env(id: instanceID)?.status
+            guard let status else { throw ShareError.instanceNotFound(instanceID) }
+            if status.isRunning { return }
+            if case .error(let message) = status { throw ShareStartError.instanceFailed(message) }
+        }
+        throw ShareStartError.instanceFailed("It did not start in time.")
+    }
+
+    /// Reads the published share statuses and notifies when a share that was live goes down.
+    private func refreshShares() {
+        let proxy = ProxyControl.current()
+        let published = proxy == nil ? [] : ProxyControl.shares()
+        var next: [UUID: ShareStatus] = [:]
+        for status in published { next[status.instanceID] = status }
+        for (id, status) in next where status.state == .down && shareStatuses[id]?.state == .live {
+            let instance: (any RunnableInstance)? = store.site(id: id) ?? store.env(id: id)
+            // A share that went down is cleared in the store, so the request id tells it
+            // from one the user stopped or requested again.
+            guard let instance, let share = instance.share, share.requestID == status.requestID else { continue }
+            let isUp = (store.site(id: id)?.status ?? store.env(id: id)?.status)?.isRunning == true
+            guard isUp else { continue }
+            let name = store.env(id: id).map { "\($0.parentSlug) · \($0.branch)" } ?? instance.displayName
+            notifications.notifyShareDown(name: name, error: status.error ?? "The share stopped.")
+        }
+        if next != shareStatuses { shareStatuses = next }
+    }
+
     // MARK: - Reconcile loop (every 5s while active)
 
     private func startReconcileLoop() {
@@ -912,6 +1056,7 @@ public final class AppViewModel {
         // Cheap lock read; the proxy latches the denial and clears it on the first
         // successful container dial, so this both raises and retires the banner.
         localNetworkDenied = proxy.isLocalNetworkDenied
+        refreshShares()
         guard let records = try? await cli.list(all: true) else { return }
         let running = Set(records.filter { $0.isRunning }.map { $0.name })
 
@@ -1440,4 +1585,14 @@ private func SiteLifecycleErrorText(_ error: Error) -> String {
     if let e = error as? WorktreeError { return e.description }
     if let e = error as? EnvSettlementError { return e.description }
     return "\(error)"
+}
+
+private enum ShareStartError: Error, CustomStringConvertible {
+    case instanceFailed(String)
+
+    var description: String {
+        switch self {
+        case .instanceFailed(let message): return "The site could not start: \(message)"
+        }
+    }
 }

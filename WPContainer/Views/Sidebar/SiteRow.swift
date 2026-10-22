@@ -11,6 +11,8 @@ import WPContainerKit
 struct SiteRow: View {
     let site: Site
     let envCount: Int
+    /// Whether a public share of this site is live.
+    var isShared: Bool = false
     /// When provided, the trailing status dot becomes a start/stop control
     /// (PLAN.md §2l). Left nil for non-interactive contexts (e.g. drag preview).
     var onToggleRun: (() -> Void)? = nil
@@ -49,6 +51,13 @@ struct SiteRow: View {
 
             if envCount > 0, let onToggleExpanded {
                 DisclosureChevron(isExpanded: isExpanded, onToggle: onToggleExpanded)
+            }
+
+            if isShared {
+                Image(systemName: "link")
+                    .font(.caption2)
+                    .foregroundStyle(Theme.onFrameSecondary)
+                    .accessibilityLabel("Shared")
             }
 
             if let onToggleRun {
