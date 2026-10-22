@@ -342,7 +342,7 @@ extension HelpTopic {
         sections: [
             HelpSection(
                 title: "Exporting",
-                body: "Right-click a site in the sidebar and choose Export Site…. The site starts if it is stopped. Pick what to leave out, choose where to save, and reveal the finished archive in Finder.",
+                body: "Right-click a site in the gallery or list and choose Export Site…. The site starts if it is stopped. Pick what to leave out, choose where to save, and reveal the finished archive in Finder.",
                 bullets: [
                     "`.git`, `node_modules` and similar folders are left out by default; the list is editable and remembered.",
                     "Project folders mounted into the site are copied in as plain folders.",
