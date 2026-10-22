@@ -36,7 +36,13 @@ struct SiteScreen: View {
             }
         }
         // Drop a .sql/.sql.gz dump on a site's screen to import it (PLAN.md §2m).
+        // A .zip site export opens the Import Site sheet instead.
         .dropDestination(for: URL.self) { urls, _ in
+            if let archive = urls.first(where: { $0.pathExtension.lowercased() == "zip" }) {
+                vm.pendingImportArchive = archive
+                vm.presentingImportSite = true
+                return true
+            }
             guard env == nil, let dump = urls.first(where: DumpFile.isDumpFile) else { return false }
             vm.selection = site.id
             vm.pendingImportDump = dump

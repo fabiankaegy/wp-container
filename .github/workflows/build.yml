@@ -27,3 +27,20 @@ jobs:
       # Debug builds sign ad-hoc, so no certificates are needed here.
       - run: make build
       - run: make test
+      # A downloadable Debug app (CLI embedded) for testing a PR without building it.
+      - name: Package app
+        if: github.event_name == 'pull_request'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          zip="WPContainer-pr${PR_NUMBER}-${HEAD_SHA:0:7}.zip"
+          ditto -c -k --keepParent build/Build/Products/Debug/WPContainer.app "$zip"
+          echo "APP_ZIP=$zip" >> "$GITHUB_ENV"
+      - if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.APP_ZIP }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 14

@@ -118,6 +118,12 @@ private struct AppCommands: Commands {
             Button("New Branch Environment…") { vm.presentingNewEnv = true }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
                 .disabled(vm.selectedSite == nil)
+            Divider()
+            Button("Import Site…") {
+                vm.pendingImportArchive = nil
+                vm.presentingImportSite = true
+            }
+            .keyboardShortcut("i", modifiers: [.command, .shift])
         }
         CommandGroup(after: .sidebar) {
             Button("Back") { vm.goBack() }

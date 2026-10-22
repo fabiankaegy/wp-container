@@ -8,6 +8,8 @@ import WPContainerKit
 /// every setting for the selection. Live metrics poll while this window is open.
 struct MainWindow: View {
     @Environment(AppViewModel.self) private var vm
+    /// Whether a dragged file is hovering the detail column.
+    @State private var archiveDropTargeted = false
 
     var body: some View {
         @Bindable var vm = vm
@@ -25,6 +27,19 @@ struct MainWindow: View {
                         // wide inspector) sends AppKit into a layout loop that
                         // crashes the app. Content that can't fit clips instead.
                         .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+                        // A .zip site export dropped anywhere on the detail opens
+                        // the Import Site sheet with it. A site's screen handles
+                        // drops on itself.
+                        .dropDestination(for: URL.self) { urls, _ in
+                            guard let archive = urls.first(where: { $0.pathExtension.lowercased() == "zip" }) else { return false }
+                            vm.pendingImportArchive = archive
+                            vm.presentingImportSite = true
+                            return true
+                        } isTargeted: { archiveDropTargeted = $0 }
+                        .overlay {
+                            if archiveDropTargeted { ImportDropOverlay() }
+                        }
+                        .animation(.easeOut(duration: 0.12), value: archiveDropTargeted)
                         .toolbar {
                             // While the inspector is open its toggle lives in the
                             // inspector's own toolbar section (InspectorView).
@@ -68,6 +83,14 @@ struct MainWindow: View {
             if let site = vm.selectedSite {
                 ImportDatabaseSheet(site: site, initialDump: vm.pendingImportDump)
             }
+        }
+        .sheet(isPresented: $vm.presentingExportSite, onDismiss: { vm.exportSiteTarget = nil }) {
+            if let site = vm.exportSiteTarget {
+                ExportSiteSheet(site: site)
+            }
+        }
+        .sheet(isPresented: $vm.presentingImportSite, onDismiss: { vm.pendingImportArchive = nil }) {
+            ImportSiteSheet(initialArchive: vm.pendingImportArchive)
         }
         .sheet(isPresented: $vm.presentingCLIInstallOffer) {
             CLIInstallOfferSheet()
@@ -169,5 +192,28 @@ struct MainWindow: View {
             .padding(16)
             .transition(.move(edge: .top).combined(with: .opacity))
         }
+    }
+}
+
+// MARK: - Drop overlay
+
+/// The dashed highlight shown while a file is dragged over a drop target.
+struct ImportDropOverlay: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(Theme.accent.opacity(0.10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Theme.accent, style: StrokeStyle(lineWidth: 2, dash: [8]))
+            )
+            .overlay {
+                Label("Drop to import", systemImage: "arrow.down.doc.fill")
+                    .font(.headline)
+                    .foregroundStyle(Theme.accent)
+                    .padding(14)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            .allowsHitTesting(false)
+            .padding(8)
     }
 }

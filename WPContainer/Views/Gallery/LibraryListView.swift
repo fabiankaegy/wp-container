@@ -271,6 +271,10 @@ struct LibraryListView: View {
             Button("Open in Browser", systemImage: "safari") { SystemActions.openInBrowser(site.url) }
                 .disabled(!site.status.isRunning)
             SiteMoreMenuItems(site: site)
+            Button("Export Site…", systemImage: "square.and.arrow.up") {
+                vm.exportSiteTarget = site
+                vm.presentingExportSite = true
+            }
             Divider()
             if site.isArchived {
                 Button("Unarchive", systemImage: "arrow.uturn.backward") { vm.unarchiveSite(site) }

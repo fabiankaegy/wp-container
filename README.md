@@ -169,6 +169,12 @@ Sites are provisioned automatically (no install wizard) and log in with
   default for environments, opt-in for sites. `wp-container idle <slug>`, the
   Idle stop card, or the `set_idle_stop` MCP tool — see
   [docs/RESOURCES.md](docs/RESOURCES.md).
+- **Export and import sites** — pack a site (files, database dump and settings)
+  into one `.zip` and import it on another Mac as a new site with its own name
+  and domain; URLs, including multisite networks, are migrated to the new
+  address. `wpc export` / `wpc import`, the `site_export` / `site_import` MCP
+  tools, or in the app: Export Site… from a site's right-click menu, and File ▸
+  Import Site… (⇧⌘I) or a `.zip` dropped on the window.
 - **Touch ID for privileged actions** — the optional signed hosts-helper
   makes custom-domain changes a Touch ID dialog instead of a password prompt
   (one-time enable in Settings → General).
@@ -190,6 +196,25 @@ make test             # unit tests (kit + hosts helper)
 open build/Build/Products/Debug/WPContainer.app
 make install-cli      # optional: /usr/local/bin/wp-container + wpc
 ```
+
+### Testing a pull request build
+
+Each pull request's Build run attaches a Debug build of the app,
+`WPContainer-pr<number>-<commit>.zip`, under Artifacts on the run's summary page.
+It is built from the pull request merged into `main` and kept for 14 days.
+
+```bash
+ditto -x -k ~/Downloads/WPContainer-pr<number>-<commit>.zip ~/Downloads
+xattr -dr com.apple.quarantine ~/Downloads/WPContainer.app   # the build is signed ad-hoc
+open ~/Downloads/WPContainer.app
+```
+
+The build runs the pull request's code with your user's access, so only run builds
+of pull requests you have read. It uses the same site list and sites folder as an
+installed WP Container,
+so quit the installed app first and test on throwaway sites. Its CLI is at
+`WPContainer.app/Contents/MacOS/wp-container`; an installed `wpc` still runs the
+installed app's CLI.
 
 ## How it works
 

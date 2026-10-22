@@ -270,6 +270,10 @@ struct SiteCard: View {
         Button("WP Admin", systemImage: "person.badge.key") { SystemActions.openInBrowser(site.wpAdminURL) }
             .disabled(!site.status.isRunning)
         SiteMoreMenuItems(site: site)
+        Button("Export Site…", systemImage: "square.and.arrow.up") {
+            vm.exportSiteTarget = site
+            vm.presentingExportSite = true
+        }
         Divider()
         Menu("Move to Group") {
             Button("Ungrouped") { vm.moveSite(site, toGroup: nil) }

@@ -41,6 +41,8 @@ enum MCPToolDispatch {
             case "mailpit_toggle":    return try await sidecarToggle(args, ctx: ctx, slug: scopedSlug, addon: SidecarAddons.mailpit)
             case "redis_toggle":      return try await sidecarToggle(args, ctx: ctx, slug: scopedSlug, addon: SidecarAddons.redis)
             case "db_import":         return try await dbImport(args, ctx: ctx, slug: scopedSlug)
+            case "site_export":       return try await siteExport(args, ctx: ctx, slug: scopedSlug)
+            case "site_import":       return try await siteImport(args, ctx: ctx)
             case "set_idle_stop":     return try await setIdleStop(args, ctx: ctx, slug: scopedSlug)
             default:
                 return MCPResult.failure("Unknown tool: \(params.name)")
@@ -847,6 +849,69 @@ enum MCPToolDispatch {
         return payload
     }
 
+    // MARK: - site_export / site_import
+
+    /// Exports a site to a zip. Auto-starts a stopped site; no streaming progress.
+    private static func siteExport(_ args: [String: Value], ctx: CLIContext, slug: String) async throws -> CallTool.Result {
+        guard let output = args["output"]?.stringValue else {
+            throw ToolError("bad_args", "`output` is required (absolute path of the .zip to write).")
+        }
+        let expanded = (output as NSString).expandingTildeInPath
+        guard expanded.hasPrefix("/") else {
+            throw ToolError("bad_args", "`output` must be an absolute path.")
+        }
+        let targetSlug = args["slug"]?.stringValue ?? slug
+        let envelope = try await ctx.load()
+        guard let resolved = resolveTarget(targetSlug, in: envelope) else {
+            throw ToolError("site_not_found", "No site or environment with slug \(targetSlug).")
+        }
+        guard case .site(let site) = resolved else {
+            throw ToolError("bad_args", "site_export works on sites, not worktree environments.")
+        }
+        await ctx.persistence.recordActivity(instanceID: site.instanceID)
+        try await ctx.ensureRunning(resolved, envelope: envelope)
+
+        let fileName = SiteArchiveService.defaultFileName(slug: site.slug, date: Date())
+        let destination = archiveDestination(expanded, fileName: fileName)
+        let extra = args["exclude"]?.arrayValue?.compactMap { $0.stringValue } ?? []
+        let service = SiteArchiveService(cli: ctx.cli, lifecycle: ctx.lifecycle, persistence: ctx.persistence)
+        let summary = try await service.export(site, to: destination,
+                                               excludes: SiteArchiveService.defaultExcludes + extra,
+                                               overwrite: args["force"]?.boolValue ?? false) { _ in }
+        return MCPResult.text(CLIJSON.string(summary), isError: false)
+    }
+
+    /// Creates a new site from an export zip. The MCP session stays scoped to its own site.
+    private static func siteImport(_ args: [String: Value], ctx: CLIContext) async throws -> CallTool.Result {
+        guard let file = args["file"]?.stringValue else {
+            throw ToolError("bad_args", "`file` is required (absolute path to a site_export .zip).")
+        }
+        let domain = args["domain"]?.stringValue
+        let noDomain = args["no_domain"]?.boolValue ?? false
+        if domain != nil && noDomain {
+            throw ToolError("bad_args", "`domain` and `no_domain` cannot be used together.")
+        }
+        let domainChoice: SiteImportDomain
+        if noDomain {
+            domainChoice = .none
+        } else if let domain {
+            domainChoice = .set(domain)
+        } else {
+            domainChoice = .keep
+        }
+        let options = SiteImportOptions(name: args["name"]?.stringValue, domain: domainChoice,
+                                        parentFolder: SiteFolders.defaultSitesRoot,
+                                        groupName: nil, imageOverride: nil)
+        let archiveURL = URL(fileURLWithPath: (file as NSString).expandingTildeInPath).standardizedFileURL
+        let service = SiteArchiveService(cli: ctx.cli, lifecycle: ctx.lifecycle, persistence: ctx.persistence)
+        let result = try await service.importSite(archive: archiveURL, options: options) { _ in }
+        return MCPResult.json([
+            "slug": result.site.slug,
+            "url": result.site.url.absoluteString,
+            "warnings": result.warnings,
+        ])
+    }
+
     // MARK: - Small utilities
 
     private static func tail(_ text: String, lines: Int) -> String {
@@ -887,6 +952,7 @@ enum MCPToolDispatch {
     private static func humanError(_ error: Error) -> String {
         if let e = error as? ToolError { return MCPJSON.string(["error": e.code, "detail": e.detail]) }
         if let e = error as? ContainerCLIError { return MCPJSON.string(["error": "container_error", "detail": e.description]) }
+        if let e = error as? SiteArchiveError { return MCPJSON.string(["error": errorCode(e) ?? "internal", "detail": e.description]) }
         if let e = error as? WPConfigService.ConfigError { return MCPJSON.string(["error": "wp_config_error", "detail": e.description]) }
         return MCPJSON.string(["error": "internal", "detail": "\(error)"])
     }
