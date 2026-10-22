@@ -370,6 +370,10 @@ struct SidebarSiteRow: View {
             vm.pendingImportDump = nil
             vm.presentingImportDB = true
         }
+        Button("Export Site…", systemImage: "square.and.arrow.up") {
+            vm.exportSiteTarget = site
+            vm.presentingExportSite = true
+        }
 
         Divider()
 

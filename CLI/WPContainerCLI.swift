@@ -32,6 +32,8 @@ struct WPContainerCLI: AsyncParsableCommand {
             MailpitCommand.self,
             RedisCommand.self,
             DBCommand.self,
+            ExportCommand.self,
+            ImportCommand.self,
             LimitsCommand.self,
             IdleCommand.self,
             DomainCommand.self,
@@ -156,7 +158,10 @@ func emitLine(_ text: String) {
 
 /// Print an error (JSON on stderr when `--json`) and exit non-zero.
 func failCommand(_ error: Error, json: Bool) -> ExitCode {
-    let cliError = (error as? CLIErrorJSON) ?? (error as? SiteMounts.Failure)?.cliError ?? CLIErrorJSON(humanText(error))
+    let cliError = (error as? CLIErrorJSON)
+        ?? (error as? SiteMounts.Failure)?.cliError
+        ?? errorCode(error).map { CLIErrorJSON($0, detail: humanText(error)) }
+        ?? CLIErrorJSON(humanText(error))
     if json {
         FileHandle.standardError.write(Data((CLIJSON.string(cliError) + "\n").utf8))
     } else {
@@ -167,14 +172,32 @@ func failCommand(_ error: Error, json: Bool) -> ExitCode {
     return ExitCode.failure
 }
 
-private func humanText(_ error: Error) -> String {
+func humanText(_ error: Error) -> String {
     if let e = error as? ContainerCLIError { return e.description }
     if let e = error as? LifecycleError { return e.description }
     if let e = error as? GitError { return e.description }
     if let e = error as? WorktreeError { return e.description }
     if let e = error as? MagicLoginError { return e.description }
     if let e = error as? ImageUnavailableError { return e.description }
+    if let e = error as? SiteArchiveError { return e.description }
     return "\(error)"
+}
+
+/// The stable `error` code for typed errors that carry one.
+func errorCode(_ error: Error) -> String? {
+    guard let archiveError = error as? SiteArchiveError else { return nil }
+    switch archiveError {
+    case .unsupportedSchema: return "unsupported_schema"
+    case .notAWPCExport: return "not_a_wpc_export"
+    case .unsafeEntry: return "unsafe_entry"
+    case .insufficientDiskSpace: return "insufficient_disk_space"
+    case .siteNotRunning: return "not_running"
+    case .outputExists: return "output_exists"
+    case .toolFailed: return "tool_failed"
+    case .domainInUse: return "domain_in_use"
+    case .invalidDomain: return "invalid_domain"
+    case .noFreePort: return "no_free_port"
+    }
 }
 
 // MARK: - list
@@ -346,7 +369,7 @@ struct CreateCommand: AsyncParsableCommand {
                 }
                 dbHost = host
             } catch {
-                await Self.discard(created, keepFolder: folderExisted, ctx: ctx)
+                await SiteDiscard.discard(created, keepFolder: folderExisted, lifecycle: ctx.lifecycle, persistence: ctx.persistence)
                 if !output.json {
                     FileHandle.standardError.write(Data("Removed \(created.slug): it didn't start, so .wp-env.json wasn't applied.\n".utf8))
                 }
@@ -388,15 +411,6 @@ struct CreateCommand: AsyncParsableCommand {
 
     private static func expand(_ path: String) -> URL {
         URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
-    }
-
-    /// Removes a just-created site: its containers, store record, and
-    /// certificate hosts, and its folder unless that was on disk before.
-    private static func discard(_ site: Site, keepFolder: Bool, ctx: CLIContext) async {
-        await ctx.lifecycle.deleteContainers(site)
-        if !keepFolder { try? FileManager.default.trashItem(at: site.path, resultingItemURL: nil) }
-        _ = try? await ctx.persistence.mutate { store in store.sites.removeAll { $0.id == site.id } }
-        try? await CertificateAuthority().removeLeafCoverage(site.proxyHosts)
     }
 }
 

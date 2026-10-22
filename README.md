@@ -169,6 +169,12 @@ Sites are provisioned automatically (no install wizard) and log in with
   default for environments, opt-in for sites. `wp-container idle <slug>`, the
   Idle stop card, or the `set_idle_stop` MCP tool — see
   [docs/RESOURCES.md](docs/RESOURCES.md).
+- **Export and import sites** — pack a site (files, database dump and settings)
+  into one `.zip` and import it on another Mac as a new site with its own name
+  and domain; URLs, including multisite networks, are migrated to the new
+  address. `wpc export` / `wpc import`, the `site_export` / `site_import` MCP
+  tools, or in the app: Export Site… from a site's right-click menu, and File ▸
+  Import Site… (⇧⌘I) or a `.zip` dropped on the window.
 - **Touch ID for privileged actions** — the optional signed hosts-helper
   makes custom-domain changes a Touch ID dialog instead of a password prompt
   (one-time enable in Settings → General).
