@@ -144,6 +144,11 @@ Sites are provisioned automatically (no install wizard) and log in with
   `env.development`): WordPress and PHP version, multisite, and `config`
   constants. Local plugins, themes, and mappings are mounted live, remote ones
   (GitHub `owner/repo#ref`, zip URLs) installed, and plugins activated.
+- **Mounted folders** — `wp-container mount add <slug> <folder> <path>` bind-mounts
+  a host folder into a site's WordPress folder, such as a plugin repo at
+  `wp-content/plugins/<name>`, so edits reach the site live. `mount list` and
+  `mount remove` manage them, and `create --mount <folder>:<path>` mounts folders
+  when the site is created.
 - **Dev-ready by default** — every site gets `WP_DEVELOPMENT_MODE=all` /
   `WP_ENVIRONMENT_TYPE=local`, with live `WP_DEBUG`-family switches in
   Settings → Development.
@@ -166,6 +171,12 @@ Sites are provisioned automatically (no install wizard) and log in with
   default for environments, opt-in for sites. `wp-container idle <slug>`, the
   Idle stop card, or the `set_idle_stop` MCP tool — see
   [docs/RESOURCES.md](docs/RESOURCES.md).
+- **Export and import sites** — pack a site (files, database dump and settings)
+  into one `.zip` and import it on another Mac as a new site with its own name
+  and domain; URLs, including multisite networks, are migrated to the new
+  address. `wpc export` / `wpc import`, the `site_export` / `site_import` MCP
+  tools, or in the app: Export Site… from a site's right-click menu, and File ▸
+  Import Site… (⇧⌘I) or a `.zip` dropped on the window.
 - **Site sharing** — put a site or branch environment on a public URL behind a
   password: `wp-container share <site|env>` prints the link plus generated
   credentials (kept across shares; `--reset-password` rotates them), the app has
@@ -190,7 +201,7 @@ Sites are provisioned automatically (no install wizard) and log in with
   visitors; subdomain multisite is not supported; application-password and
   Basic-auth REST requests do not pass through a share; static CSS/JS files are
   not rewritten. Details and the custom-provider contract:
-  [PLAN.md §2n](PLAN.md#2n-site-sharing).
+  [PLAN.md §2o](PLAN.md#2o-site-sharing).
 - **Touch ID for privileged actions** — the optional signed hosts-helper
   makes custom-domain changes a Touch ID dialog instead of a password prompt
   (one-time enable in Settings → General).
@@ -208,9 +219,29 @@ Sites are provisioned automatically (no install wizard) and log in with
 git clone https://github.com/fabiankaegy/wp-container.git
 cd wp-container
 make build            # xcodegen + xcodebuild (app + CLI)
+make test             # unit tests (kit + hosts helper)
 open build/Build/Products/Debug/WPContainer.app
 make install-cli      # optional: /usr/local/bin/wp-container + wpc
 ```
+
+### Testing a pull request build
+
+Each pull request's Build run attaches a Debug build of the app,
+`WPContainer-pr<number>-<commit>.zip`, under Artifacts on the run's summary page.
+It is built from the pull request merged into `main` and kept for 14 days.
+
+```bash
+ditto -x -k ~/Downloads/WPContainer-pr<number>-<commit>.zip ~/Downloads
+xattr -dr com.apple.quarantine ~/Downloads/WPContainer.app   # the build is signed ad-hoc
+open ~/Downloads/WPContainer.app
+```
+
+The build runs the pull request's code with your user's access, so only run builds
+of pull requests you have read. It uses the same site list and sites folder as an
+installed WP Container,
+so quit the installed app first and test on throwaway sites. Its CLI is at
+`WPContainer.app/Contents/MacOS/wp-container`; an installed `wpc` still runs the
+installed app's CLI.
 
 ## How it works
 

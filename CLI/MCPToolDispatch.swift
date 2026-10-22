@@ -41,6 +41,8 @@ enum MCPToolDispatch {
             case "mailpit_toggle":    return try await sidecarToggle(args, ctx: ctx, slug: scopedSlug, addon: SidecarAddons.mailpit)
             case "redis_toggle":      return try await sidecarToggle(args, ctx: ctx, slug: scopedSlug, addon: SidecarAddons.redis)
             case "db_import":         return try await dbImport(args, ctx: ctx, slug: scopedSlug)
+            case "site_export":       return try await siteExport(args, ctx: ctx, slug: scopedSlug)
+            case "site_import":       return try await siteImport(args, ctx: ctx)
             case "set_idle_stop":     return try await setIdleStop(args, ctx: ctx, slug: scopedSlug)
             case "share_start":       return try await shareStart(args, ctx: ctx, slug: scopedSlug)
             case "share_stop":        return try await shareStop(args, ctx: ctx, slug: scopedSlug)
@@ -670,6 +672,17 @@ enum MCPToolDispatch {
         let from = args["from"]?.stringValue
         let provision = args["provision"]?.boolValue ?? true
         let isolatedDB = args["isolated_db"]?.boolValue ?? false
+        // Check the dump before creating anything.
+        let importFile = args["import_file"]?.stringValue.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
+        let importOpts = try importFile.map { _ in try importOptions(from: args) }
+        if let importFile {
+            guard FileManager.default.fileExists(atPath: importFile.path) else {
+                throw ToolError("dump_not_found", "No dump file found at \(importFile.path).")
+            }
+            guard ["sql", "gz"].contains(importFile.pathExtension.lowercased()) else {
+                throw ToolError("bad_args", DatabaseImportError.invalidDumpExtension(importFile.lastPathComponent).description)
+            }
+        }
         let envelope = try await ctx.load()
         guard let parent = envelope.sites.first(where: { $0.slug == parentSlug }) else {
             throw ToolError("site_not_found", "No site with slug \(parentSlug).")
@@ -718,6 +731,23 @@ enum MCPToolDispatch {
         // tell the caller now rather than letting it discover a refused connection.
         if let warning = ProxyControl.envProxyWarning(port: env.port) { warnings.append(warning) }
         if !warnings.isEmpty { payload["warnings"] = warnings }
+        // A failed import keeps the env, rolled back to the parent's data.
+        if let importFile, let importOpts {
+            let importer = DatabaseImportService(cli: ctx.cli, lifecycle: ctx.lifecycle)
+            do {
+                let summary = try await importer.importDatabase(into: env, publicURL: env.url, dump: importFile,
+                                                                options: importOpts) { _ in }
+                payload["import"] = importPayload(summary, target: env.envSlug)
+            } catch {
+                let failure = DBImportFailureJSON(error)
+                var importError = importErrorPayload(failure)
+                importError["note"] = failure.databaseIntact
+                    ? "The environment was created with the parent's data; the import did not apply."
+                    : "The environment was created, but its database could not be restored after the failed import; restore it from the env's .backups/ folder."
+                payload["import"] = importError
+                return MCPResult.json(payload, isError: true)
+            }
+        }
         return MCPResult.json(payload)
     }
 
@@ -753,12 +783,12 @@ enum MCPToolDispatch {
         let outcome = await ctx.worktrees.delete(env, parent: parent, keepBranch: keepBranch, keepWorktree: keepWorktree)
         _ = try await ctx.persistence.mutate { store in
             store.envs.removeAll { $0.id == env.id }
-            // The DB server was down, so the env's schema is still there (#17).
-            // Tombstone it for the next shared-env create to reap.
-            if let orphan = outcome.tombstonedSchema, let parent,
-               let i = store.sites.firstIndex(where: { $0.id == parent.id }),
-               !store.sites[i].pendingSchemaDrops.contains(orphan) {
-                store.sites[i].pendingSchemaDrops.append(orphan)
+            // The DB server was down, so the env's schemas are still there (#17).
+            // Tombstone them for the next shared-env create to reap.
+            if let parent, let i = store.sites.firstIndex(where: { $0.id == parent.id }) {
+                for orphan in outcome.tombstonedSchemas where !store.sites[i].pendingSchemaDrops.contains(orphan) {
+                    store.sites[i].pendingSchemaDrops.append(orphan)
+                }
             }
         }
         if let parent { await ctx.lifecycle.stopSharedDatabaseIfUnused(parent: parent) }
@@ -806,6 +836,48 @@ enum MCPToolDispatch {
 
     // MARK: - db_import (PLAN.md §2m)
 
+    /// The import options shared by `db_import` and `worktree_create`'s `import_file`.
+    private static func importOptions(from args: [String: Value]) throws -> DBImportOptions {
+        let media: DBImportMediaOption
+        switch args["media"]?.stringValue ?? "remote" {
+        case "remote": media = .remote
+        case "skip": media = .skip
+        case "copy":
+            guard let mediaPath = args["media_path"]?.stringValue else {
+                throw ToolError("bad_args", "media=\"copy\" requires media_path.")
+            }
+            media = .copy(from: URL(fileURLWithPath: (mediaPath as NSString).expandingTildeInPath))
+        default:
+            throw ToolError("bad_args", "media must be \"remote\", \"skip\", or \"copy\".")
+        }
+        return DBImportOptions(
+            scrub: args["scrub"]?.boolValue ?? true,
+            allowedEmails: args["allowed_emails"]?.arrayValue?.compactMap { $0.stringValue } ?? [],
+            allowedDomains: args["allowed_domains"]?.arrayValue?.compactMap { $0.stringValue } ?? [],
+            media: media,
+            createAdmin: args["create_admin"]?.boolValue ?? true,
+            sourceURLOverride: args["source_url"]?.stringValue
+        )
+    }
+
+    /// `db_import`'s success payload.
+    private static func importPayload(_ summary: DBImportSummary, target: String) -> [String: Any] {
+        [
+            "site": target,
+            "sourceURL": summary.sourceURL as Any? ?? NSNull(),
+            "localURL": summary.localURL,
+            "backupPath": summary.backupPath,
+            "usersScrubbed": summary.usersScrubbed,
+            "usersPreserved": summary.usersPreserved,
+            "commentsRemoved": summary.commentsRemoved,
+            "replacementsMade": summary.replacementsMade as Any? ?? NSNull(),
+            "mediaMode": summary.mediaMode,
+            "adminUser": summary.adminUser as Any? ?? NSNull(),
+            "adminPassword": summary.adminPassword as Any? ?? NSNull(),
+            "dumpSizeBytes": summary.dumpSizeBytes,
+        ]
+    }
+
     /// Imports a `.sql`/`.sql.gz` dump into a site's or worktree env's database.
     /// Auto-starts a stopped target (the kit never starts containers itself) and
     /// persists a site's detected/overridden source URL into
@@ -828,28 +900,7 @@ enum MCPToolDispatch {
         case .env(let e): publicURL = e.url
         }
 
-        let mediaArg = args["media"]?.stringValue ?? "remote"
-        let media: DBImportMediaOption
-        switch mediaArg {
-        case "remote": media = .remote
-        case "skip": media = .skip
-        case "copy":
-            guard let mediaPath = args["media_path"]?.stringValue else {
-                throw ToolError("bad_args", "media=\"copy\" requires media_path.")
-            }
-            media = .copy(from: URL(fileURLWithPath: (mediaPath as NSString).expandingTildeInPath))
-        default:
-            throw ToolError("bad_args", "media must be \"remote\", \"skip\", or \"copy\".")
-        }
-
-        let options = DBImportOptions(
-            scrub: args["scrub"]?.boolValue ?? true,
-            allowedEmails: args["allowed_emails"]?.arrayValue?.compactMap { $0.stringValue } ?? [],
-            allowedDomains: args["allowed_domains"]?.arrayValue?.compactMap { $0.stringValue } ?? [],
-            media: media,
-            createAdmin: args["create_admin"]?.boolValue ?? true,
-            sourceURLOverride: args["source_url"]?.stringValue
-        )
+        let options = try importOptions(from: args)
 
         // Auto-start (mirrors the CLI surface): the kit throws .siteNotRunning
         // rather than starting containers itself.
@@ -867,32 +918,84 @@ enum MCPToolDispatch {
                     if let i = env.sites.firstIndex(where: { $0.id == site.id }) { env.sites[i].lastImportSourceURL = detectedSource }
                 }
             }
-            return MCPResult.json([
-                "site": targetSlug,
-                "sourceURL": summary.sourceURL as Any? ?? NSNull(),
-                "localURL": summary.localURL,
-                "backupPath": summary.backupPath,
-                "usersScrubbed": summary.usersScrubbed,
-                "usersPreserved": summary.usersPreserved,
-                "commentsRemoved": summary.commentsRemoved,
-                "replacementsMade": summary.replacementsMade as Any? ?? NSNull(),
-                "mediaMode": summary.mediaMode,
-                "adminUser": summary.adminUser as Any? ?? NSNull(),
-                "adminPassword": summary.adminPassword as Any? ?? NSNull(),
-                "dumpSizeBytes": summary.dumpSizeBytes,
-            ])
+            return MCPResult.json(importPayload(summary, target: targetSlug))
         } catch let dbError as DatabaseImportError {
-            if case .phaseFailed(let phase, let short, let full, let rolledBack) = dbError {
-                return MCPResult.json([
-                    "error": "import_failed",
-                    "phase": phase.rawValue,
-                    "short": short,
-                    "full": full,
-                    "rolledBack": rolledBack,
-                ], isError: true)
-            }
-            throw ToolError("import_failed", dbError.description)
+            return MCPResult.json(importErrorPayload(DBImportFailureJSON(dbError)), isError: true)
         }
+    }
+
+    /// `db_import`'s error payload.
+    private static func importErrorPayload(_ failure: DBImportFailureJSON) -> [String: Any] {
+        var payload: [String: Any] = ["error": failure.error]
+        if let phase = failure.phase { payload["phase"] = phase }
+        if let short = failure.short { payload["short"] = short }
+        if let full = failure.full { payload["full"] = full }
+        if let rolledBack = failure.rolledBack { payload["rolledBack"] = rolledBack }
+        if let detail = failure.detail { payload["detail"] = detail }
+        return payload
+    }
+
+    // MARK: - site_export / site_import
+
+    /// Exports a site to a zip. Auto-starts a stopped site; no streaming progress.
+    private static func siteExport(_ args: [String: Value], ctx: CLIContext, slug: String) async throws -> CallTool.Result {
+        guard let output = args["output"]?.stringValue else {
+            throw ToolError("bad_args", "`output` is required (absolute path of the .zip to write).")
+        }
+        let expanded = (output as NSString).expandingTildeInPath
+        guard expanded.hasPrefix("/") else {
+            throw ToolError("bad_args", "`output` must be an absolute path.")
+        }
+        let targetSlug = args["slug"]?.stringValue ?? slug
+        let envelope = try await ctx.load()
+        guard let resolved = resolveTarget(targetSlug, in: envelope) else {
+            throw ToolError("site_not_found", "No site or environment with slug \(targetSlug).")
+        }
+        guard case .site(let site) = resolved else {
+            throw ToolError("bad_args", "site_export works on sites, not worktree environments.")
+        }
+        await ctx.persistence.recordActivity(instanceID: site.instanceID)
+        try await ctx.ensureRunning(resolved, envelope: envelope)
+
+        let fileName = SiteArchiveService.defaultFileName(slug: site.slug, date: Date())
+        let destination = archiveDestination(expanded, fileName: fileName)
+        let extra = args["exclude"]?.arrayValue?.compactMap { $0.stringValue } ?? []
+        let service = SiteArchiveService(cli: ctx.cli, lifecycle: ctx.lifecycle, persistence: ctx.persistence)
+        let summary = try await service.export(site, to: destination,
+                                               excludes: SiteArchiveService.defaultExcludes + extra,
+                                               overwrite: args["force"]?.boolValue ?? false) { _ in }
+        return MCPResult.text(CLIJSON.string(summary), isError: false)
+    }
+
+    /// Creates a new site from an export zip. The MCP session stays scoped to its own site.
+    private static func siteImport(_ args: [String: Value], ctx: CLIContext) async throws -> CallTool.Result {
+        guard let file = args["file"]?.stringValue else {
+            throw ToolError("bad_args", "`file` is required (absolute path to a site_export .zip).")
+        }
+        let domain = args["domain"]?.stringValue
+        let noDomain = args["no_domain"]?.boolValue ?? false
+        if domain != nil && noDomain {
+            throw ToolError("bad_args", "`domain` and `no_domain` cannot be used together.")
+        }
+        let domainChoice: SiteImportDomain
+        if noDomain {
+            domainChoice = .none
+        } else if let domain {
+            domainChoice = .set(domain)
+        } else {
+            domainChoice = .keep
+        }
+        let options = SiteImportOptions(name: args["name"]?.stringValue, domain: domainChoice,
+                                        parentFolder: SiteFolders.defaultSitesRoot,
+                                        groupName: nil, imageOverride: nil)
+        let archiveURL = URL(fileURLWithPath: (file as NSString).expandingTildeInPath).standardizedFileURL
+        let service = SiteArchiveService(cli: ctx.cli, lifecycle: ctx.lifecycle, persistence: ctx.persistence)
+        let result = try await service.importSite(archive: archiveURL, options: options) { _ in }
+        return MCPResult.json([
+            "slug": result.site.slug,
+            "url": result.site.url.absoluteString,
+            "warnings": result.warnings,
+        ])
     }
 
     // MARK: - Small utilities
@@ -935,6 +1038,7 @@ enum MCPToolDispatch {
     private static func humanError(_ error: Error) -> String {
         if let e = error as? ToolError { return MCPJSON.string(["error": e.code, "detail": e.detail]) }
         if let e = error as? ContainerCLIError { return MCPJSON.string(["error": "container_error", "detail": e.description]) }
+        if let e = error as? SiteArchiveError { return MCPJSON.string(["error": errorCode(e) ?? "internal", "detail": e.description]) }
         if let e = error as? WPConfigService.ConfigError { return MCPJSON.string(["error": "wp_config_error", "detail": e.description]) }
         return MCPJSON.string(["error": "internal", "detail": "\(error)"])
     }

@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Observation
+import os
 import WPContainerKit
 
 /// Outcome of registering a site's custom domain in `/etc/hosts` (PLAN.md §2l).
@@ -32,6 +33,7 @@ public final class AppViewModel {
     @ObservationIgnored let httpsIntegration: HTTPSIntegration
     @ObservationIgnored let proxy: HTTPSProxy
     @ObservationIgnored let dbImporter: DatabaseImportService
+    @ObservationIgnored let archiver: SiteArchiveService
     @ObservationIgnored let notifications = NotificationService.shared
 
     /// Instances whose start/stop status notifications are suppressed because an
@@ -91,11 +93,20 @@ public final class AppViewModel {
     /// A dump file dropped on the site detail pane (§2m drag & drop) — set just
     /// before `presentingImportDB` so the sheet opens pre-filled with it.
     public var pendingImportDump: URL?
+    public var presentingExportSite = false
+    /// The site the export sheet exports.
+    public var exportSiteTarget: Site?
+    public var presentingImportSite = false
+    /// A .zip dropped on the main window's panel, which the import sheet opens with.
+    public var pendingImportArchive: URL?
 
     /// Whether the pre-import database backup was successfully restored after
     /// the last failed `importDatabase` call — nil when the last failure (if
     /// any) wasn't a database import. Read alongside `lastError`/`lastErrorDetail`.
     public var lastImportRolledBack: Bool?
+
+    /// Whether the last failed `importSite` call removed the partly created site.
+    public var lastSiteImportRolledBack = false
 
     /// WP × PHP version matrix for the setup pickers (PLAN.md §2k): starts from
     /// the cached/static matrix and is refreshed from Docker Hub at launch.
@@ -126,6 +137,7 @@ public final class AppViewModel {
         // a wake against a concurrent UI start.
         self.proxy = HTTPSProxy(ca: ca, lifecycle: lifecycle)
         self.dbImporter = DatabaseImportService(cli: cli, lifecycle: lifecycle)
+        self.archiver = SiteArchiveService(cli: cli, lifecycle: lifecycle, persistence: StorePersistence())
         self.store = SiteStore()
     }
 
@@ -315,6 +327,88 @@ public final class AppViewModel {
             lastError = SiteLifecycleErrorText(error)
             return nil
         }
+    }
+
+    // MARK: - Site export and import
+
+    /// A step surfaced by `exportSite`: starting a stopped site, or one of the
+    /// archive service's export phases.
+    public enum SiteExportStep: Sendable, Equatable {
+        case startingSite
+        case phase(SiteExportPhase)
+    }
+
+    /// Exports `site` to `destination`, starting it first when it is stopped.
+    /// The save panel has already confirmed replacing an existing file.
+    /// On failure, sets `lastError` and returns nil.
+    @discardableResult
+    public func exportSite(
+        _ site: Site,
+        to destination: URL,
+        excludes: [String],
+        onStep: @escaping @Sendable (SiteExportStep) -> Void
+    ) async -> SiteExportSummary? {
+        lastError = nil
+        lastErrorDetail = nil
+
+        var current = store.site(id: site.id) ?? site
+        if !current.status.isRunning {
+            onStep(.startingSite)
+            do {
+                let provisioned = try await lifecycle.startSite(current)
+                if provisioned != current.provisioned {
+                    current.provisioned = provisioned
+                    await store.upsertSite(current)
+                }
+            } catch {
+                lastError = "Couldn't start the site: \(SiteLifecycleErrorText(error))"
+                return nil
+            }
+        }
+
+        do {
+            return try await archiver.export(current, to: destination, excludes: excludes, overwrite: true) { phase in
+                Task { @MainActor in onStep(.phase(phase)) }
+            }
+        } catch let error as SiteArchiveError {
+            lastError = error.description
+            return nil
+        } catch {
+            lastError = SiteLifecycleErrorText(error)
+            return nil
+        }
+    }
+
+    /// Creates a new site from `archive`, then reloads the store, refreshes
+    /// proxy routing, and selects the site. On failure, sets `lastError` and
+    /// `lastSiteImportRolledBack` and returns nil.
+    @discardableResult
+    public func importSite(
+        _ archive: URL,
+        options: SiteImportOptions,
+        onStep: @escaping @Sendable (SiteImportPhase) -> Void
+    ) async -> SiteImportResult? {
+        lastError = nil
+        lastErrorDetail = nil
+        lastSiteImportRolledBack = false
+
+        let rolledBack = OSAllocatedUnfairLock(initialState: false)
+        do {
+            let result = try await archiver.importSite(archive: archive, options: options) { phase in
+                if phase == .rollingBack { rolledBack.withLock { $0 = true } }
+                Task { @MainActor in onStep(phase) }
+            }
+            await store.reload()
+            await refreshProxyRouting()
+            selection = result.site.id
+            return result
+        } catch let error as SiteArchiveError {
+            lastError = error.description
+        } catch {
+            lastError = SiteLifecycleErrorText(error)
+        }
+        lastSiteImportRolledBack = rolledBack.withLock { $0 }
+        return nil
     }
 
     // MARK: - Resource limits (issue #11)
@@ -1414,9 +1508,9 @@ public final class AppViewModel {
             let outcome = await worktrees.delete(env, parent: parent, keepBranch: true, keepWorktree: keepWorktree)
             await store.removeEnv(id: env.id)
             if let parent {
-                // The DB server was down, so the schema is still there (#17) —
-                // tombstone it for the next shared-env create to reap.
-                await store.updatePendingSchemaDrops(siteID: parent.id, adding: outcome.tombstonedSchema)
+                // The DB server was down, so the schemas are still there (#17) —
+                // tombstone them for the next shared-env create to reap.
+                await store.updatePendingSchemaDrops(siteID: parent.id, adding: outcome.tombstonedSchemas)
                 await lifecycle.stopSharedDatabaseIfUnused(parent: parent)
             }
             if selection == env.id { selection = env.parentSiteID }

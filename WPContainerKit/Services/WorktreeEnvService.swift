@@ -69,11 +69,11 @@ public actor WorktreeEnvService {
 
     /// What a `delete` could not finish, for the caller to persist (issue #17).
     public struct DeletionOutcome: Sendable {
-        /// The env's schema, still present on a DB server that was down. The
-        /// caller MUST append it to the parent site's `pendingSchemaDrops` so a
-        /// later create reaps it. nil when there was nothing to drop or the drop
-        /// succeeded.
-        public let tombstonedSchema: String?
+        /// Schemas still present on a DB server that was down: the env's own
+        /// schema and its `wp-container test` schema. The caller MUST append them
+        /// to the parent site's `pendingSchemaDrops` so a later create reaps
+        /// them. Empty when there was nothing to drop or the drops succeeded.
+        public let tombstonedSchemas: [String]
     }
 
     private let cli: ContainerCLI
@@ -251,14 +251,18 @@ public actor WorktreeEnvService {
             // the shadow-mounted worktree isn't missing vendor/, built assets, or
             // provisioned plugins and the env boots into a working site (#14).
             // --ignore-existing keeps the branch's tracked files untouched.
+            // Worktrees nested inside the parent repo are full checkouts of
+            // their own, never runtime deps, so they're left out.
             if provision {
                 try await SiteFolders.seedIgnoredRuntimeDeps(from: repoURL, into: worktreePath)
             }
 
-            // 2. Clone site files (APFS CoW).
+            // 2. Clone site files (APFS CoW), minus the repo folder: the
+            // worktree is shadow-mounted over it, so a copy would never be read.
             try fm.createDirectory(at: envPath, withIntermediateDirectories: true)
             try await SiteFolders.cloneCopyOnWrite(from: parent.wordpressFolder,
-                                                   to: envPath.appendingPathComponent("wordpress", isDirectory: true))
+                                                   to: envPath.appendingPathComponent("wordpress", isDirectory: true),
+                                                   skipping: repoRelPath)
 
             // 3. Clone the database.
             if let sharedSchema {
@@ -285,14 +289,6 @@ public actor WorktreeEnvService {
                 // Fast path: copy-on-write the parent's data directory.
                 try await SiteFolders.cloneCopyOnWrite(from: parent.databaseFolder, to: env.databaseFolder)
             }
-
-            // Pre-create the shadow mountpoint intentionally. VALIDATED gotcha: if
-            // the subpath doesn't exist in the outer mount the runtime auto-creates
-            // an empty dir on the HOST as a side effect; creating it ourselves keeps
-            // it tidy (and it is removed with `.envs/<b>` on deletion). The CoW clone
-            // usually already contains this path, but a bare repo layout may not.
-            let mountpoint = env.wordpressFolder.appendingPathComponent(repoRelPath, isDirectory: true)
-            try? fm.createDirectory(at: mountpoint, withIntermediateDirectories: true)
 
             // 4. Start env containers (shared recipe + shadow mount). For a
             // shared-database env the parent is the `dbProvider`, so no DB
@@ -363,15 +359,16 @@ public actor WorktreeEnvService {
     /// Deletion: stop containers → drop the shared schema → git worktree remove
     /// → delete `.envs/<b>`.
     ///
-    /// Returns what the caller still has to persist: when the schema couldn't be
-    /// dropped (server down), `tombstonedSchema` must be appended to the parent
-    /// site's `pendingSchemaDrops`, or the schema is never reaped.
+    /// Returns what the caller still has to persist: when a schema couldn't be
+    /// dropped (server down), `tombstonedSchemas` must be appended to the parent
+    /// site's `pendingSchemaDrops`, or it is never reaped.
     @discardableResult
     public func delete(_ env: WorktreeEnv, parent: Site?, keepBranch: Bool, keepWorktree: Bool) async -> DeletionOutcome {
         // Never the parent's DB container: `deleteContainers` skips it for a
         // shared-database env (issue #17).
         await lifecycle.deleteContainers(env)
         let dropped = await dropSharedSchema(of: env, parent: parent)
+        let testSchemaDropped = await dropSharedTestSchema(of: env, parent: parent)
         if !keepWorktree, let parent {
             let repoURL = parent.repoURL(forRelativePath: env.repoRelPath)
             try? await git.worktreeRemove(repo: repoURL, path: env.worktreePath, force: true)
@@ -380,8 +377,10 @@ public actor WorktreeEnvService {
         // Note: `keepBranch` is honored by NOT deleting the git branch here; we
         // never delete branches (worktree remove leaves the branch intact).
         _ = keepBranch
-        let tombstone = (!dropped && env.sharedDatabase) ? env.databaseSchema : nil
-        return DeletionOutcome(tombstonedSchema: tombstone)
+        var tombstones: [String] = []
+        if !dropped, env.sharedDatabase, let schema = env.databaseSchema { tombstones.append(schema) }
+        if !testSchemaDropped { tombstones.append(TestSuite.databaseName(for: env)) }
+        return DeletionOutcome(tombstonedSchemas: tombstones)
     }
 
     // MARK: - Shared schema teardown (issue #17)
@@ -406,18 +405,38 @@ public actor WorktreeEnvService {
         return result?.succeeded ?? false
     }
 
+    /// Drop a shared-database env's `wp-container test` schema off the parent's
+    /// server. An isolated env's test schema goes with its own database
+    /// container. Returns false ONLY when the server was down — the caller must
+    /// then tombstone it. The same guards as `dropSharedSchema`, with
+    /// `TestSuite.isTestSchemaName` for the name.
+    private func dropSharedTestSchema(of env: WorktreeEnv, parent: Site?) async -> Bool {
+        let schema = TestSuite.databaseName(for: env)
+        guard env.sharedDatabase, TestSuite.isTestSchemaName(schema),
+              let parent, parent.dbContainerName == env.dbContainerName else { return true }
+        guard let dbHost = (try? await cli.ipAddress(of: env.dbContainerName)) ?? nil,
+              !dbHost.isEmpty else { return false }
+        let result = try? await cli.runCapturing(SiteRecipe.dropEnvDatabaseArgs(dbHost: dbHost, schema: schema))
+        return result?.succeeded ?? false
+    }
+
+    /// Whether a tombstoned name may be dropped: a managed env schema or a test
+    /// schema, never the parent's own `wordpress`.
+    static func isReapableSchemaName(_ name: String) -> Bool {
+        name != SiteRecipe.dbName && (WorktreeEnv.isManagedSchemaName(name) || TestSuite.isTestSchemaName(name))
+    }
+
     /// Drop tombstoned schemas (`Site.pendingSchemaDrops`) off a live server,
     /// returning the ones whose DROP actually succeeded so the caller clears
     /// exactly those — a drop that failed keeps its reminder for next time.
     ///
-    /// Every name is re-checked against `WorktreeEnv.isManagedSchemaName` even
-    /// though only we ever wrote them, so a hand-edited store can't turn this
-    /// into `DROP DATABASE wordpress`.
+    /// Every name is re-checked with `isReapableSchemaName` even though only we
+    /// ever wrote them, so a hand-edited store can't turn this into
+    /// `DROP DATABASE wordpress`.
     private func reapTombstonedSchemas(dbHost: String, names: [String],
                                        excluding current: String) async -> [String] {
         var reaped: [String] = []
-        for schema in Set(names) where schema != current
-            && WorktreeEnv.isManagedSchemaName(schema) && schema != SiteRecipe.dbName {
+        for schema in Set(names) where schema != current && Self.isReapableSchemaName(schema) {
             let result = try? await cli.runCapturing(SiteRecipe.dropEnvDatabaseArgs(dbHost: dbHost, schema: schema))
             if result?.succeeded == true { reaped.append(schema) }
         }

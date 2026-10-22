@@ -567,7 +567,72 @@ dump), and the fast argument-validation cases. 24/24 assertions passed, no
 code changes were needed. A full import of a small (~38KB) dump takes ~20s;
 site create+start+auto-provision another ~10s.
 
-## 2n. Site sharing
+## 2n. Site export / import (portable `.zip`)
+
+Move a site between Macs as one archive. Kit-first: `SiteArchiveService` in
+WPContainerKit does the work; the CLI, MCP tools and app sheets are thin surfaces
+over it.
+
+**Archive.** `<slug>-<yyyyMMdd>.zip` with `wpc-site.json` (manifest, `schemaVersion`
+1), `database.sql` (`wp db export --single-transaction`) and `wordpress/` (the full
+install). Built with `/usr/bin/zip -r -y -q -X` (symlinks stored as links) and read
+with `unzip` / `zipinfo`. Default excludes, editable at export: `.git`, `.svn`,
+`.DS_Store`, `__MACOSX`, `node_modules`, `bower_components`; `.wpc-export` and
+`.wpc-import` are always excluded. Bind mounts under `/var/www/html` are inlined
+into `wordpress/`; mounts elsewhere are skipped with a warning.
+
+**Settings that travel.** `imageTag`, `phpVersion`, `networkType`, HTTPS, Xdebug,
+Redis, Elasticsearch and Mailpit toggles, CPU/memory limits, `idleStopMinutes`,
+`customDomain` (editable on import) and `lastImportSourceURL`. Ports, ids, group,
+mounts, agent-tools state and the `database/`, `.backups/`, `php/`, `.envs/` and
+`.worktrees/` folders stay behind.
+
+**Export.** The site is started if needed (CLI `--no-start` opts out), the database
+is dumped through the wp-cli one-shot container into a transient `.wpc-export/`,
+and the zip is written to a temp file next to the destination and renamed into
+place. Temp files are removed on every exit path. Symlinks pointing outside
+`wordpress/` are reported as warnings because import drops them, and are left out
+of the archive (a mount's links are left out only when their path climbs out).
+
+**Import order.**
+1. Validate the zip: manifest present, `schemaVersion` <= 1, safe entry paths (no
+   absolute paths or `..`, top level limited to `wpc-site.json`, `database.sql`,
+   `wordpress/`), free disk >= 1.2x the uncompressed size.
+2. Resolve a unique slug and the domain choice (keep, set or none).
+3. Create the store record with `provisioned = true`.
+4. Extract on the same volume with symlink entries held back (refusing entries
+   stored under one), recreate the links under `wordpress/` and drop those that
+   resolve outside it or do not resolve, move `wordpress/` into the site folder,
+   write the `wp` shim, enable Mailpit, start the site.
+5. `wp db import`, then `EnvURLMigrator.migrate` rewrites the source URLs to the new
+   site's authority (multisite, `DOMAIN_CURRENT_SITE`, `WP_HOME`/`WP_SITEURL`,
+   forwarded-proto).
+6. Flush caches, cover the CA leaf for HTTPS, apply the custom domain. A domain or
+   hosts failure is a warning and the site stays.
+
+**Rollback.** A failure or cancellation from step 3 through the cache flush removes
+the store record, containers, cert hosts and folder, and a group the import created
+once no site is left in it.
+`wpc import` and `wpc export` turn Ctrl-C and SIGTERM into a cancellation and exit
+130 once cleanup is done. Work folders (`.wpc-import-*`) and partial archives more
+than six hours old are swept by the next import or export. Content is imported as-is: no
+scrub, no admin reset. HTTPS stays on; if the wpc CA is untrusted on the importing
+machine, import warns and points to the trust step.
+
+**Surfaces.**
+- *CLI:* `wpc export <slug> [-o file.zip] [--exclude p]... [--no-default-excludes]
+  [--force] [--no-start] [--json]`; `wpc import <file.zip> [--name N]
+  [--domain D | --no-domain] [--path DIR] [--group G] [--image TAG] [--json]`.
+- *MCP:* `site_export` and `site_import`, synchronous, returning a summary.
+- *App:* Export Site… in the sidebar context menu only (editable exclude list
+  remembered per user, save panel, progress, Reveal in Finder). Import via File ▸
+  Import Site… (⇧⌘I) or by dropping a `.zip` on the main window's panel; the sheet shows a source summary, Name
+  and Domain fields and the parent folder, then per-phase progress and Open Site.
+
+**Non-goals.** Zips from LocalWP or other tools (a zip without `wpc-site.json` fails
+with "not a wpc export"); exporting worktree envs.
+
+## 2o. Site sharing
 
 Any site or branch environment can be put on a public URL behind a password.
 

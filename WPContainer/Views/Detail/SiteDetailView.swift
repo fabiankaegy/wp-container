@@ -37,8 +37,14 @@ struct SiteDetailView: View {
             }
         }
         // Drop a .sql/.sql.gz dump anywhere on the pane to open the import
-        // sheet pre-filled with it (PLAN.md §2m).
+        // sheet pre-filled with it (PLAN.md §2m). A .zip site export opens
+        // the Import Site sheet instead.
         .dropDestination(for: URL.self) { urls, _ in
+            if let archive = urls.first(where: { $0.pathExtension.lowercased() == "zip" }) {
+                vm.pendingImportArchive = archive
+                vm.presentingImportSite = true
+                return true
+            }
             guard let dump = urls.first(where: DumpFile.isDumpFile) else { return false }
             vm.selection = site.id
             vm.pendingImportDump = dump
@@ -47,21 +53,7 @@ struct SiteDetailView: View {
         } isTargeted: { importDropTargeted = $0 }
         .overlay {
             if importDropTargeted {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Theme.accent.opacity(0.10))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .strokeBorder(Theme.accent, style: StrokeStyle(lineWidth: 2, dash: [8]))
-                    )
-                    .overlay {
-                        Label("Drop to import database", systemImage: "arrow.down.doc.fill")
-                            .font(.headline)
-                            .foregroundStyle(Theme.accent)
-                            .padding(14)
-                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    }
-                    .allowsHitTesting(false)
-                    .padding(8)
+                ImportDropOverlay()
             }
         }
         .animation(.easeOut(duration: 0.12), value: importDropTargeted)

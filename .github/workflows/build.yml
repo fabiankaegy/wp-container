@@ -1,0 +1,46 @@
+# Builds the app and CLI and runs the unit tests on every PR and push to main.
+name: Build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # The deployment target is macOS 26, so this needs the macOS 26 SDK.
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      # The Makefile expects Homebrew's arm64 path, which matches the runner.
+      - run: brew install xcodegen
+      - run: xcodebuild -version
+      - run: make verify-version
+      # Debug builds sign ad-hoc, so no certificates are needed here.
+      - run: make build
+      - run: make test
+      # A downloadable Debug app (CLI embedded) for testing a PR without building it.
+      - name: Package app
+        if: github.event_name == 'pull_request'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          zip="WPContainer-pr${PR_NUMBER}-${HEAD_SHA:0:7}.zip"
+          ditto -c -k --keepParent build/Build/Products/Debug/WPContainer.app "$zip"
+          echo "APP_ZIP=$zip" >> "$GITHUB_ENV"
+      - if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.APP_ZIP }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 14

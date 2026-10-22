@@ -26,12 +26,15 @@ struct WPContainerCLI: AsyncParsableCommand {
             AgentToolsCommand.self,
             ShimCommand.self,
             HTTPSCommand.self,
+            MountCommand.self,
             ProxyCommand.self,
             XdebugCommand.self,
             ElasticsearchCommand.self,
             MailpitCommand.self,
             RedisCommand.self,
             DBCommand.self,
+            ExportCommand.self,
+            ImportCommand.self,
             LimitsCommand.self,
             IdleCommand.self,
             DomainCommand.self,
@@ -156,7 +159,10 @@ func emitLine(_ text: String) {
 
 /// Print an error (JSON on stderr when `--json`) and exit non-zero.
 func failCommand(_ error: Error, json: Bool) -> ExitCode {
-    let cliError = (error as? CLIErrorJSON) ?? CLIErrorJSON(humanText(error))
+    let cliError = (error as? CLIErrorJSON)
+        ?? (error as? SiteMounts.Failure)?.cliError
+        ?? errorCode(error).map { CLIErrorJSON($0, detail: humanText(error)) }
+        ?? CLIErrorJSON(humanText(error))
     if json {
         FileHandle.standardError.write(Data((CLIJSON.string(cliError) + "\n").utf8))
     } else {
@@ -167,14 +173,32 @@ func failCommand(_ error: Error, json: Bool) -> ExitCode {
     return ExitCode.failure
 }
 
-private func humanText(_ error: Error) -> String {
+func humanText(_ error: Error) -> String {
     if let e = error as? ContainerCLIError { return e.description }
     if let e = error as? LifecycleError { return e.description }
     if let e = error as? GitError { return e.description }
     if let e = error as? WorktreeError { return e.description }
     if let e = error as? MagicLoginError { return e.description }
     if let e = error as? ImageUnavailableError { return e.description }
+    if let e = error as? SiteArchiveError { return e.description }
     return "\(error)"
+}
+
+/// The stable `error` code for typed errors that carry one.
+func errorCode(_ error: Error) -> String? {
+    guard let archiveError = error as? SiteArchiveError else { return nil }
+    switch archiveError {
+    case .unsupportedSchema: return "unsupported_schema"
+    case .notAWPCExport: return "not_a_wpc_export"
+    case .unsafeEntry: return "unsafe_entry"
+    case .insufficientDiskSpace: return "insufficient_disk_space"
+    case .siteNotRunning: return "not_running"
+    case .outputExists: return "output_exists"
+    case .toolFailed: return "tool_failed"
+    case .domainInUse: return "domain_in_use"
+    case .invalidDomain: return "invalid_domain"
+    case .noFreePort: return "no_free_port"
+    }
 }
 
 // MARK: - list
@@ -231,6 +255,10 @@ struct CreateCommand: AsyncParsableCommand {
         (GitHub owner/repo#ref, zip URLs) are installed, and plugins activated. \
         The site is started to apply them. --wp, --php-version, --php, and \
         --multisite override the project's values.
+
+        `--mount <host-folder>:<path>` bind-mounts a host folder at a path in \
+        the WordPress folder, such as wp-content/plugins/example. It replaces a \
+        project mount at the same path. Manage mounts later with `mount`.
         """
     )
     @Argument(help: "Site name.") var name: String
@@ -244,12 +272,15 @@ struct CreateCommand: AsyncParsableCommand {
     @Option(name: .long, help: "CPU cap per container (1–8; default: container default of 4).") var cpus: Int?
     @Option(name: .long, help: "Memory cap per container in MB (e.g. 512; default: container default of 1024).") var memory: Int?
     @Option(name: .customLong("wp-env"), help: "Build the site from this project's .wp-env.json, and start it.") var wpEnv: String?
+    @Option(name: .customLong("mount"), help: ArgumentHelp("Bind-mount a host folder into the site, e.g. ~/code/example:wp-content/plugins/example. Repeatable.", valueName: "host-folder:path"))
+    var mounts: [String] = []
     @OptionGroup var output: JSONOptions
 
     func run() async throws {
         let ctx = CLIContext()
         do {
             let plan = try wpEnv.map { try WPEnvPlan(project: WPEnvProject.load(directory: Self.expand($0))) }
+            let siteMounts = try Self.mounts(mounts, plan: plan)
             let wp = self.wp ?? plan?.wordpressVersion
             let phpVersion = self.phpVersion ?? plan?.phpVersion
             let multisite = self.multisite ?? ((plan?.multisite ?? false) ? NetworkType.subdirectory.rawValue : nil)
@@ -298,7 +329,6 @@ struct CreateCommand: AsyncParsableCommand {
             let siteNetwork = networkType
             let siteCPU = cpus
             let siteMemory = memory
-            let siteMounts = plan?.mounts ?? []
             guard let (_, created, updated) = try await ctx.persistence.allocatePort(reserve: { port, env in
                 var s = Site(name: siteName, slug: slug, path: sitePath,
                              port: port, imageTag: siteImageTag, phpVersion: sitePHPLabel,
@@ -340,7 +370,7 @@ struct CreateCommand: AsyncParsableCommand {
                 }
                 dbHost = host
             } catch {
-                await Self.discard(created, keepFolder: folderExisted, ctx: ctx)
+                await SiteDiscard.discard(created, keepFolder: folderExisted, lifecycle: ctx.lifecycle, persistence: ctx.persistence)
                 if !output.json {
                     FileHandle.standardError.write(Data("Removed \(created.slug): it didn't start, so .wp-env.json wasn't applied.\n".utf8))
                 }
@@ -369,17 +399,19 @@ struct CreateCommand: AsyncParsableCommand {
         }
     }
 
-    private static func expand(_ path: String) -> URL {
-        URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
+    /// The `--mount` folders, plus the project's mounts that don't share a
+    /// container path with one of them.
+    private static func mounts(_ specs: [String], plan: WPEnvPlan?) throws -> [Mount] {
+        let base = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let explicit = try specs.map { try SiteMounts.parse($0, relativeTo: base) }
+        let paths = Set(explicit.map(\.containerPath))
+        var mounts = (plan?.mounts ?? []).filter { !paths.contains($0.containerPath) }
+        for mount in explicit { mounts = try SiteMounts.adding(mount, to: mounts) }
+        return mounts
     }
 
-    /// Removes a just-created site: its containers, store record, and
-    /// certificate hosts, and its folder unless that was on disk before.
-    private static func discard(_ site: Site, keepFolder: Bool, ctx: CLIContext) async {
-        await ctx.lifecycle.deleteContainers(site)
-        if !keepFolder { try? FileManager.default.trashItem(at: site.path, resultingItemURL: nil) }
-        _ = try? await ctx.persistence.mutate { store in store.sites.removeAll { $0.id == site.id } }
-        try? await CertificateAuthority().removeLeafCoverage(site.proxyHosts)
+    private static func expand(_ path: String) -> URL {
+        URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
     }
 }
 
@@ -592,12 +624,12 @@ struct DeleteCommand: AsyncParsableCommand {
                 let outcome = await ctx.worktrees.delete(env, parent: parent, keepBranch: true, keepWorktree: false)
                 _ = try await ctx.persistence.mutate { store in
                     store.envs.removeAll { $0.id == env.id }
-                    // The DB server was down, so the env's schema is still there
-                    // (issue #17). Tombstone it for the next shared-env create.
-                    if let orphan = outcome.tombstonedSchema, let parent,
-                       let i = store.sites.firstIndex(where: { $0.id == parent.id }),
-                       !store.sites[i].pendingSchemaDrops.contains(orphan) {
-                        store.sites[i].pendingSchemaDrops.append(orphan)
+                    // The DB server was down, so the env's schemas are still there
+                    // (issue #17). Tombstone them for the next shared-env create.
+                    if let parent, let i = store.sites.firstIndex(where: { $0.id == parent.id }) {
+                        for orphan in outcome.tombstonedSchemas where !store.sites[i].pendingSchemaDrops.contains(orphan) {
+                            store.sites[i].pendingSchemaDrops.append(orphan)
+                        }
                     }
                 }
                 if let parent { await ctx.lifecycle.stopSharedDatabaseIfUnused(parent: parent) }
@@ -623,18 +655,43 @@ struct WorktreeCommand: AsyncParsableCommand {
 }
 
 struct WorktreeCreate: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "create", abstract: "Create a branch environment for a repo under a site's wp-content.")
+    static let configuration = CommandConfiguration(
+        commandName: "create",
+        abstract: "Create a branch environment for a repo under a site's wp-content.",
+        discussion: """
+        The env starts with a clone of the parent's database. `--import <dump>` then \
+        imports a .sql/.sql.gz dump into the env's own database, with the same \
+        pipeline and options as `wp-container db import` (backup, URL migration to \
+        the env's URL, scrub, media, local admin, rollback on failure). If the \
+        import fails, the env is kept, rolled back to the parent's data, and the \
+        command exits non-zero.
+        """
+    )
     @Option(name: .long, help: "Parent site slug.") var site: String
     @Option(name: .long, help: "Repo path relative to wordpress/ (e.g. wp-content/plugins/my-plugin).") var repo: String
     @Option(name: .long, help: "Branch name.") var branch: String
     @Option(name: .long, help: "Base ref for a new branch.") var from: String?
     @Flag(name: .long, help: "Skip seeding the worktree with the parent's gitignored runtime deps (vendor/, built assets, provisioned plugins); leaves a bare checkout.") var noProvision: Bool = false
     @Flag(name: .long, help: "Give the environment its own MariaDB container instead of a schema on the parent site's server. Costs ~470 MB of memory; worth it only for a very large database, where cloning the parent's data directory beats a logical dump+restore.") var isolatedDb: Bool = false
+    @Option(name: .customLong("import"), help: "Import this .sql/.sql.gz dump into the new env's database.") var importDump: String?
+    @OptionGroup var importFlags: DBImportFlags
     @OptionGroup var output: JSONOptions
 
     func run() async throws {
         let ctx = CLIContext()
         do {
+            // Check the dump before creating anything, so a typo can't leave a
+            // half-wanted env behind.
+            let dumpURL = importDump.map(DBImportFlags.expandPath)
+            let importOptions = try dumpURL.map { _ in try importFlags.importOptions() }
+            if let dumpURL {
+                guard FileManager.default.fileExists(atPath: dumpURL.path) else {
+                    throw CLIErrorJSON("dump_not_found", detail: dumpURL.path)
+                }
+                guard ["sql", "gz"].contains(dumpURL.pathExtension.lowercased()) else {
+                    throw CLIErrorJSON("bad_args", detail: DatabaseImportError.invalidDumpExtension(dumpURL.lastPathComponent).description)
+                }
+            }
             let envelope = try await ctx.load()
             guard let parent = envelope.sites.first(where: { $0.slug == site }) else { throw CLIErrorJSON("site_not_found", detail: site) }
             guard WorktreeEnvService.isValidRepoRelPath(repo) else {
@@ -653,12 +710,13 @@ struct WorktreeCreate: AsyncParsableCommand {
                                                       branch: branchArg, port: port, into: &store)
             }) else { throw CLIErrorJSON("no_free_port") }
 
+            let env: WorktreeEnv
             do {
                 let outcome = try await ctx.worktrees.create(parent: parent, parentIsRunning: parentRunning,
                                                             repoRelPath: repo, branch: branch, from: from,
                                                             port: reserved.port, reserved: reserved,
                                                             provision: !noProvision, isolatedDB: isolatedDb)
-                let env = outcome.env
+                env = outcome.env
                 let reaped = outcome.reapedSchemas
                 _ = try await ctx.persistence.mutate { store in
                     store.envs.removeAll { $0.id == env.id }
@@ -677,8 +735,6 @@ struct WorktreeCreate: AsyncParsableCommand {
                 if let warning = ProxyControl.envProxyWarning(port: env.port) {
                     FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
                 }
-                if output.json { emitLine(CLIJSON.string(WorktreeDescriptor(from: env))) }
-                else { emitLine("Created env \(env.envSlug) at \(env.url.absoluteString) (worktree: \(env.worktreePath.path)).") }
             } catch {
                 // Creation rolled back its containers/folders; also release the
                 // reserved store record (and with it, the port).
@@ -687,8 +743,52 @@ struct WorktreeCreate: AsyncParsableCommand {
                 }
                 throw error
             }
+            guard let dumpURL, let importOptions else {
+                if output.json { emitLine(CLIJSON.string(WorktreeDescriptor(from: env))) }
+                else { emitLine("Created env \(env.envSlug) at \(env.url.absoluteString) (worktree: \(env.worktreePath.path)).") }
+                return
+            }
+            if !output.json {
+                emitLine("Created env \(env.envSlug) at \(env.url.absoluteString) (worktree: \(env.worktreePath.path)). Importing \(dumpURL.lastPathComponent)…")
+            }
+            try await importDump(dumpURL, into: env, options: importOptions, ctx: ctx)
+        } catch let code as ExitCode {
+            throw code
         } catch {
             throw failCommand(error, json: output.json)
+        }
+    }
+
+    /// Import into the just-created env. A failed import keeps the env and exits
+    /// non-zero; `--json` still prints `{env, import}`, with the import's error.
+    private func importDump(_ dump: URL, into env: WorktreeEnv, options: DBImportOptions, ctx: CLIContext) async throws {
+        let importer = DatabaseImportService(cli: ctx.cli, lifecycle: ctx.lifecycle)
+        let jsonMode = output.json
+        do {
+            let summary = try await importer.importDatabase(into: env, publicURL: env.url, dump: dump, options: options) { phase in
+                guard !jsonMode else { return }
+                emitLine("→ \(DBImportCommand.progressLine(for: phase))")
+            }
+            if jsonMode {
+                struct CreatedWithImport: Encodable { let env: WorktreeDescriptor; let `import`: DBImportResultJSON }
+                emitLine(CLIJSON.string(CreatedWithImport(env: WorktreeDescriptor(from: env),
+                                                          import: DBImportResultJSON(from: summary, site: env.envSlug))))
+            } else {
+                emitLine(DBImportCommand.summaryText(summary, site: env.envSlug))
+            }
+        } catch {
+            let failure = DBImportFailureJSON(error)
+            if jsonMode {
+                struct CreatedWithFailedImport: Encodable { let env: WorktreeDescriptor; let `import`: DBImportFailureJSON }
+                emitLine(CLIJSON.string(CreatedWithFailedImport(env: WorktreeDescriptor(from: env), import: failure)))
+            } else {
+                let note = failure.databaseIntact
+                    ? "Env \(env.envSlug) was created with the parent's data; the import did not apply."
+                    : "Env \(env.envSlug) was created, but its database could not be restored after the failed import."
+                FileHandle.standardError.write(Data((note + "\n").utf8))
+                DBImportCommand.reportImportError(failure, json: false)
+            }
+            throw ExitCode.failure
         }
     }
 }
@@ -793,8 +893,18 @@ struct WorktreeDelete: AsyncParsableCommand {
             let envelope = try await ctx.load()
             guard let env = envelope.envs.first(where: { $0.envSlug == envSlug }) else { throw CLIErrorJSON("env_not_found", detail: envSlug) }
             let parent = envelope.sites.first { $0.id == env.parentSiteID }
-            await ctx.worktrees.delete(env, parent: parent, keepBranch: keepBranch, keepWorktree: keepWorktree)
-            _ = try await ctx.persistence.mutate { store in store.envs.removeAll { $0.id == env.id } }
+            let outcome = await ctx.worktrees.delete(env, parent: parent, keepBranch: keepBranch, keepWorktree: keepWorktree)
+            _ = try await ctx.persistence.mutate { store in
+                store.envs.removeAll { $0.id == env.id }
+                // The DB server was down, so the env's schemas are still there
+                // (issue #17). Tombstone them for the next shared-env create.
+                if let parent, let i = store.sites.firstIndex(where: { $0.id == parent.id }) {
+                    for orphan in outcome.tombstonedSchemas where !store.sites[i].pendingSchemaDrops.contains(orphan) {
+                        store.sites[i].pendingSchemaDrops.append(orphan)
+                    }
+                }
+            }
+            if let parent { await ctx.lifecycle.stopSharedDatabaseIfUnused(parent: parent) }
             try? await CertificateAuthority().removeLeafCoverage([env.domainHost])
             if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(envSlug) deleted"))) }
             else { emitLine("Deleted env \(envSlug).") }

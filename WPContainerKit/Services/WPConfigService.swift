@@ -148,20 +148,18 @@ public enum WPConfigService {
     /// define('DB_NAME', 'wordpress');
     /// ```
     public static func dbNameFollowsEnvironment(wordpressFolder: URL) -> Bool {
-        let url = configURL(for: wordpressFolder)
-        guard FileManager.default.fileExists(atPath: url.path) else { return true }
-        guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return false }
-        let text = strippingPHPComments(raw)
-        // The DB_NAME define's value expression, whatever shape it has.
-        let pattern = #"define\s*\(\s*['\"]DB_NAME['\"]\s*,\s*(.*?)\s*\)\s*;"#
-        guard let re = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) else { return false }
-        let ns = text as NSString
-        let matches = re.matches(in: text, range: NSRange(location: 0, length: ns.length))
-        // No DB_NAME define we can reason about — assume unsafe.
-        guard !matches.isEmpty else { return false }
-        return matches.allSatisfy {
-            ns.substring(with: $0.range(at: 1)).contains(dbNameEnvironmentVariable)
-        }
+        defineFollowsEnvironment(constant: "DB_NAME", variable: dbNameEnvironmentVariable, wordpressFolder: wordpressFolder)
+    }
+
+    /// The env var the image's `wp-config.php` template reads `DB_HOST` from.
+    public static let dbHostEnvironmentVariable = "WORDPRESS_DB_HOST"
+
+    /// Whether this site's `wp-config.php` takes `DB_HOST` from
+    /// `WORDPRESS_DB_HOST`, so the database can be reached at a different host.
+    /// Same rules as `dbNameFollowsEnvironment`: a missing file is safe, any
+    /// other case that can't be confirmed reads as false.
+    public static func dbHostFollowsEnvironment(wordpressFolder: URL) -> Bool {
+        defineFollowsEnvironment(constant: "DB_HOST", variable: dbHostEnvironmentVariable, wordpressFolder: wordpressFolder)
     }
 
     /// Remove PHP comments (`//`, `#`, `/* … */`) while leaving string literals
@@ -333,6 +331,23 @@ public enum WPConfigService {
         }
         // No opening tag (unusual): prepend one.
         return "<?php\n\(snippet)\n?>\n" + text
+    }
+
+    private static func defineFollowsEnvironment(constant: String, variable: String, wordpressFolder: URL) -> Bool {
+        let url = configURL(for: wordpressFolder)
+        guard FileManager.default.fileExists(atPath: url.path) else { return true }
+        guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return false }
+        let text = strippingPHPComments(raw)
+        // The define's value expression, whatever shape it has.
+        let pattern = #"define\s*\(\s*['\"]"# + constant + #"['\"]\s*,\s*(.*?)\s*\)\s*;"#
+        guard let re = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) else { return false }
+        let ns = text as NSString
+        let matches = re.matches(in: text, range: NSRange(location: 0, length: ns.length))
+        // No define we can reason about — assume unsafe.
+        guard !matches.isEmpty else { return false }
+        return matches.allSatisfy {
+            ns.substring(with: $0.range(at: 1)).contains(variable)
+        }
     }
 
     private static func phpEscape(_ s: String) -> String {
