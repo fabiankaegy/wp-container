@@ -92,6 +92,17 @@ public enum SiteRecipe {
         ["image", "pull", image]
     }
 
+    /// The official image an instance's wp container is built on: its
+    /// `imageTag` under Apache, the matching FPM tag under nginx (the base of
+    /// the nginx image). nil when an nginx instance's tag has no FPM
+    /// counterpart (`WordPressImageCatalog.fpmTag(for:)`).
+    public static func baseImageTag(for inst: any RunnableInstance) -> String? {
+        switch inst.webServer {
+        case .apache: return inst.imageTag
+        case .nginx:  return WordPressImageCatalog.fpmTag(for: inst.imageTag)
+        }
+    }
+
     // MARK: - Pre-seed (VALIDATED, Phase V)
     /// The `wordpress` image's auto-populate-into-empty-mount does NOT work on
     /// Apple `container`: virtiofs mounts appear as root:root in-guest and reject
@@ -103,7 +114,7 @@ public enum SiteRecipe {
         [
             "run", "--progress", "none", "--rm", "--entrypoint", "/bin/sh",
             "-v", "\(inst.wordpressFolder.path):/var/www/html",
-            inst.imageTag,
+            baseImageTag(for: inst) ?? inst.imageTag,
             "-c", "cp -r /usr/src/wordpress/. /var/www/html/",
         ]
     }
@@ -224,8 +235,8 @@ public enum SiteRecipe {
     // MARK: - WordPress container
     /// Build the `container run` args for the WP container.
     ///
-    /// - `imageOverride`: run a different image than `inst.imageTag` (the Xdebug
-    ///   derived image, §2c).
+    /// - `imageOverride`: run a different image than `inst.imageTag` (the nginx
+    ///   or Xdebug derived image, §2c).
     /// - `xdebugClientHost`: when non-nil, pass `-e XDEBUG_CLIENT_HOST=<gateway>`
     ///   so Xdebug's `client_host` ini substitution resolves to the host (§2c).
     /// - `sidecarEnvironment`: `KEY=value` assignments for the running sidecars
@@ -249,8 +260,8 @@ public enum SiteRecipe {
         }
         args += [
             "-v", "\(inst.wordpressFolder.path):/var/www/html",
-            // PHP overrides (50 MB upload limits, PHPConfService): mod_php
-            // reads PHP_INI_SCAN_DIR from the apache process environment, so
+            // PHP overrides (50 MB upload limits, PHPConfService): mod_php and
+            // PHP-FPM read PHP_INI_SCAN_DIR from the container environment, so
             // the mounted ini applies without a derived image or a reload.
             "-v", "\(inst.phpConfFolder.path):\(phpConfContainerPath)",
             "-e", "PHP_INI_SCAN_DIR=\(phpDefaultConfDir):\(phpConfContainerPath)",
@@ -269,6 +280,9 @@ public enum SiteRecipe {
             // nothing on disk needs editing.
             "-e", "WORDPRESS_DB_NAME=\(inst.databaseName)",
         ]
+        if inst.webServer == .nginx {
+            args += ["-e", "\(NginxImageService.networkTypeEnvName)=\(inst.networkType.rawValue)"]
+        }
         if let xdebugClientHost {
             args += ["-e", "XDEBUG_CLIENT_HOST=\(xdebugClientHost)"]
         }
@@ -665,7 +679,7 @@ public enum SiteRecipe {
             args += ["-e", assignment]
         }
         args += processArgs(workdir: workdir, env: [], interactive: interactive, tty: tty)
-        args.append(inst.imageTag)
+        args.append(baseImageTag(for: inst) ?? inst.imageTag)
         let phpunit = ["vendor/bin/phpunit"] + phpunitArgs
         args += timeLimit.map { timeLimited(phpunit, seconds: $0) } ?? phpunit
         return args

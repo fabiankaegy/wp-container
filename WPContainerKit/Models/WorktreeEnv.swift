@@ -19,6 +19,11 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
     public var envPath: URL
     public var port: Int
     public var imageTag: String
+    /// Inherited from the parent site at creation, like `imageTag`.
+    public var webServer: WebServer
+    /// Inherited from the parent site at creation. Selects nginx's
+    /// subdirectory-multisite rewrites; Apache reads the cloned `.htaccess`.
+    public var networkType: NetworkType
     public var createdAt: Date
     public var provisioned: Bool
     /// Inherited from the parent site at creation (PLAN.md §2c): the env runs its
@@ -91,7 +96,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
 
     private enum CodingKeys: String, CodingKey {
         case id, parentSiteID, parentSlug, envSlug, repoRelPath, branch,
-             worktreePath, envPath, port, imageTag, createdAt, provisioned,
+             worktreePath, envPath, port, imageTag, webServer, networkType, createdAt, provisioned,
              xdebugEnabled, elasticsearchEnabled, cpuLimit, memoryLimitMB,
              idleStopMinutes, lastActivityAt,
              mailpitEnabled, mailpitPort, redisEnabled, sharedDatabase, databaseSchema,
@@ -109,6 +114,8 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         envPath: URL,
         port: Int,
         imageTag: String,
+        webServer: WebServer = .apache,
+        networkType: NetworkType = .none,
         createdAt: Date = Date(),
         provisioned: Bool = false,
         xdebugEnabled: Bool = false,
@@ -138,6 +145,8 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         self.envPath = envPath
         self.port = port
         self.imageTag = imageTag
+        self.webServer = webServer
+        self.networkType = networkType
         self.createdAt = createdAt
         self.provisioned = provisioned
         self.xdebugEnabled = xdebugEnabled
@@ -171,6 +180,9 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         self.envPath = try c.decode(URL.self, forKey: .envPath)
         self.port = try c.decode(Int.self, forKey: .port)
         self.imageTag = try c.decode(String.self, forKey: .imageTag)
+        // Absent in envs written before the web server choice: those envs run Apache.
+        self.webServer = (try? c.decodeIfPresent(WebServer.self, forKey: .webServer)) ?? .apache
+        self.networkType = (try? c.decodeIfPresent(NetworkType.self, forKey: .networkType)) ?? .none
         self.createdAt = try c.decode(Date.self, forKey: .createdAt)
         self.provisioned = (try? c.decode(Bool.self, forKey: .provisioned)) ?? false
         // Absent in envs written before §2c.

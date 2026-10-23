@@ -27,6 +27,8 @@ public struct SiteJSON: Codable, Sendable {
     public let port: Int
     public let path: String
     public let image: String
+    /// `apache` or `nginx`.
+    public let webServer: String
     public let provisioned: Bool
     /// Sidebar group name, or nil when ungrouped (PLAN.md §2g).
     public let group: String?
@@ -42,6 +44,7 @@ public struct SiteJSON: Codable, Sendable {
         self.port = site.port
         self.path = site.path.path
         self.image = site.imageTag
+        self.webServer = site.webServer.rawValue
         self.provisioned = site.provisioned
         self.group = group
         self.mailboxUrl = site.mailboxURL?.absoluteString

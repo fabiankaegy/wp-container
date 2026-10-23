@@ -25,7 +25,11 @@ public protocol RunnableInstance: Sendable {
     /// Name used in provisioning (site title / display).
     var displayName: String { get }
     var port: Int { get }
+    /// The official Apache-shaped image tag, which records the WordPress and
+    /// PHP versions whatever the web server.
     var imageTag: String { get }
+    /// The web server in front of PHP in the wp container.
+    var webServer: WebServer { get }
     var wordpressFolder: URL { get }
     var databaseFolder: URL { get }
     /// Additional mounts beyond the base `wordpress/`→`/var/www/html` mount
@@ -125,6 +129,7 @@ public extension RunnableInstance {
     var adminURL: URL { URL(string: "http://127.0.0.1:\(port)/wp-admin")! }
     var extraMounts: [Mount] { [] }
     // Defaults so instances predating the add-ons still conform.
+    var webServer: WebServer { .apache }
     var xdebugEnabled: Bool { false }
     var elasticsearchEnabled: Bool { false }
     var networkType: NetworkType { .none }
