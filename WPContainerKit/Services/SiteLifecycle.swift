@@ -231,8 +231,8 @@ public actor SiteLifecycle {
                 try? FileManager.default.createDirectory(at: inst.wordpressFolder.appendingPathComponent(rel, isDirectory: true),
                                                          withIntermediateDirectories: true)
             }
-            // PHP overrides folder (50 MB upload limits) — must exist before
-            // the wp `container run` bind-mounts it.
+            // PHP overrides folder (upload and memory limits) — must exist
+            // before the wp `container run` bind-mounts it.
             try PHPConfService.ensure(for: inst)
             // Managed runtime PHP handlers (issue #13) live in php/prepend.d,
             // loaded by a single master auto_prepend — never in the project tree.
