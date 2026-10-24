@@ -163,6 +163,12 @@ public extension RunnableInstance {
     var phpConfFolder: URL {
         wordpressFolder.deletingLastPathComponent().appendingPathComponent("php", isDirectory: true)
     }
+    /// Per-instance nginx config folder: its `*.conf` files are included in
+    /// the nginx server block (`NginxImageService`). Sits alongside
+    /// `wordpress/`, never inside it.
+    var nginxConfFolder: URL {
+        wordpressFolder.deletingLastPathComponent().appendingPathComponent("nginx", isDirectory: true)
+    }
     /// The Mailpit web-UI URL on its published localhost port, if enabled and a
     /// port is assigned (issue #10). The reliable, proxy-independent mailbox URL.
     var mailboxURL: URL? {

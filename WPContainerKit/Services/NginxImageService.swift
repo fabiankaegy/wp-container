@@ -10,6 +10,11 @@ import Foundation
 /// readiness probe never mistakes an early 502 for a running site), then execs
 /// the official entrypoint with `php-fpm`.
 ///
+/// The site's own `nginx/*.conf` files (`RunnableInstance.nginxConfFolder`)
+/// are mounted at `siteConfContainerPath` and included inside the server
+/// block, ahead of wp-container's locations. When they fail `nginx -t`, the
+/// site starts without them and the error goes to the container log.
+///
 /// `WPC_NETWORK_TYPE=subdirectory` (set per container by
 /// `SiteRecipe.runWordPressArgs`) turns on the subdirectory-multisite
 /// rewrites, the nginx counterpart of the network `.htaccess`. Subdomain
@@ -26,10 +31,16 @@ public actor NginxImageService {
 
     /// Bump whenever `buildContext()` changes: the version is part of the
     /// derived tag, so images built from an older recipe are rebuilt.
-    static let recipeVersion = 1
+    static let recipeVersion = 2
 
     /// The env var that selects the multisite rewrites inside the container.
     public static let networkTypeEnvName = "WPC_NETWORK_TYPE"
+
+    /// Where the site's nginx config folder is mounted.
+    public static let siteConfContainerPath = "/etc/nginx/wpc/site.d"
+
+    /// Where the entrypoint links the site's `*.conf` files that nginx includes.
+    static let siteConfActivePath = "/etc/nginx/wpc/site"
 
     /// The derived image tag for an FPM base tag, e.g.
     /// `wordpress:6.8-php8.3-fpm` → `wpc-wordpress-nginx:v1-6.8-php8.3-fpm`.
@@ -116,6 +127,7 @@ public actor NginxImageService {
         error_log /dev/stderr;
 
         include /etc/nginx/wpc/active/*.conf;
+        include \(siteConfActivePath)/*.conf;
 
         location / {
             try_files $uri $uri/ /index.php?$args;
@@ -180,10 +192,20 @@ public actor NginxImageService {
     static let entrypoint = """
     #!/bin/bash
     set -e
-    mkdir -p /etc/nginx/wpc/active
-    rm -f /etc/nginx/wpc/active/*.conf
+    mkdir -p /etc/nginx/wpc/active \(siteConfActivePath)
+    rm -f /etc/nginx/wpc/active/*.conf \(siteConfActivePath)/*.conf
     if [ "$\(networkTypeEnvName)" = subdirectory ]; then
         ln -s /etc/nginx/wpc/multisite-subdirectory.conf /etc/nginx/wpc/active/multisite.conf
+    fi
+    for conf in \(siteConfContainerPath)/*.conf; do
+        if [ -f "$conf" ]; then
+            ln -s "$conf" \(siteConfActivePath)/
+        fi
+    done
+    if ls \(siteConfActivePath)/*.conf >/dev/null 2>&1 && ! nginx -t 2>/tmp/wpc-nginx-test; then
+        echo "wpc: the site's nginx config fails nginx -t, so the site starts without it:" >&2
+        cat /tmp/wpc-nginx-test >&2
+        rm -f \(siteConfActivePath)/*.conf
     fi
     (
         until (exec 3<>/dev/tcp/127.0.0.1/9000) 2>/dev/null; do sleep 0.1; done

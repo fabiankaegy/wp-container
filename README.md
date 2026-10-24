@@ -105,7 +105,10 @@ Sites are provisioned automatically (no install wizard) and log in with
   later from Settings → Software (`wp-container web-server nginx <site>`).
   nginx sites run nginx + PHP-FPM in one container, built once per version from
   the official `wordpress:<version>-fpm` image; files and database are untouched
-  by a switch.
+  by a switch. Extra nginx rules go in the site's `nginx/` folder (next to
+  `wordpress/`): each `*.conf` file is included in the server block on the next
+  start, and a config that fails `nginx -t` is skipped with the error in the
+  container log.
 - **MCP agent tools** — `wp-container agent-tools enable <site> [--root …]` writes
   `.mcp.json` (+ Cursor/VS Code configs) and a marked `AGENTS.md` block into a
   chosen root (site folder, or your `wp-content` repo root for IDE discovery);

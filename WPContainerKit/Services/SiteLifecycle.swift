@@ -241,6 +241,10 @@ public actor SiteLifecycle {
             // PHP overrides folder (50 MB upload limits) — must exist before
             // the wp `container run` bind-mounts it.
             try PHPConfService.ensure(for: inst)
+            // The nginx config folder is bind-mounted too, so it must exist.
+            if inst.webServer == .nginx {
+                try FileManager.default.createDirectory(at: inst.nginxConfFolder, withIntermediateDirectories: true)
+            }
             // Managed runtime PHP handlers (issue #13) live in php/prepend.d,
             // loaded by a single master auto_prepend — never in the project tree.
             // Ensure the loader, keep the always-on magic-login handler current,

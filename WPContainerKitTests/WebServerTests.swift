@@ -108,6 +108,14 @@ final class WebServerTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(context["wpc-fastcgi.conf"]).contains("HTTP_HOST          $http_host;"))
         XCTAssertTrue(try XCTUnwrap(context["wpc-site.conf"]).contains("location ~ \\.php$ {"))
         XCTAssertTrue(try XCTUnwrap(context["wpc-entrypoint"]).contains("\"$WPC_NETWORK_TYPE\" = subdirectory"))
+        // The site's own config is included inside the server block, ahead of
+        // wp-container's locations, and dropped when it fails `nginx -t`.
+        let siteConf = try XCTUnwrap(context["wpc-site.conf"])
+        let include = try XCTUnwrap(siteConf.range(of: "include \(NginxImageService.siteConfActivePath)/*.conf;"))
+        XCTAssertLessThan(include.lowerBound, try XCTUnwrap(siteConf.range(of: "location / {")).lowerBound)
+        let entrypoint = try XCTUnwrap(context["wpc-entrypoint"])
+        XCTAssertTrue(entrypoint.contains("\(NginxImageService.siteConfContainerPath)/*.conf"))
+        XCTAssertTrue(entrypoint.contains("nginx -t"))
     }
 
     // MARK: - Container args
@@ -120,6 +128,25 @@ final class WebServerTests: XCTestCase {
         let index = try XCTUnwrap(args.firstIndex(of: "WPC_NETWORK_TYPE=subdirectory"))
         XCTAssertEqual(args[index - 1], "-e")
         XCTAssertEqual(args.last, image)
+    }
+
+    func testNginxWordPressArgsMountTheSiteNginxFolder() throws {
+        let site = makeSite(webServer: .nginx)
+        let args = SiteRecipe.runWordPressArgs(site, dbHost: "10.0.0.2")
+        let mount = "\(site.nginxConfFolder.path):\(NginxImageService.siteConfContainerPath)"
+        let index = try XCTUnwrap(args.firstIndex(of: mount))
+        XCTAssertEqual(args[index - 1], "-v")
+    }
+
+    func testApacheWordPressArgsSkipTheSiteNginxFolder() {
+        let site = makeSite(webServer: .apache)
+        let args = SiteRecipe.runWordPressArgs(site, dbHost: "10.0.0.2")
+        XCTAssertFalse(args.contains { $0.hasPrefix(site.nginxConfFolder.path) })
+    }
+
+    func testNginxFolderSitsBesideWordPress() {
+        let site = makeSite(webServer: .nginx)
+        XCTAssertEqual(site.nginxConfFolder, site.path.appendingPathComponent("nginx", isDirectory: true))
     }
 
     func testApacheWordPressArgsOmitTheNetworkType() {

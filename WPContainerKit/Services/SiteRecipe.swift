@@ -266,6 +266,9 @@ public enum SiteRecipe {
             "-v", "\(inst.phpConfFolder.path):\(phpConfContainerPath)",
             "-e", "PHP_INI_SCAN_DIR=\(phpDefaultConfDir):\(phpConfContainerPath)",
         ]
+        if inst.webServer == .nginx {
+            args += ["-v", "\(inst.nginxConfFolder.path):\(NginxImageService.siteConfContainerPath)"]
+        }
         // Worktree environments add a shadowing mount over the repo path.
         for mount in inst.extraMounts {
             args += ["-v", "\(mount.hostPath):\(mount.containerPath)"]
