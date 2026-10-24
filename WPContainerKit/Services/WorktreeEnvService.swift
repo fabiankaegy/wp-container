@@ -113,6 +113,8 @@ public actor WorktreeEnvService {
             envPath: parent.envsFolder.appendingPathComponent(branchSlug, isDirectory: true),
             port: port,
             imageTag: parent.imageTag,
+            webServer: parent.webServer,
+            networkType: parent.networkType,
             provisioned: false,
             xdebugEnabled: parent.xdebugEnabled,
             cpuLimit: parent.cpuLimit,

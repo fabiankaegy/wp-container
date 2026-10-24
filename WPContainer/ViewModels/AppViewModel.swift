@@ -530,13 +530,14 @@ public final class AppViewModel {
 
     // MARK: - WordPress / PHP versions (§2k)
 
-    /// Change the site's image tag (PHP/WP version) — files/DB untouched — and
-    /// restart when running.
-    public func changeImageTag(_ site: Site, imageTag: String, phpLabel: String?) {
+    /// Change the site's image tag (PHP/WP version) and web server — files/DB
+    /// untouched — and restart when running.
+    public func changeSoftware(_ site: Site, imageTag: String, phpLabel: String?, webServer: WebServer) {
         Task {
             var updated = site
             updated.imageTag = imageTag
             updated.phpVersion = phpLabel
+            updated.webServer = webServer
             await store.upsertSite(updated)
             if site.status.isRunning {
                 await lifecycle.stop(updated)
@@ -929,7 +930,7 @@ public final class AppViewModel {
 
     @discardableResult
     public func createSite(name: String, parentFolder: URL? = nil, imageTag: String = SiteRecipe.defaultWordPressImage,
-                           phpVersion: String? = nil, groupID: UUID? = nil,
+                           phpVersion: String? = nil, webServer: WebServer = .apache, groupID: UUID? = nil,
                            networkType: NetworkType = .none, customDomain: String? = nil,
                            xdebugEnabled: Bool = false, elasticsearchEnabled: Bool = false) async -> Site? {
         let root = parentFolder ?? SiteFolders.defaultSitesRoot
@@ -942,7 +943,7 @@ public final class AppViewModel {
         // free. Mirrors `wp-container create`.
         let result = await store.allocatePort { port, envelope in
             let site = Site(name: name, slug: slug, path: sitePath,
-                            port: port, imageTag: imageTag, phpVersion: phpVersion, groupID: groupID,
+                            port: port, imageTag: imageTag, phpVersion: phpVersion, webServer: webServer, groupID: groupID,
                             xdebugEnabled: xdebugEnabled, elasticsearchEnabled: elasticsearchEnabled,
                             customDomain: customDomain, networkType: networkType)
             envelope.sites.append(site)
@@ -991,12 +992,12 @@ public final class AppViewModel {
     /// `lastError`).
     @discardableResult
     public func createAndStartSite(name: String, parentFolder: URL? = nil, imageTag: String = SiteRecipe.defaultWordPressImage,
-                                   phpVersion: String? = nil, groupID: UUID? = nil,
+                                   phpVersion: String? = nil, webServer: WebServer = .apache, groupID: UUID? = nil,
                                    networkType: NetworkType = .none, customDomain: String? = nil,
                                    xdebugEnabled: Bool = false, elasticsearchEnabled: Bool = false,
                                    httpsEnabled: Bool = false, wpDebug: Bool = false, scriptDebug: Bool = false) async -> Site? {
         guard let site = await createSite(name: name, parentFolder: parentFolder, imageTag: imageTag, phpVersion: phpVersion,
-                                          groupID: groupID, networkType: networkType, customDomain: customDomain,
+                                          webServer: webServer, groupID: groupID, networkType: networkType, customDomain: customDomain,
                                           xdebugEnabled: xdebugEnabled, elasticsearchEnabled: elasticsearchEnabled) else {
             return nil
         }
