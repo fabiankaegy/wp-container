@@ -455,8 +455,16 @@ public actor SiteLifecycle {
         for folder in addon.dataFolders(for: inst) {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         }
-        try await cli.run(args)
         let name = addon.containerName(for: inst)
+        // Like the db and wp containers: a sidecar already running is reused,
+        // and a stopped one still holding the name is deleted before the run.
+        let existing = try? await cli.inspect(name).first
+        if existing?.isRunning != true {
+            if existing != nil {
+                _ = try? await cli.run(SiteRecipe.deleteArgs(name))
+            }
+            try await cli.run(args)
+        }
         var delay = Duration.milliseconds(100)
         let deadline = ContinuousClock.now.advanced(by: .seconds(15))
         while ContinuousClock.now < deadline {
@@ -498,9 +506,30 @@ public actor SiteLifecycle {
                               dbProvider: (any RunnableInstance)? = nil) async throws -> Bool {
         guard claim(inst.instanceID) else { return false }
         defer { release(inst.instanceID) }
+        try await startInstanceCore(inst, pullPolicy: pullPolicy, dbProvider: dbProvider)
+        return true
+    }
+
+    /// Unguarded body of `startInstance` — called with the guard already held.
+    private func startInstanceCore(_ inst: any RunnableInstance, pullPolicy: PullPolicy,
+                                   dbProvider: (any RunnableInstance)?) async throws {
+        let startLock = await acquireStartLock(inst)
+        defer { startLock?.release() }
         _ = try await startContainers(inst, pullPolicy: pullPolicy, dbProvider: dbProvider)
         markRunning(inst.instanceID)
-        return true
+    }
+
+    /// Wait for any start of the same instance in another process to finish
+    /// (see `InstanceStartLock`). nil when the wait timed out; the start then
+    /// goes ahead without the lock.
+    private func acquireStartLock(_ inst: any RunnableInstance) async -> FileLock? {
+        let lock = await FileLock.acquire(at: InstanceStartLock.url(for: inst.instanceID),
+                                          mode: .exclusive,
+                                          timeout: InstanceStartLock.timeout)
+        if lock == nil {
+            Self.log.warning("start-lock: proceeding without the cross-process lock for \(inst.containerSlug, privacy: .public)")
+        }
+        return lock
     }
 
     /// Start a site, provisioning WordPress on first run. Returns the (possibly
@@ -515,6 +544,8 @@ public actor SiteLifecycle {
 
     /// Unguarded body of `startSite` — called with the guard already held.
     private func startSiteCore(_ site: Site, pullPolicy: PullPolicy = .ifMissing) async throws -> Bool {
+        let startLock = await acquireStartLock(site)
+        defer { startLock?.release() }
         let dbHost = try await startContainers(site, pullPolicy: pullPolicy)
         var provisioned = site.provisioned
         if !provisioned {
@@ -629,8 +660,7 @@ public actor SiteLifecycle {
                     do {
                         // `dbProvider: site` — a shared-database env borrows the
                         // parent's DB container and may need it booted (#17).
-                        _ = try await self.startContainers(env, pullPolicy: pullPolicy, dbProvider: site)
-                        await self.markRunning(env.id)
+                        try await self.startInstanceCore(env, pullPolicy: pullPolicy, dbProvider: site)
                         return .env(slug: env.envSlug, error: nil)
                     } catch {
                         return .env(slug: env.envSlug, error: Self.message(for: error))
