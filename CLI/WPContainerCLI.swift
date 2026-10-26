@@ -714,6 +714,7 @@ struct WorktreeCreate: AsyncParsableCommand {
             guard WorktreeEnvService.isValidRepoRelPath(repo) else {
                 throw CLIErrorJSON("invalid_repo_path", detail: WorktreeError.invalidRepoPath(repo).description)
             }
+            try await ctx.unarchiveIfNeeded(siteID: parent.id)
             let running = await ctx.runningContainerNames()
             let parentRunning = running.contains(parent.wpContainerName)
 

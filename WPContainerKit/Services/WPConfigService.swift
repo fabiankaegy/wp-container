@@ -82,7 +82,13 @@ public enum WPConfigService {
     static func parseTablePrefix(_ text: String) -> String? {
         // Split on any line ending: in Swift "\r\n" is ONE character, so a
         // CRLF wp-config.php never splits on "\n" alone.
-        guard let line = text.split(whereSeparator: \.isNewline).first(where: { $0.contains("$table_prefix") && $0.contains("=") }),
+        // Skip commented-out assignments, so `// $table_prefix = 'old_';` above
+        // the real one doesn't win.
+        guard let line = text.split(whereSeparator: \.isNewline).first(where: { line in
+                  let code = line.drop(while: \.isWhitespace)
+                  return !code.hasPrefix("//") && !code.hasPrefix("/*") && !code.hasPrefix("#") && !code.hasPrefix("*")
+                      && code.contains("$table_prefix") && code.contains("=")
+              }),
               let assignment = line.split(separator: "=", maxSplits: 1).last else { return nil }
         let literals = assignment.matches(of: #/['"]([A-Za-z0-9_]*)['"]/#).map { String($0.output.1) }
         return literals.last.flatMap { $0.isEmpty ? nil : $0 }

@@ -124,6 +124,8 @@ public final class AppViewModel {
 
     @ObservationIgnored private var reconcileTask: Task<Void, Never>?
     @ObservationIgnored private var purgeTask: Task<Void, Never>?
+    /// The last queued env removal; `removeEnv` chains onto it.
+    @ObservationIgnored private var envRemoval: Task<Void, Never>?
     @ObservationIgnored private var statusTask: Task<Void, Never>?
     @ObservationIgnored private var started = false
 
@@ -312,6 +314,7 @@ public final class AppViewModel {
         var current = store.site(id: site.id) ?? site
         if !current.status.isRunning {
             onStep(.startingSite)
+            await unarchiveIfNeeded(siteID: current.id)
             do {
                 let provisioned = try await lifecycle.startSite(current)
                 if provisioned != current.provisioned {
@@ -373,6 +376,7 @@ public final class AppViewModel {
         var current = store.site(id: site.id) ?? site
         if !current.status.isRunning {
             onStep(.startingSite)
+            await unarchiveIfNeeded(siteID: current.id)
             do {
                 let provisioned = try await lifecycle.startSite(current)
                 if provisioned != current.provisioned {
@@ -1115,6 +1119,8 @@ public final class AppViewModel {
         // The new env's URL is served by the proxy, so make sure there is one
         // before the sheet shows that URL as a link (issue #16 follow-through).
         await ensureProxyRunning()
+        // The new env starts, and the proxy skips an archived parent's envs.
+        await unarchiveIfNeeded(siteID: parent.id)
         // Allocate the port AND reserve the env descriptor in ONE locked store
         // mutation (#3 follow-up) — same pattern the CLI/MCP worktree-create use.
         // The reserved record keeps the final env's UUID so `upsertEnv` (success)
@@ -1323,6 +1329,7 @@ public final class AppViewModel {
         Task {
             // The env's URL is served by the proxy (issue #16 follow-through).
             await ensureProxyRunning()
+            await unarchiveIfNeeded(siteID: parent.id)
             // Port + env reservation in one locked mutation (#3 follow-up).
             guard let (_, reserved) = await store.allocatePort(reserve: { port, envelope in
                 WorktreeEnvService.reservedDescriptor(parent: parent, repoRelPath: repoRelPath, branch: branch, port: port, into: &envelope)
@@ -1396,15 +1403,27 @@ public final class AppViewModel {
         Task { await removeEnv(env, keepWorktree: keepWorktree) }
     }
 
-    /// Delete several envs one at a time: concurrent `git worktree remove`s on
-    /// one repo collide on its locks and leave stale checkouts behind.
+    /// Delete several envs, one at a time (see `removeEnv`).
     public func deleteEnvs(_ envs: [WorktreeEnv]) {
         Task {
             for env in envs { await removeEnv(env) }
         }
     }
 
+    /// Removes `env` after any removal already in flight: concurrent
+    /// `git worktree remove`s on one repo collide on its locks, whether they
+    /// come from quick single deletes, a batch or the purge loop.
     private func removeEnv(_ env: WorktreeEnv, keepWorktree: Bool = false) async {
+        let previous = envRemoval
+        let removal = Task {
+            await previous?.value
+            await performRemoveEnv(env, keepWorktree: keepWorktree)
+        }
+        envRemoval = removal
+        await removal.value
+    }
+
+    private func performRemoveEnv(_ env: WorktreeEnv, keepWorktree: Bool) async {
         let parent = store.site(id: env.parentSiteID)
         let outcome = await worktrees.delete(env, parent: parent, keepBranch: true, keepWorktree: keepWorktree)
         await store.removeEnv(id: env.id)

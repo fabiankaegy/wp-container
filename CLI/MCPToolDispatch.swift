@@ -604,6 +604,7 @@ enum MCPToolDispatch {
         guard WorktreeEnvService.isValidRepoRelPath(repo) else {
             throw ToolError("invalid_repo_path", WorktreeError.invalidRepoPath(repo).description)
         }
+        try await ctx.unarchiveIfNeeded(siteID: parent.id)
         let running = await ctx.runningContainerNames()
         // Port allocation + env reservation happen in ONE locked store mutation
         // (#3) so a concurrent creator can't observe the same port as free.
