@@ -15,6 +15,9 @@ public enum LifecycleError: Error, Sendable, CustomStringConvertible {
     /// the parent's DB container wasn't already up, so there is nothing to
     /// connect to and nothing that may legitimately start it (issue #17).
     case sharedDatabaseUnavailable(container: String)
+    /// An nginx instance's image tag has no official PHP-FPM counterpart to
+    /// build the nginx image on (`WordPressImageCatalog.fpmTag(for:)`).
+    case nginxUnsupportedImage(tag: String)
 
     public var description: String {
         switch self {
@@ -25,6 +28,8 @@ public enum LifecycleError: Error, Sendable, CustomStringConvertible {
         case .sidecarIPUnavailable(let name): return "Could not resolve the \(name) container's IP address."
         case .sharedDatabaseUnavailable(let name):
             return "This environment shares its parent site's database container (\(name)), which is not running — start the parent site first."
+        case .nginxUnsupportedImage(let tag):
+            return "nginx needs an official wordpress image with a PHP-FPM variant, and \(tag) has none. Switch the site to Apache or pick a WordPress/PHP version."
         }
     }
 }
@@ -33,10 +38,10 @@ public enum LifecycleError: Error, Sendable, CustomStringConvertible {
 /// worktree env) through ONE shared start/stop code path, and publishes status
 /// transitions on an `AsyncStream` so view models / callers can observe them.
 ///
-/// Start pipeline (issue #9): the db and es containers (and the Xdebug derived-
-/// image check) launch CONCURRENTLY, and the wp container is gated only on the
+/// Start pipeline (issue #9): the db and es containers (and the nginx/Xdebug
+/// derived-image check) launch CONCURRENTLY, and the wp container is gated only on the
 /// db/es IPs being assigned — never on db/es READINESS. WordPress's PHP retries
-/// the DB connection on every request, so apache serving before mariadb
+/// the DB connection on every request, so the web server serving before mariadb
 /// finishes InnoDB init is harmless; the only paths that genuinely need the DB
 /// up are one-shot wp-cli invocations (first-run provisioning, multisite
 /// install, worktree URL fixes/DB import), which gate explicitly via
@@ -57,6 +62,7 @@ public actor SiteLifecycle {
 
     private let cli: ContainerCLI
     private let xdebug: XdebugImageService
+    private let nginx: NginxImageService
     /// Shared across every caller in the process — parent site, every env,
     /// `WorktreeEnvService.create` — so image-pull dedupe spans the whole
     /// coupled start, not just one instance (issue #18).
@@ -109,6 +115,7 @@ public actor SiteLifecycle {
     public init(cli: ContainerCLI) {
         self.cli = cli
         self.xdebug = XdebugImageService(cli: cli)
+        self.nginx = NginxImageService(cli: cli)
         self.images = ImagePullService(cli: cli)
         var cont: AsyncStream<StatusEvent>.Continuation!
         self.events = AsyncStream(bufferingPolicy: .bufferingNewest(64)) { cont = $0 }
@@ -234,6 +241,10 @@ public actor SiteLifecycle {
             // PHP overrides folder (upload and memory limits) — must exist
             // before the wp `container run` bind-mounts it.
             try PHPConfService.ensure(for: inst)
+            // The nginx config folder is bind-mounted too, so it must exist.
+            if inst.webServer == .nginx {
+                try FileManager.default.createDirectory(at: inst.nginxConfFolder, withIntermediateDirectories: true)
+            }
             // Managed runtime PHP handlers (issue #13) live in php/prepend.d,
             // loaded by a single master auto_prepend — never in the project tree.
             // Ensure the loader, keep the always-on magic-login handler current,
@@ -264,7 +275,10 @@ public actor SiteLifecycle {
             // wp-cli image rides along here so the first wp-cli use on a
             // php8.4 site pulls wordpress:cli-php8.4 on the same path as the
             // base images.
-            var imageTags = [SiteRecipe.databaseImage, inst.imageTag, SiteRecipe.cliImage(for: inst)]
+            guard let baseImage = SiteRecipe.baseImageTag(for: inst) else {
+                throw LifecycleError.nginxUnsupportedImage(tag: inst.imageTag)
+            }
+            var imageTags = [SiteRecipe.databaseImage, baseImage, SiteRecipe.cliImage(for: inst)]
             imageTags += SidecarAddons.enabled(for: inst).map(\.image)
             var imageWarnings: [String] = []
             try await withThrowingTaskGroup(of: String?.self) { group in
@@ -287,15 +301,16 @@ public actor SiteLifecycle {
             }
 
             // Launch the wp container's dependencies CONCURRENTLY (issue #9):
-            // db run + IP, each sidecar's run + IP (no readiness gate), Xdebug
-            // derived image. WP needs only the IP VALUES at `container run` time.
+            // db run + IP, each sidecar's run + IP (no readiness gate), nginx
+            // and Xdebug derived images. WP needs only the IP VALUES at
+            // `container run` time.
             async let dbAddresses = launchDatabase(inst, provider: dbProvider)
             async let sidecars = launchSidecars(inst)
-            async let xdebugImage = ensureXdebugImage(inst)
+            async let derivedImage = ensureDerivedImage(inst, baseImage: baseImage)
 
             let (dbHost, gateway) = try await dbAddresses
             let sidecarEnvironment = try await sidecars
-            let imageOverride = try await xdebugImage
+            let imageOverride = try await derivedImage
             // Gateway (host address as seen from containers) comes from the
             // same inspect that resolved the DB IP — never hardcoded.
             let xdebugClientHost = inst.xdebugEnabled ? gateway : nil
@@ -478,10 +493,18 @@ public actor SiteLifecycle {
         throw LifecycleError.sidecarIPUnavailable(name: addon.displayName)
     }
 
-    /// Ensure the Xdebug derived image exists (when enabled). Cached ⇒ ~50ms.
-    private func ensureXdebugImage(_ inst: any RunnableInstance) async throws -> String? {
-        guard inst.xdebugEnabled else { return nil }
-        return try await xdebug.ensureImage(forBaseTag: inst.imageTag)
+    /// Ensure the image the wp container runs when it isn't the official
+    /// `baseImage`: the nginx image for an nginx instance, with Xdebug layered
+    /// on top when enabled. nil means run `baseImage` as is. Cached ⇒ ~50ms.
+    private func ensureDerivedImage(_ inst: any RunnableInstance, baseImage: String) async throws -> String? {
+        var image: String?
+        if inst.webServer == .nginx {
+            image = try await nginx.ensureImage(forBaseTag: baseImage)
+        }
+        if inst.xdebugEnabled {
+            image = try await xdebug.ensureImage(forBaseTag: image ?? baseImage)
+        }
+        return image
     }
 
     /// Whether an instance's wp container is currently up. A single targeted
@@ -620,7 +643,8 @@ public actor SiteLifecycle {
         var neededImages: Set<String> = []
         func collectImages(_ inst: any RunnableInstance) {
             neededImages.insert(SiteRecipe.databaseImage)
-            neededImages.insert(inst.imageTag)
+            // An nginx instance without an FPM base fails in its own start.
+            if let baseImage = SiteRecipe.baseImageTag(for: inst) { neededImages.insert(baseImage) }
             neededImages.insert(SiteRecipe.cliImage(for: inst))
             neededImages.formUnion(SidecarAddons.enabled(for: inst).map(\.image))
         }
@@ -1126,7 +1150,7 @@ public actor SiteLifecycle {
     ///   port 80 — exactly what the proxy will relay to — which keeps env starts
     ///   fully independent of proxy liveness.
     ///
-    /// The probe's ONLY job is detecting that apache/php is up, so ANY HTTP
+    /// The probe's ONLY job is detecting that the web server/php is up, so ANY HTTP
     /// response counts — 200, 3xx, even 500. Crucially it must NOT follow
     /// redirects: an HTTPS + custom-domain site answers the very first probe
     /// with a canonical 301 to e.g. `https://mysite.local`, and following it

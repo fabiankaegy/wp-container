@@ -10,18 +10,6 @@ import Foundation
 /// network — the gateway IP is supplied per-container at run time). We do NOT
 /// emit a `zend_extension` line ourselves; `docker-php-ext-enable` already did.
 public actor XdebugImageService {
-    public enum BuildError: Error, Sendable, CustomStringConvertible {
-        case builderUnavailable(String)
-        case buildFailed(String)
-
-        public var description: String {
-            switch self {
-            case .builderUnavailable(let s): return "container builder unavailable: \(s)"
-            case .buildFailed(let s):        return "Xdebug image build failed: \(s)"
-            }
-        }
-    }
-
     private let cli: ContainerCLI
 
     public init(cli: ContainerCLI = ContainerCLI()) {
@@ -54,55 +42,19 @@ public actor XdebugImageService {
             progress?("Xdebug image ready.")
             return derived
         }
-        // Make sure the base image is present before building FROM it.
-        progress?("Pulling base image \(baseTag)…")
-        _ = try? await cli.run(["image", "pull", baseTag])
-
-        try await ensureBuilderRunning(progress: progress)
+        // Make sure the base image is present before building FROM it. A
+        // locally built base (the nginx image) is never pulled.
+        if !(await cli.localImageExists(baseTag)) {
+            progress?("Pulling base image \(baseTag)…")
+            _ = try? await cli.run(["image", "pull", baseTag])
+        }
 
         progress?("Building Xdebug image (first time, ~20s)…")
-        let buildDir = try writeBuildContext(baseTag: baseTag)
-        defer { try? FileManager.default.removeItem(at: buildDir) }
-
-        // `container build` is finicky about absolute -f/context combos, so we
-        // run it with cwd INSIDE the build dir and relative paths (validated).
-        let result = try await ProcessRunner.run(
-            executable: cli.binaryPath,
-            args: ["build", "-t", derived, "-f", "Dockerfile", "."],
-            cwd: buildDir
-        )
-        guard result.succeeded else {
-            throw BuildError.buildFailed(result.stderr.isEmpty ? result.stdout : result.stderr)
-        }
+        try await DerivedImageBuilder(cli: cli).build(
+            tag: derived, files: ["Dockerfile": Self.dockerfile(baseTag: baseTag)],
+            displayName: "Xdebug", progress: progress)
         progress?("Xdebug image ready.")
         return derived
-    }
-
-    // MARK: - Internals
-
-    /// The container builder must be running once before any `container build`.
-    private func ensureBuilderRunning(progress: (@Sendable (String) -> Void)?) async throws {
-        let status = try? await cli.runCapturing(["builder", "status"])
-        if let status, status.succeeded,
-           (status.stdout + status.stderr).lowercased().contains("running") {
-            return
-        }
-        progress?("Starting the container builder…")
-        let start = try await cli.runCapturing(["builder", "start"])
-        // `builder start` may report "already running" on a race — tolerate it.
-        if !start.succeeded, !(start.stdout + start.stderr).lowercased().contains("running") {
-            throw BuildError.builderUnavailable(start.stderr.isEmpty ? start.stdout : start.stderr)
-        }
-    }
-
-    /// Write the Dockerfile into a scratch build directory and return its URL.
-    private func writeBuildContext(baseTag: String) throws -> URL {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("wpc-xdebug-build-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try Self.dockerfile(baseTag: baseTag).write(
-            to: dir.appendingPathComponent("Dockerfile"), atomically: true, encoding: .utf8)
-        return dir
     }
 
     /// The exact validated Dockerfile (see `scripts/validate-addons.sh`).
