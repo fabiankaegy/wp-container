@@ -51,6 +51,26 @@ public enum WordPressImageCatalog {
         return "wordpress:\(wordpress)-php\(php)-apache"
     }
 
+    /// The official PHP-FPM tag with the same WordPress and PHP versions as
+    /// `imageTag`, which nginx sites build on (`NginxImageService`). nil for a
+    /// tag with no FPM counterpart, such as a non-`wordpress:` image or a `cli`
+    /// tag:
+    ///  - `wordpress:latest` / `wordpress:apache` → `wordpress:fpm`
+    ///  - `wordpress:<ref>-apache`                → `wordpress:<ref>-fpm`
+    ///  - `wordpress:6.8`, `wordpress:php8.3`     → `wordpress:<ref>-fpm`
+    ///  - an `fpm` tag                            → itself
+    public static func fpmTag(for imageTag: String) -> String? {
+        let prefix = "wordpress:"
+        guard imageTag.hasPrefix(prefix) else { return nil }
+        let ref = String(imageTag.dropFirst(prefix.count))
+        if ref == "latest" || ref == "apache" || ref == "fpm" { return prefix + "fpm" }
+        if ref.hasSuffix("-fpm") { return imageTag }
+        if ref.hasSuffix("-apache") { return prefix + ref.dropLast("-apache".count) + "-fpm" }
+        let versionOnly = /^(\d+(\.\d+)*(-php\d+\.\d+)?|php\d+\.\d+)$/
+        if ref.wholeMatch(of: versionOnly) != nil { return prefix + ref + "-fpm" }
+        return nil
+    }
+
     /// Whether a WP×PHP pairing is expected to resolve to a published tag,
     /// per the fallback matrix. Prefer `WordPressVersionMatrix.isValid` against a
     /// live-discovered matrix; this is the offline default.

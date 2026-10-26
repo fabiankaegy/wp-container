@@ -1865,7 +1865,7 @@ public final class HTTPSProxy: @unchecked Sendable {
     static func unresponsivePage(host: String, route: Route) -> String {
         let name = htmlEscape(route.displayName ?? route.slug ?? host)
         var body = "<p><code>\(htmlEscape(hostOnly(host)))</code> is running, but its web server didn’t answer.</p>"
-        body += "<p>WordPress may still be warming up after a start, or PHP/Apache may have stopped responding.</p>"
+        body += "<p>WordPress may still be warming up after a start, or PHP or the web server may have stopped responding.</p>"
         if let slug = route.slug {
             body += """
             <p>This page retries every 5 seconds. If it doesn’t clear, look at the logs:</p>

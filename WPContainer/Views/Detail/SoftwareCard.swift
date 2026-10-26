@@ -2,19 +2,24 @@ import SwiftUI
 import WPContainerKit
 
 /// Settings-tab "Software" card (PLAN.md §2k): live WordPress version + core
-/// update, and WP × PHP version pickers that swap the image tag (files/DB
-/// untouched) and restart.
+/// update, and WP × PHP version and web server pickers that swap the image
+/// (files/DB untouched) and restart.
 struct SoftwareCard: View {
     @Environment(AppViewModel.self) private var vm
     let site: Site
 
     @State private var wpVersion = WordPressImageCatalog.wordpress(fromTag: "") ?? "latest"
     @State private var php = WordPressImageCatalog.defaultPHP
+    @State private var webServer: WebServer = .apache
     @State private var liveVersion: String?
     @State private var confirmingUpdate = false
 
     private var resultingTag: String { WordPressImageCatalog.imageTag(wordpress: wpVersion, php: php) }
-    private var pendingChange: Bool { resultingTag != site.imageTag }
+    /// The official image the site will run on: the Apache tag, or its FPM counterpart for nginx.
+    private var resultingBaseTag: String {
+        webServer == .nginx ? (WordPressImageCatalog.fpmTag(for: resultingTag) ?? resultingTag) : resultingTag
+    }
+    private var pendingChange: Bool { resultingTag != site.imageTag || webServer != site.webServer }
 
     /// Picker options from the live matrix, always including the site's current
     /// values so an off-matrix site still displays its own versions.
@@ -40,6 +45,7 @@ struct SoftwareCard: View {
         .onAppear {
             wpVersion = WordPressImageCatalog.wordpress(fromTag: site.imageTag) ?? "latest"
             php = WordPressImageCatalog.php(fromTag: site.imageTag) ?? WordPressImageCatalog.defaultPHP
+            webServer = site.webServer
         }
         .task(id: site.status) { liveVersion = await vm.liveWordPressVersion(site) }
     }
@@ -86,11 +92,17 @@ struct SoftwareCard: View {
                 Label("This WordPress and PHP combination may not exist on Docker Hub.", systemImage: "exclamationmark.triangle")
                     .font(.caption2).foregroundStyle(.orange)
             }
+            Picker("Web server", selection: $webServer) {
+                ForEach(WebServer.allCases) { server in Text(server.label).tag(server) }
+            }
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+            .fixedSize()
             HStack {
-                Text(resultingTag).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+                Text(resultingBaseTag).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
                 Spacer()
                 Button(site.status.isRunning ? "Apply & Restart" : "Apply") {
-                    vm.changeImageTag(site, imageTag: resultingTag, phpLabel: "PHP \(php)")
+                    vm.changeSoftware(site, imageTag: resultingTag, phpLabel: "PHP \(php)", webServer: webServer)
                 }
                 .buttonStyle(.borderedProminent).controlSize(.small)
                 .disabled(!pendingChange)

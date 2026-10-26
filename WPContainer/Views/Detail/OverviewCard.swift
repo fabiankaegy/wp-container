@@ -64,6 +64,10 @@ struct OverviewCard: View {
                     Text(phpHint).foregroundStyle(.secondary)
                 }
 
+                InfoRow(label: "Web server") {
+                    Text(site.webServer.label).textSelection(.enabled)
+                }
+
                 InfoRow(label: "Database") {
                     Text("MariaDB 11").textSelection(.enabled)
                 }

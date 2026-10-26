@@ -3,7 +3,7 @@ import UniformTypeIdentifiers
 import WPContainerKit
 
 /// New-site setup guide (PLAN.md §2k): step 1 name + group + location, step 2
-/// WordPress × PHP versions with a live image-tag preview, step 3 options
+/// WordPress × PHP versions and web server with a live image-tag preview, step 3 options
 /// (multisite, custom domain, Xdebug/Elasticsearch). Creates + starts +
 /// provisions with inline progress.
 struct AddSiteSheet: View {
@@ -19,6 +19,7 @@ struct AddSiteSheet: View {
     // Versions — prefilled from the app's Settings defaults (PLAN.md §2l).
     @State private var wpVersion = UserDefaults.standard.string(forKey: AppSettings.defaultWordPressVersionKey) ?? "latest"
     @State private var php = UserDefaults.standard.string(forKey: AppSettings.defaultPHPVersionKey) ?? WordPressImageCatalog.defaultPHP
+    @State private var webServer: WebServer = .apache
 
     // Options
     @State private var networkType: NetworkType = .none
@@ -44,6 +45,10 @@ struct AddSiteSheet: View {
     private let steps = ["Site", "Versions", "Options"]
 
     private var imageTag: String { WordPressImageCatalog.imageTag(wordpress: wpVersion, php: php) }
+    /// The official image the site runs on: the Apache tag, or its FPM counterpart for nginx.
+    private var baseImageTag: String {
+        webServer == .nginx ? (WordPressImageCatalog.fpmTag(for: imageTag) ?? imageTag) : imageTag
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -120,11 +125,18 @@ struct AddSiteSheet: View {
                         .font(.caption).foregroundStyle(.orange)
                 }
             }
+            Section("Web server") {
+                Picker("Web server", selection: $webServer) {
+                    ForEach(WebServer.allCases) { server in Text(server.label).tag(server) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
             Section("Image") {
                 HStack {
                     Text("Resulting tag").foregroundStyle(.secondary)
                     Spacer()
-                    Text(imageTag).monospaced().textSelection(.enabled)
+                    Text(baseImageTag).monospaced().textSelection(.enabled)
                 }
             }
         }
@@ -244,7 +256,7 @@ struct AddSiteSheet: View {
         let domain = customDomain.trimmingCharacters(in: .whitespaces)
         let site = await vm.createAndStartSite(
             name: name, parentFolder: parentFolder, imageTag: imageTag, phpVersion: "PHP \(php)",
-            groupID: groupID, networkType: networkType,
+            webServer: webServer, groupID: groupID, networkType: networkType,
             customDomain: domain.isEmpty ? nil : domain,
             xdebugEnabled: xdebug, elasticsearchEnabled: elasticsearch,
             httpsEnabled: https, wpDebug: wpDebug, scriptDebug: scriptDebug)

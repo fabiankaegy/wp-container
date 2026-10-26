@@ -156,4 +156,33 @@ final class DatabaseLifecycleLockTests: XCTestCase {
         XCTAssertEqual(url.lastPathComponent, "db-..-..-etc-passwd.lock")
         XCTAssertEqual(url.deletingLastPathComponent().lastPathComponent, "WPContainer")
     }
+
+    // MARK: - Instance start lock
+
+    /// One start lock per instance: a second start of the same instance waits,
+    /// while starts of other instances never wait on it.
+    func testStartLockIsPerInstance() throws {
+        let alpha = UUID()
+        let url = InstanceStartLock.url(for: alpha)
+        XCTAssertEqual(url, InstanceStartLock.url(for: alpha))
+        XCTAssertNotEqual(url, InstanceStartLock.url(for: UUID()))
+        XCTAssertEqual(url.lastPathComponent, "start-\(alpha.uuidString).lock")
+        XCTAssertEqual(url.deletingLastPathComponent(), DatabaseLifecycleLock.url(forContainer: "wpc-alpha-db").deletingLastPathComponent())
+    }
+
+    /// The waiting start gets the lock as soon as the first start finishes.
+    func testSecondStartWaitsForTheFirst() async throws {
+        let first = try XCTUnwrap(FileLock.tryAcquire(at: lockURL, mode: .exclusive))
+        Task {
+            try? await Task.sleep(for: .milliseconds(150))
+            first.release()
+        }
+        let started = ContinuousClock.now
+        let second = await FileLock.acquire(at: lockURL!, mode: .exclusive,
+                                            timeout: .seconds(5),
+                                            pollInterval: .milliseconds(20))
+        XCTAssertNotNil(second)
+        XCTAssertGreaterThanOrEqual(ContinuousClock.now - started, .milliseconds(100))
+        second?.release()
+    }
 }

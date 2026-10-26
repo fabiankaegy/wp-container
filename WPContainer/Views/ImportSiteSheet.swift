@@ -153,6 +153,7 @@ struct ImportSiteSheet: View {
         let manifest = info.manifest
         LabeledContent("WordPress", value: manifest.wordpressVersion ?? "Unknown")
         LabeledContent("PHP", value: phpVersion(manifest.settings))
+        LabeledContent("Web server", value: (manifest.settings.webServer ?? .apache).label)
         LabeledContent("Multisite", value: multisiteLabel(manifest.settings.networkType))
         LabeledContent("Size", value: ByteCountFormatter.string(fromByteCount: info.uncompressedBytes, countStyle: .file))
         LabeledContent("Source") {

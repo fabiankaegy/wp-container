@@ -92,6 +92,17 @@ public enum SiteRecipe {
         ["image", "pull", image]
     }
 
+    /// The official image an instance's wp container is built on: its
+    /// `imageTag` under Apache, the matching FPM tag under nginx (the base of
+    /// the nginx image). nil when an nginx instance's tag has no FPM
+    /// counterpart (`WordPressImageCatalog.fpmTag(for:)`).
+    public static func baseImageTag(for inst: any RunnableInstance) -> String? {
+        switch inst.webServer {
+        case .apache: return inst.imageTag
+        case .nginx:  return WordPressImageCatalog.fpmTag(for: inst.imageTag)
+        }
+    }
+
     // MARK: - Pre-seed (VALIDATED, Phase V)
     /// The `wordpress` image's auto-populate-into-empty-mount does NOT work on
     /// Apple `container`: virtiofs mounts appear as root:root in-guest and reject
@@ -103,7 +114,7 @@ public enum SiteRecipe {
         [
             "run", "--progress", "none", "--rm", "--entrypoint", "/bin/sh",
             "-v", "\(inst.wordpressFolder.path):/var/www/html",
-            inst.imageTag,
+            baseImageTag(for: inst) ?? inst.imageTag,
             "-c", "cp -r /usr/src/wordpress/. /var/www/html/",
         ]
     }
@@ -224,8 +235,8 @@ public enum SiteRecipe {
     // MARK: - WordPress container
     /// Build the `container run` args for the WP container.
     ///
-    /// - `imageOverride`: run a different image than `inst.imageTag` (the Xdebug
-    ///   derived image, §2c).
+    /// - `imageOverride`: run a different image than `inst.imageTag` (the nginx
+    ///   or Xdebug derived image, §2c).
     /// - `xdebugClientHost`: when non-nil, pass `-e XDEBUG_CLIENT_HOST=<gateway>`
     ///   so Xdebug's `client_host` ini substitution resolves to the host (§2c).
     /// - `sidecarEnvironment`: `KEY=value` assignments for the running sidecars
@@ -249,12 +260,15 @@ public enum SiteRecipe {
         }
         args += [
             "-v", "\(inst.wordpressFolder.path):/var/www/html",
-            // PHP overrides (50 MB upload limits, PHPConfService): mod_php
-            // reads PHP_INI_SCAN_DIR from the apache process environment, so
+            // PHP overrides (50 MB upload limits, PHPConfService): mod_php and
+            // PHP-FPM read PHP_INI_SCAN_DIR from the container environment, so
             // the mounted ini applies without a derived image or a reload.
             "-v", "\(inst.phpConfFolder.path):\(phpConfContainerPath)",
             "-e", "PHP_INI_SCAN_DIR=\(phpDefaultConfDir):\(phpConfContainerPath)",
         ]
+        if inst.webServer == .nginx {
+            args += ["-v", "\(inst.nginxConfFolder.path):\(NginxImageService.siteConfContainerPath)"]
+        }
         // Worktree environments add a shadowing mount over the repo path.
         for mount in inst.extraMounts {
             args += ["-v", "\(mount.hostPath):\(mount.containerPath)"]
@@ -269,6 +283,9 @@ public enum SiteRecipe {
             // nothing on disk needs editing.
             "-e", "WORDPRESS_DB_NAME=\(inst.databaseName)",
         ]
+        if inst.webServer == .nginx {
+            args += ["-e", "\(NginxImageService.networkTypeEnvName)=\(inst.networkType.rawValue)"]
+        }
         if let xdebugClientHost {
             args += ["-e", "XDEBUG_CLIENT_HOST=\(xdebugClientHost)"]
         }
@@ -423,6 +440,19 @@ public enum SiteRecipe {
         return args
     }
 
+    /// Mounts the instance's managed `php/` folder and adds it to the ini scan
+    /// dir, so a one-shot container gets the same PHP settings (memory and
+    /// upload limits) and auto_prepend runtime handlers as the long-lived one
+    /// (issue #13): `wp eval` that sends mail still hits Mailpit, and
+    /// remote-media URL rewrites apply. Empty before the folder exists, so the
+    /// arguments stay deterministic before a site's first start; the login
+    /// handler is naturally inert in the cli SAPI.
+    private static func phpConfArgs(_ inst: any RunnableInstance) -> [String] {
+        guard FileManager.default.fileExists(atPath: inst.phpConfFolder.path) else { return [] }
+        return ["-v", "\(inst.phpConfFolder.path):\(phpConfContainerPath)",
+                "-e", "PHP_INI_SCAN_DIR=\(phpDefaultConfDir):\(phpConfContainerPath)"]
+    }
+
     /// The one-shot wp-cli image whose PHP version matches this instance's site
     /// image. NEVER hardcode `wordpress:cli` at a call site — a php8.4 site must
     /// run wp-cli on `wordpress:cli-php8.4` (see WordPressImageCatalog.cliImage).
@@ -433,6 +463,7 @@ public enum SiteRecipe {
     /// `wp core install` for first-run provisioning.
     public static func wpCoreInstallArgs(_ inst: any RunnableInstance, dbHost: String) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
+        args += phpConfArgs(inst)
         args += [
             cliImage(for: inst),
             "wp", "core", "install",
@@ -452,6 +483,7 @@ public enum SiteRecipe {
     public static func wpMultisiteInstallArgs(_ inst: any RunnableInstance, dbHost: String,
                                               url: String, subdomains: Bool) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
+        args += phpConfArgs(inst)
         args += [
             cliImage(for: inst),
             "wp", "core", "multisite-install",
@@ -481,6 +513,7 @@ public enum SiteRecipe {
     /// `wp site list --format=json` for the multisite subsites list (§2j).
     public static func wpSiteListArgs(_ inst: any RunnableInstance, dbHost: String) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
+        args += phpConfArgs(inst)
         args += [cliImage(for: inst), "wp", "site", "list", "--format=json"]
         return args
     }
@@ -488,6 +521,7 @@ public enum SiteRecipe {
     /// `wp core update` (+ database) for the "Update WordPress core" action (§2k).
     public static func wpCoreUpdateArgs(_ inst: any RunnableInstance, dbHost: String) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
+        args += phpConfArgs(inst)
         args += [cliImage(for: inst), "sh", "-c", "wp core update && wp core update-db"]
         return args
     }
@@ -495,6 +529,7 @@ public enum SiteRecipe {
     /// `wp core version` for the live WordPress version display (§2k).
     public static func wpCoreVersionArgs(_ inst: any RunnableInstance, dbHost: String) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
+        args += phpConfArgs(inst)
         args += [cliImage(for: inst), "wp", "core", "version"]
         return args
     }
@@ -504,6 +539,7 @@ public enum SiteRecipe {
     /// env's URL migration (`EnvURLMigrator`).
     public static func wpSetURLsArgs(_ inst: any RunnableInstance, dbHost: String, url: String) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
+        args += phpConfArgs(inst)
         // sh -c inside the wp-cli container chains the three commands; the host
         // side is still a plain argument array (no host shell interpolation).
         args += [
@@ -531,16 +567,7 @@ public enum SiteRecipe {
         for assignment in sidecarEnvironment {
             args += ["-e", assignment]
         }
-        // Mount the managed php/ overrides + scan dir so a one-shot wp-cli picks
-        // up the same auto_prepend runtime handlers as the long-lived container
-        // (issue #13) — e.g. `wp eval` that sends mail still hits Mailpit, and
-        // remote-media URL rewrites apply. Conditional on the folder existing so
-        // it stays deterministic before a site's first start (the folder is
-        // created then); the login handler is naturally inert in the cli SAPI.
-        if FileManager.default.fileExists(atPath: inst.phpConfFolder.path) {
-            args += ["-v", "\(inst.phpConfFolder.path):\(phpConfContainerPath)",
-                     "-e", "PHP_INI_SCAN_DIR=\(phpDefaultConfDir):\(phpConfContainerPath)"]
-        }
+        args += phpConfArgs(inst)
         args += [cliImage(for: inst), "wp"]
         args += wpArgs
         return args
@@ -601,10 +628,7 @@ public enum SiteRecipe {
         // In a terminal, keep the pull progress: a first `node:20` pull otherwise
         // looks hung.
         var args = wpCLIBaseArgs(inst, dbHost: dbHost, showProgress: tty)
-        if FileManager.default.fileExists(atPath: inst.phpConfFolder.path) {
-            args += ["-v", "\(inst.phpConfFolder.path):\(phpConfContainerPath)",
-                     "-e", "PHP_INI_SCAN_DIR=\(phpDefaultConfDir):\(phpConfContainerPath)"]
-        }
+        args += phpConfArgs(inst)
         for assignment in sidecarEnvironment {
             args += ["-e", assignment]
         }
@@ -665,7 +689,7 @@ public enum SiteRecipe {
             args += ["-e", assignment]
         }
         args += processArgs(workdir: workdir, env: [], interactive: interactive, tty: tty)
-        args.append(inst.imageTag)
+        args.append(baseImageTag(for: inst) ?? inst.imageTag)
         let phpunit = ["vendor/bin/phpunit"] + phpunitArgs
         args += timeLimit.map { timeLimited(phpunit, seconds: $0) } ?? phpunit
         return args
@@ -696,6 +720,7 @@ public enum SiteRecipe {
     /// `wp db export` to stdout inside a one-shot wp-cli container (live DB clone).
     public static func wpDBExportArgs(_ inst: any RunnableInstance, dbHost: String) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
+        args += phpConfArgs(inst)
         args += [cliImage(for: inst), "wp", "db", "export", "-", "--single-transaction"]
         return args
     }

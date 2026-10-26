@@ -37,6 +37,7 @@ enum MCPToolDispatch {
             case "worktree_list":     return try await worktreeList(args, ctx: ctx, slug: scopedSlug)
             case "worktree_delete":   return try await worktreeDelete(args, ctx: ctx)
             case "xdebug_toggle":     return try await xdebugToggle(args, ctx: ctx, slug: scopedSlug)
+            case "web_server_set":    return try await webServerSet(args, ctx: ctx, slug: scopedSlug)
             case "elasticsearch_toggle": return try await sidecarToggle(args, ctx: ctx, slug: scopedSlug, addon: SidecarAddons.elasticsearch)
             case "mailpit_toggle":    return try await sidecarToggle(args, ctx: ctx, slug: scopedSlug, addon: SidecarAddons.mailpit)
             case "redis_toggle":      return try await sidecarToggle(args, ctx: ctx, slug: scopedSlug, addon: SidecarAddons.redis)
@@ -363,6 +364,7 @@ enum MCPToolDispatch {
             "wordpressPath": site.wordpressFolder.path,
             "databasePath": site.databaseFolder.path,
             "image": site.imageTag,
+            "webServer": site.webServer.rawValue,
             "provisioned": site.provisioned,
             "mailpitEnabled": site.mailpitEnabled,
             "mailboxUrl": site.mailboxURL?.absoluteString as Any? ?? NSNull(),
@@ -721,6 +723,23 @@ enum MCPToolDispatch {
         let newSite = updated.sites.first { $0.id == site.id } ?? site
         let restarted = try await restartIfRunning(newSite, ctx: ctx)
         return MCPResult.json(["ok": true, "addon": "xdebug", "enabled": enabled, "restarted": restarted])
+    }
+
+    /// `web_server_set`: returns `{ok, webServer, restarted}`.
+    private static func webServerSet(_ args: [String: Value], ctx: CLIContext, slug: String) async throws -> CallTool.Result {
+        guard let raw = args["server"]?.stringValue, let server = WebServer(rawValue: raw.lowercased()) else {
+            throw ToolError("bad_args", "`server` must be apache or nginx.")
+        }
+        let site = try await resolveSite(slug, ctx: ctx)
+        guard server.supports(imageTag: site.imageTag) else {
+            throw ToolError("bad_args", "nginx needs an official wordpress image with a PHP-FPM variant; \(site.imageTag) has none.")
+        }
+        let updated = try await ctx.persistence.mutate { env in
+            if let i = env.sites.firstIndex(where: { $0.id == site.id }) { env.sites[i].webServer = server }
+        }
+        let newSite = updated.sites.first { $0.id == site.id } ?? site
+        let restarted = try await restartIfRunning(newSite, ctx: ctx)
+        return MCPResult.json(["ok": true, "webServer": server.rawValue, "restarted": restarted])
     }
 
     /// `elasticsearch_toggle`, `mailpit_toggle`, `redis_toggle`: returns `{ok, addon, enabled,
