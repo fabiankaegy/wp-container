@@ -308,9 +308,9 @@ public actor SiteArchiveService {
 
             try enter(.applyingDomain)
             if let customDomain = site.customDomain {
-                let domains = try await persistence.load().sites.compactMap(\.customDomain).filter { !$0.isEmpty }
+                let domains = HostsFileService.domains(for: try await persistence.load().sites)
                 do {
-                    try await DomainService(cli: cli).apply(site: site, allCustomDomains: domains)
+                    try await DomainService(cli: cli).apply(site: site, hostsDomains: domains)
                 } catch let cancellation as CancellationError {
                     throw cancellation
                 } catch {

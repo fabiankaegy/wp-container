@@ -8,20 +8,18 @@ struct DomainCard: View {
     let site: Site
 
     @State private var field = ""
-    @State private var registered = true
-
-    private var showNotRegistered: Bool {
-        (site.customDomain?.isEmpty == false) && !registered
-    }
+    @State private var missing: [String] = []
 
     var body: some View {
         SectionCard(title: "Domain", systemImage: "globe") {
             VStack(alignment: .leading, spacing: 12) {
                 current
-                if showNotRegistered { notRegisteredRow }
+                if !missing.isEmpty {
+                    MissingHostsRow(site: site, missing: $missing)
+                }
                 editor
                 if site.networkType.isSubdomain {
-                    Label("Subdomain multisite on a custom domain needs a hosts entry per subsite; subdirectory mode is recommended for custom domains.",
+                    Label("Each subsite on a custom domain needs its own hosts entry. New subsites appear here after the site starts or its Network Sites list refreshes.",
                           systemImage: "info.circle")
                         .font(.caption2).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -33,33 +31,8 @@ struct DomainCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .onAppear {
-            field = site.customDomain ?? ""
-            registered = vm.isDomainRegistered(site)
-        }
-        .task(id: site.customDomain) { registered = vm.isDomainRegistered(site) }
-    }
-
-    /// Shown when a domain is configured but has no /etc/hosts entry (e.g. the
-    /// admin prompt was skipped during creation) — offers a one-click re-trigger.
-    private var notRegisteredRow: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Not registered in /etc/hosts").font(.callout.weight(.medium))
-                Text("\(site.customDomain ?? "") won't resolve until it's added to /etc/hosts (one approval — Touch ID supported).")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 8)
-            Button("Register now") {
-                Task {
-                    _ = await vm.registerCustomDomain(site)
-                    registered = vm.isDomainRegistered(site)
-                }
-            }
-            .buttonStyle(.borderedProminent).controlSize(.small)
-        }
+        .onAppear { field = site.customDomain ?? "" }
+        .trackingMissingHosts(of: site, into: $missing)
     }
 
     private var current: some View {
