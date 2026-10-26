@@ -192,6 +192,15 @@ struct ShareCard: View {
         .help(label)
     }
 
+    private var defaultProvider: String { vm.shareDefaultProvider ?? ShareSettings.defaultProvider }
+
+    /// Every provider except the default, which the Default entry already
+    /// stands for. A share that saved the default provider by name still lists
+    /// it, so its selection stays visible.
+    private var providerChoices: [String] {
+        (ShareSettings.builtInProviders + customProviders).filter { $0 != defaultProvider || $0 == provider }
+    }
+
     private var options: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top) {
@@ -203,10 +212,8 @@ struct ShareCard: View {
                 }
                 Spacer(minLength: 12)
                 Picker("", selection: $provider) {
-                    Text("Default (\(vm.shareDefaultProvider ?? ShareSettings.defaultProvider))").tag(String?.none)
-                    Text("ngrok").tag(String?.some("ngrok"))
-                    Text("cloudflared").tag(String?.some("cloudflared"))
-                    ForEach(customProviders, id: \.self) { name in
+                    Text("Default (\(defaultProvider))").tag(String?.none)
+                    ForEach(providerChoices, id: \.self) { name in
                         Text(name).tag(String?.some(name))
                     }
                 }

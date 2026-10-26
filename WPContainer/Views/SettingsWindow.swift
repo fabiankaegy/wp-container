@@ -492,15 +492,15 @@ private struct SitesSettingsPane: View {
             SectionCard(title: "Sharing", systemImage: "link") {
                 SettingRow(title: "Default share provider",
                            explanation: "The tunnel used by shares that don’t pick their own. Custom providers are executables in the share-providers folder.") {
+                    // The built-in default is stored as nil, so picking it clears the setting.
                     Picker("", selection: Binding(
-                        get: { vm.shareDefaultProvider },
-                        set: { name in Task { await vm.setDefaultShareProvider(name) } }
+                        get: { vm.shareDefaultProvider ?? ShareSettings.defaultProvider },
+                        set: { name in
+                            Task { await vm.setDefaultShareProvider(name == ShareSettings.defaultProvider ? nil : name) }
+                        }
                     )) {
-                        Text("Built-in (ngrok)").tag(String?.none)
-                        Text("ngrok").tag(String?.some("ngrok"))
-                        Text("cloudflared").tag(String?.some("cloudflared"))
-                        ForEach(vm.customShareProviders(), id: \.self) { name in
-                            Text(name).tag(String?.some(name))
+                        ForEach(ShareSettings.builtInProviders + vm.customShareProviders(), id: \.self) { name in
+                            Text(name).tag(name)
                         }
                     }
                     .labelsHidden().fixedSize()

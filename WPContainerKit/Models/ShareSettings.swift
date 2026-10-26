@@ -5,6 +5,8 @@ import Security
 public struct ShareSettings: Codable, Sendable, Hashable {
     /// Provider used when neither the instance nor the store names one.
     public static let defaultProvider = "ngrok"
+    /// Providers that ship with WP Container, in the order pickers list them.
+    public static let builtInProviders = ["ngrok", "cloudflared"]
 
     /// Provider name (`ngrok`, `cloudflared`, or a custom provider); nil follows the store default.
     public var provider: String?
@@ -41,21 +43,24 @@ public struct ShareSettings: Codable, Sendable, Hashable {
         self.requestID = requestID
     }
 
-    /// Settings with the username `share` and a random 20-character alphanumeric password.
+    /// Settings with a random 10-character lowercase username and a random
+    /// 20-character alphanumeric password.
     public static func generated() -> ShareSettings {
-        ShareSettings(username: "share", password: randomPassword(length: 20))
+        ShareSettings(username: randomString(length: 10, alphabet: "abcdefghijklmnopqrstuvwxyz0123456789"),
+                      password: randomString(length: 20,
+                                             alphabet: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"))
     }
 
-    private static func randomPassword(length: Int) -> String {
-        let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+    private static func randomString(length: Int, alphabet: String) -> String {
+        let alphabet = Array(alphabet)
         // Bytes at or above this limit are discarded so every character is equally likely.
-        let limit = UInt8(256 - 256 % alphabet.count)
+        let limit = 256 - 256 % alphabet.count
         var result = ""
         while result.count < length {
             var bytes = [UInt8](repeating: 0, count: length)
             let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
             precondition(status == errSecSuccess, "SecRandomCopyBytes failed")
-            for byte in bytes where byte < limit && result.count < length {
+            for byte in bytes where Int(byte) < limit && result.count < length {
                 result.append(alphabet[Int(byte) % alphabet.count])
             }
         }

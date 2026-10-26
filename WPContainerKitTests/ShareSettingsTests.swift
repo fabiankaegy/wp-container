@@ -53,7 +53,9 @@ final class ShareSettingsTests: XCTestCase {
     func testGeneratedCredentials() {
         let first = ShareSettings.generated()
         let second = ShareSettings.generated()
-        XCTAssertEqual(first.username, "share")
+        XCTAssertEqual(first.username.count, 10)
+        XCTAssertTrue(first.username.allSatisfy { $0.isASCII && ($0.isLowercase || $0.isNumber) })
+        XCTAssertNotEqual(first.username, second.username)
         XCTAssertEqual(first.password.count, 20)
         XCTAssertTrue(first.password.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber) })
         XCTAssertNotEqual(first.password, second.password)
