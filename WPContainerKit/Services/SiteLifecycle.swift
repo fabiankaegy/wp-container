@@ -61,6 +61,9 @@ public actor SiteLifecycle {
     }
 
     private let cli: ContainerCLI
+    /// Where a start records the URL WordPress was reconciled to
+    /// (`Site.wordpressURL`).
+    private let persistence: StorePersistence
     private let xdebug: XdebugImageService
     private let nginx: NginxImageService
     /// Shared across every caller in the process — parent site, every env,
@@ -112,8 +115,9 @@ public actor SiteLifecycle {
     public nonisolated let events: AsyncStream<StatusEvent>
     private let continuation: AsyncStream<StatusEvent>.Continuation
 
-    public init(cli: ContainerCLI) {
+    public init(cli: ContainerCLI, persistence: StorePersistence = StorePersistence()) {
         self.cli = cli
+        self.persistence = persistence
         self.xdebug = XdebugImageService(cli: cli)
         self.nginx = NginxImageService(cli: cli)
         self.images = ImagePullService(cli: cli)
@@ -586,6 +590,22 @@ public actor SiteLifecycle {
             } catch {
                 emit(site.id, .error(Self.message(for: error)))
                 throw error
+            }
+        }
+        // HTTPS or the domain may have changed while the site was stopped, which
+        // leaves WordPress redirecting to the old URL or loading its assets over
+        // the wrong scheme. Checked only when the recorded URL differs, so a
+        // plain restart costs nothing.
+        if site.wordpressURL != site.url.absoluteString {
+            do {
+                try await waitForDatabaseReady(site, dbHost: dbHost)
+                let warnings = try await SiteURLReconciler(cli: cli, persistence: persistence)
+                    .reconcile(site, dbHost: dbHost, url: site.url)
+                recordWarnings(warnings, for: site.id)
+            } catch {
+                Self.log.error("url-reconcile: \(site.slug, privacy: .public): \(Self.message(for: error), privacy: .public)")
+                recordWarnings(["Could not bring \(site.slug)'s WordPress URLs in line with \(site.url.absoluteString): \(Self.message(for: error))"],
+                               for: site.id)
             }
         }
         // Ensure the tool's default dev constants exist (idempotent; never

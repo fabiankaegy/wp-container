@@ -69,6 +69,11 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     /// certificate SANs and in-container loopback hosts can cover them while
     /// the site is stopped too. Empty for a single site.
     public var networkHosts: [String] = []
+    /// The URL WordPress's `home`/`siteurl` were last brought in line with
+    /// (`SiteURLReconciler`). A start whose `url` differs (HTTPS or the domain
+    /// changed while the site was stopped) reconciles the database first. nil
+    /// = never checked.
+    public var wordpressURL: String?
     /// Where the agent-tools artifacts (MCP configs + doc) were written, so
     /// disable/regenerate targets the same place (PLAN.md §2d rework). nil = the
     /// site folder default. Absolute path.
@@ -108,7 +113,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
 
     private enum CodingKeys: String, CodingKey {
         case id, name, slug, path, port, imageTag, phpVersion, webServer, createdAt, provisioned, groupID, httpsEnabled
-        case xdebugEnabled, elasticsearchEnabled, customDomain, networkType, networkHosts
+        case xdebugEnabled, elasticsearchEnabled, customDomain, networkType, networkHosts, wordpressURL
         case agentToolsRoot, agentToolsDoc
         case cpuLimit, memoryLimitMB
         case idleStopMinutes, lastActivityAt
@@ -144,6 +149,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         customDomain: String? = nil,
         networkType: NetworkType = .none,
         networkHosts: [String] = [],
+        wordpressURL: String? = nil,
         agentToolsRoot: String? = nil,
         agentToolsDoc: String? = nil,
         lastImportSourceURL: String? = nil,
@@ -175,6 +181,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.customDomain = customDomain
         self.networkType = networkType
         self.networkHosts = networkHosts
+        self.wordpressURL = wordpressURL
         self.agentToolsRoot = agentToolsRoot
         self.agentToolsDoc = agentToolsDoc
         self.lastImportSourceURL = lastImportSourceURL
@@ -221,6 +228,8 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.networkType = (try? c.decodeIfPresent(NetworkType.self, forKey: .networkType)) ?? .none
         // Absent in stores written before subsite hosts were tracked.
         self.networkHosts = ((try? c.decodeIfPresent([String].self, forKey: .networkHosts)) ?? []) ?? []
+        // Absent in stores written before URL reconciliation: checked on next start.
+        self.wordpressURL = try? c.decodeIfPresent(String.self, forKey: .wordpressURL)
         self.agentToolsRoot = try? c.decodeIfPresent(String.self, forKey: .agentToolsRoot)
         self.agentToolsDoc = try? c.decodeIfPresent(String.self, forKey: .agentToolsDoc)
         // Absent in stores written before the Database Importer (§2m).

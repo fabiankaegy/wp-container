@@ -3,8 +3,9 @@ import Foundation
 /// Orchestrates setting/clearing a site's custom domain (PLAN.md §2i): rewrites
 /// the managed `/etc/hosts` block (one admin prompt) to every site's hostnames,
 /// extends the CA leaf's SANs to cover the domain (+ subdomain-multisite
-/// wildcard), and — when the site is running — updates WordPress
-/// `home`/`siteurl`. The store mutation and proxy
+/// wildcard), and — when the site is running — moves WordPress's URLs onto the
+/// new domain (`SiteURLReconciler`); a stopped site is reconciled on its next
+/// start. The store mutation and proxy
 /// reload are the caller's responsibility (the app/CLI owns those); the proxy's
 /// refresh loop also re-covers SANs on its own.
 public actor DomainService {
@@ -56,7 +57,7 @@ public actor DomainService {
             try? WPConfigService.enableForwardedProto(wordpressFolder: site.wordpressFolder)
         }
         if let dbHost = try? await cli.ipAddress(of: site.dbContainerName), !dbHost.isEmpty {
-            try await cli.run(SiteRecipe.wpSetURLsArgs(site, dbHost: dbHost, url: site.url.absoluteString))
+            try await SiteURLReconciler(cli: cli).reconcile(site, dbHost: dbHost, url: site.url)
         }
     }
 }
