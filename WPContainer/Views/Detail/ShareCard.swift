@@ -34,7 +34,12 @@ struct ShareCard: View {
     private var current: Snapshot { Snapshot(provider: provider, hostname: hostname, allow: allow) }
     private var status: ShareStatus? { vm.shareStatus(for: instanceID) }
     private var isStarting: Bool { vm.sharesStarting.contains(instanceID) || status?.state == .starting }
-    private var isLive: Bool { share?.active == true && status?.state == .live }
+    /// The share is live for its current request. A status from an earlier request,
+    /// which the proxy withdraws a few seconds after a stop, does not count.
+    private var isLive: Bool {
+        guard let share, share.active, let status, status.state == .live else { return false }
+        return status.requestID == share.requestID
+    }
     /// The share's last request ended `down`; the store no longer marks it active.
     private var isDown: Bool {
         guard let share, let status, status.state == .down else { return false }

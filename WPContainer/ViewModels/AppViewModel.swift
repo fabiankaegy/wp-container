@@ -894,12 +894,13 @@ public final class AppViewModel {
         shareStatuses[instanceID]
     }
 
-    /// Whether the instance's share is live and still wanted, which keeps a status the proxy
-    /// has not yet withdrawn from showing after a stop.
+    /// Whether the instance's share is live for its current request, which keeps a status the
+    /// proxy has not yet withdrawn from showing after a stop or a new request.
     public func isShareLive(_ instanceID: UUID) -> Bool {
-        guard shareStatuses[instanceID]?.state == .live else { return false }
+        guard let status = shareStatuses[instanceID], status.state == .live else { return false }
         let share = store.site(id: instanceID)?.share ?? store.env(id: instanceID)?.share
-        return share?.active == true
+        guard let share, share.active else { return false }
+        return status.requestID == share.requestID
     }
 
     /// Validates the request, starts the instance when it is stopped, requests the share
