@@ -54,7 +54,7 @@ extension HelpTopic {
         icon: "sparkles",
         title: "Welcome to WP Container",
         summary: "What it is and the 3-step path",
-        intro: "WP Container runs local WordPress sites on Apple's built-in `container` runtime — no Docker Desktop required. Each site is a real, isolated WordPress install (Apache + PHP + MariaDB) you can open in your browser in seconds.",
+        intro: "WP Container runs local WordPress sites on Apple's built-in `container` runtime — no Docker Desktop required. Each site is a real, isolated WordPress install (Apache or nginx + PHP + MariaDB) you can open in your browser in seconds.",
         sections: [
             HelpSection(
                 title: "Get going in three steps",
@@ -96,7 +96,7 @@ extension HelpTopic {
         icon: "globe",
         title: "Sites",
         summary: "Isolated WordPress installs",
-        intro: "A site is a self-contained WordPress install — its own Apache + PHP container, its own MariaDB database, and its own `127.0.0.1` port. Create as many as you like; they never interfere with each other.",
+        intro: "A site is a self-contained WordPress install — its own Apache or nginx + PHP container, its own MariaDB database, and its own `127.0.0.1` port. Create as many as you like; they never interfere with each other.",
         sections: [
             HelpSection(
                 title: "Creating a site",

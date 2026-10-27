@@ -54,6 +54,31 @@ struct XdebugCommand: AsyncParsableCommand {
     }
 }
 
+// MARK: - web-server
+
+struct WebServerCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "web-server", abstract: "Switch a site's web server: web-server apache|nginx <slug>.")
+    @Argument(help: "apache | nginx") var server: String
+    @Argument(help: "Site slug.") var slug: String
+    @OptionGroup var output: JSONOptions
+
+    func run() async throws {
+        guard let webServer = WebServer(rawValue: server.lowercased()) else { throw CLIErrorJSON("bad_args", detail: "server must be apache|nginx") }
+        let ctx = CLIContext()
+        do {
+            let envelope = try await ctx.load()
+            guard let site = envelope.sites.first(where: { $0.slug == slug }) else {
+                throw CLIErrorJSON("site_not_found", detail: slug)
+            }
+            guard webServer.supports(imageTag: site.imageTag) else {
+                throw CLIErrorJSON("bad_args", detail: "nginx needs an official wordpress image with a PHP-FPM variant; \(site.imageTag) has none")
+            }
+            try await toggleAndRestart(slug: slug, output: output, ctx: ctx,
+                                       label: "Switched to \(webServer.label)") { $0.webServer = webServer }
+        } catch { throw failCommand(error, json: output.json) }
+    }
+}
+
 /// Turn a sidecar on or off for a site and restart it when running. JSON:
 /// `{ok, slug, addon, enabled, restarted}`, plus the addon's endpoint under its
 /// `endpointKey` (`mailboxUrl` for Mailpit).

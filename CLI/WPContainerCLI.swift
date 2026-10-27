@@ -29,6 +29,7 @@ struct WPContainerCLI: AsyncParsableCommand {
             MountCommand.self,
             ProxyCommand.self,
             XdebugCommand.self,
+            WebServerCommand.self,
             ElasticsearchCommand.self,
             MailpitCommand.self,
             RedisCommand.self,
@@ -266,6 +267,7 @@ struct CreateCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Full WordPress image tag override (e.g. wordpress:php8.3-apache).") var php: String?
     @Option(name: .long, help: "WordPress version: latest, 6.8, 6.7, 6.6.") var wp: String?
     @Option(name: .long, help: "PHP version: 8.4, 8.3, 8.2, 8.1.") var phpVersion: String?
+    @Option(name: .long, help: "Web server: apache (default) | nginx.") var webServer: String?
     @Option(name: .long, help: "Multisite network: subdirectory | subdomain.") var multisite: String?
     @Option(name: .long, help: "Custom domain, e.g. mysite.local.") var domain: String?
     @Option(name: .long, help: "Sidebar group name (created if it doesn't exist).") var group: String?
@@ -300,6 +302,16 @@ struct CreateCommand: AsyncParsableCommand {
             } else {
                 imageTag = SiteRecipe.defaultWordPressImage; phpLabel = nil
             }
+            var siteWebServer = WebServer.apache
+            if let webServer {
+                guard let server = WebServer(rawValue: webServer.lowercased()) else {
+                    throw CLIErrorJSON("bad_args", detail: "--web-server must be apache|nginx")
+                }
+                guard server.supports(imageTag: imageTag) else {
+                    throw CLIErrorJSON("bad_args", detail: "nginx needs an official wordpress image with a PHP-FPM variant; \(imageTag) has none")
+                }
+                siteWebServer = server
+            }
             // Network type.
             var networkType: NetworkType = .none
             if let multisite {
@@ -325,6 +337,7 @@ struct CreateCommand: AsyncParsableCommand {
             let siteName = name
             let siteImageTag = imageTag
             let sitePHPLabel = phpLabel
+            let siteServer = siteWebServer
             let siteDomain = customDomain
             let siteNetwork = networkType
             let siteCPU = cpus
@@ -332,7 +345,7 @@ struct CreateCommand: AsyncParsableCommand {
             guard let (_, created, updated) = try await ctx.persistence.allocatePort(reserve: { port, env in
                 var s = Site(name: siteName, slug: slug, path: sitePath,
                              port: port, imageTag: siteImageTag, phpVersion: sitePHPLabel,
-                             cpuLimit: siteCPU, memoryLimitMB: siteMemory,
+                             webServer: siteServer, cpuLimit: siteCPU, memoryLimitMB: siteMemory,
                              customDomain: siteDomain, networkType: siteNetwork)
                 s.mounts = siteMounts
                 if let groupName, !groupName.trimmingCharacters(in: .whitespaces).isEmpty {

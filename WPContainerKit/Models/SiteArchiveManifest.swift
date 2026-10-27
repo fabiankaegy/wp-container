@@ -13,6 +13,8 @@ public enum SiteArchiveLayout {
 public struct SiteArchiveSettings: Codable, Sendable, Equatable {
     public var imageTag: String
     public var phpVersion: String?
+    /// nil in archives written before the web server choice, which import as Apache.
+    public var webServer: WebServer?
     public var networkType: NetworkType
     public var httpsEnabled: Bool
     public var xdebugEnabled: Bool
@@ -28,6 +30,7 @@ public struct SiteArchiveSettings: Codable, Sendable, Equatable {
     public init(site: Site) {
         imageTag = site.imageTag
         phpVersion = site.phpVersion
+        webServer = site.webServer
         networkType = site.networkType
         httpsEnabled = site.httpsEnabled
         xdebugEnabled = site.xdebugEnabled
@@ -46,6 +49,7 @@ public struct SiteArchiveSettings: Codable, Sendable, Equatable {
     public func apply(to site: inout Site) {
         site.imageTag = imageTag
         site.phpVersion = phpVersion
+        site.webServer = webServer ?? .apache
         site.networkType = networkType
         site.httpsEnabled = httpsEnabled
         site.xdebugEnabled = xdebugEnabled

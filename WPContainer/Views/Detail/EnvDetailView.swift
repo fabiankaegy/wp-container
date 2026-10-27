@@ -230,6 +230,9 @@ struct EnvDetailView: View {
                 InfoRow(label: "Image") {
                     Text(env.imageTag).monospaced().textSelection(.enabled)
                 }
+                InfoRow(label: "Web server") {
+                    Text(env.webServer.label).textSelection(.enabled)
+                }
             }
         }
     }

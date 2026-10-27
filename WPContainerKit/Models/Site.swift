@@ -13,6 +13,9 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     public var imageTag: String
     /// Optional display string for the PHP version chosen at creation.
     public var phpVersion: String?
+    /// The web server in front of PHP. Switching it restarts the site on the
+    /// other image; files and database are untouched.
+    public var webServer: WebServer
     public var createdAt: Date
     public var provisioned: Bool
     /// Sidebar group this site belongs to (nil = ungrouped). See PLAN.md §2g.
@@ -99,7 +102,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     public var status: SiteStatus = .stopped
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, slug, path, port, imageTag, phpVersion, createdAt, provisioned, groupID, httpsEnabled
+        case id, name, slug, path, port, imageTag, phpVersion, webServer, createdAt, provisioned, groupID, httpsEnabled
         case xdebugEnabled, elasticsearchEnabled, customDomain, networkType
         case agentToolsRoot, agentToolsDoc
         case cpuLimit, memoryLimitMB
@@ -120,6 +123,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         port: Int,
         imageTag: String,
         phpVersion: String? = nil,
+        webServer: WebServer = .apache,
         createdAt: Date = Date(),
         provisioned: Bool = false,
         groupID: UUID? = nil,
@@ -150,6 +154,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.port = port
         self.imageTag = imageTag
         self.phpVersion = phpVersion
+        self.webServer = webServer
         self.createdAt = createdAt
         self.provisioned = provisioned
         self.groupID = groupID
@@ -183,6 +188,8 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.port = try c.decode(Int.self, forKey: .port)
         self.imageTag = try c.decode(String.self, forKey: .imageTag)
         self.phpVersion = try c.decodeIfPresent(String.self, forKey: .phpVersion)
+        // Absent in stores written before the web server choice: those sites run Apache.
+        self.webServer = (try? c.decodeIfPresent(WebServer.self, forKey: .webServer)) ?? .apache
         self.createdAt = try c.decode(Date.self, forKey: .createdAt)
         self.provisioned = (try? c.decode(Bool.self, forKey: .provisioned)) ?? false
         self.groupID = try c.decodeIfPresent(UUID.self, forKey: .groupID)

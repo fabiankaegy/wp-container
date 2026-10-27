@@ -69,8 +69,8 @@ Sites are provisioned automatically (no install wizard) and log in with
   turned off in Settings → Sites; a checkout with uncommitted changes is
   left on disk.
 - **`wp-container` CLI** — everything the app does, scriptable, with `--json`
-  everywhere: `list`, `create` (`--wp/--php/--multisite/--domain/--group`),
-  `start`, `stop`, `delete`, `worktree …`, `wp …` (wp-cli proxy), `xdebug`,
+  everywhere: `list`, `create` (`--wp/--php/--web-server/--multisite/--domain/--group`),
+  `start`, `stop`, `delete`, `worktree …`, `wp …` (wp-cli proxy), `web-server`, `xdebug`,
   `elasticsearch`, `domain`, `https`, `resolve-site`, `setup wp`. Install with
   `make install-cli` (adds a `wpc` shortcut + the global `wp` router binary).
 - **Ephemeral containers, durable sites** — containers are disposable (`--rm`);
@@ -101,13 +101,21 @@ Sites are provisioned automatically (no install wizard) and log in with
 - **WP × PHP versions** — the new-site flow is a 3-step guide (name → WordPress ×
   PHP version with a live image-tag preview → options); change PHP later (image
   swap + restart) or update core from Settings → Software.
+- **Apache or nginx** — pick the web server when creating a site, or switch it
+  later from Settings → Software (`wp-container web-server nginx <site>`).
+  nginx sites run nginx + PHP-FPM in one container, built once per version from
+  the official `wordpress:<version>-fpm` image; files and database are untouched
+  by a switch. Extra nginx rules go in the site's `nginx/` folder (next to
+  `wordpress/`): each `*.conf` file is included in the server block on the next
+  start, and a config that fails `nginx -t` is skipped with the error in the
+  container log.
 - **MCP agent tools** — `wp-container agent-tools enable <site> [--root …]` writes
   `.mcp.json` (+ Cursor/VS Code configs) and a marked `AGENTS.md` block into a
   chosen root (site folder, or your `wp-content` repo root for IDE discovery);
-  the bundled MCP stdio server (`wp-container mcp --site <slug>`) exposes 29 tools
+  the bundled MCP stdio server (`wp-container mcp --site <slug>`) exposes 32 tools
   in the spirit of [10up/localwp-agent-tools](https://github.com/10up/localwp-agent-tools):
   `wp_cli`, `run_command`, `run_tests`, log readers, `wp-config` editing, site info/health, start/stop/status,
-  `list_sites`, `worktree_*`, `xdebug_toggle` / `elasticsearch_toggle`, plus
+  `list_sites`, `worktree_*`, `xdebug_toggle` / `web_server_set` / `elasticsearch_toggle`, plus
   `login_link` / `create_user`, and `share_start` / `share_stop` / `share_status`
   (public password-protected link; turning the password off and gate exceptions
   stay CLI/app-only).

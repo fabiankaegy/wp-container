@@ -5,7 +5,7 @@ import Foundation
 /// `PHP_INI_SCAN_DIR` (see `SiteRecipe.runWordPressArgs`).
 ///
 /// The managed `wpc-defaults.ini` raises the stock image's 2 MB upload cap to
-/// 50 MB for every site. `upload_max_filesize` is PHP_INI_PERDIR — it cannot be
+/// 50 MB and its 128 MB memory limit to 256 MB for every site. `upload_max_filesize` is PHP_INI_PERDIR — it cannot be
 /// set from WordPress code (no mu-plugin/wp-config route), only from an ini
 /// scanned at PHP startup, hence the mounted folder.
 ///
@@ -33,6 +33,8 @@ public enum PHPConfService {
     ; multipart overhead still fits in one request body.
     upload_max_filesize = 50M
     post_max_size = 64M
+
+    memory_limit = 256M
     """
 
     public static func managedIniURL(phpConfFolder: URL) -> URL {

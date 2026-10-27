@@ -150,11 +150,14 @@ public enum DatabaseLifecycleLock {
     /// Same folder as `sites.json` and its `.lock` sidecar — the one directory
     /// every surface of the tool already agrees on.
     public static func url(forContainer name: String) -> URL {
+        folder.appendingPathComponent("db-\(sanitize(name)).lock")
+    }
+
+    /// `~/Library/Application Support/WPContainer`, where every lock file lives.
+    static var folder: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
-        return appSupport
-            .appendingPathComponent("WPContainer", isDirectory: true)
-            .appendingPathComponent("db-\(sanitize(name)).lock")
+        return appSupport.appendingPathComponent("WPContainer", isDirectory: true)
     }
 
     /// How long a DEPENDANT waits for the lock before giving up and proceeding
@@ -176,4 +179,27 @@ public enum DatabaseLifecycleLock {
         let cleaned = String(name.map { allowed.contains($0) ? $0 : "-" })
         return cleaned.isEmpty ? "unnamed" : cleaned
     }
+}
+
+/// The cross-process lock that makes starts of one instance take turns.
+///
+/// The app's proxy wakes a stopped site when a request reaches it, and the CLI,
+/// the MCP server and the app can each start it too. Each process dedupes its
+/// own starts (`SiteLifecycle.claim`), but two processes starting the same
+/// instance at once both `container run` the same names, and the loser fails
+/// with "already exists" after deleting containers the winner was booting.
+///
+/// A start holds `.exclusive` on `start-<instance id>.lock` for its whole
+/// duration. A second start waits for the first to finish, then finds the
+/// containers running and reuses them.
+public enum InstanceStartLock {
+    /// `~/Library/Application Support/WPContainer/start-<instance id>.lock`
+    public static func url(for instanceID: UUID) -> URL {
+        DatabaseLifecycleLock.folder.appendingPathComponent("start-\(instanceID.uuidString).lock")
+    }
+
+    /// How long a start waits for another process's start of the same
+    /// instance. Long enough to cover a first start's image pulls; past it the
+    /// start proceeds without the lock.
+    public static let timeout: Duration = .seconds(600)
 }
