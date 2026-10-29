@@ -138,9 +138,12 @@ public final class SiteStore {
     }
 
     /// Archive (`at` set) or unarchive (nil) a site, by ID inside the locked
-    /// write. Stopping it and settling its envs is the caller's job.
+    /// write. Stopping it and settling its envs is the caller's job;
+    /// unarchiving restarts its settled envs' purge window
+    /// (`StoreEnvelope.unarchiveSite`).
     public func setArchived(_ at: Date?, siteID: UUID) async {
         await apply { store in
+            guard let at else { _ = store.unarchiveSite(id: siteID); return }
             if let i = store.sites.firstIndex(where: { $0.id == siteID }) {
                 store.sites[i].archivedAt = at
             }

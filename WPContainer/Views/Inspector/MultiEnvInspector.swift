@@ -54,7 +54,7 @@ struct MultiEnvInspector: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Their containers, cloned files and worktree checkouts are removed. The git branches are kept.")
+            Text("Their containers, cloned files and worktree checkouts are removed. The git branches, and checkouts with uncommitted changes, are kept.")
         }
     }
 

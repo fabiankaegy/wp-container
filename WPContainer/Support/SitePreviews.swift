@@ -6,9 +6,12 @@ import WebKit
 ///
 /// A running site is loaded once in an offscreen `WKWebView` and snapshotted;
 /// the PNG is cached under ~/Library/Caches so stopped sites still show their
-/// last look (rendered grayscale by the views). Snapshots refresh when a site
-/// is seen running and its cached image is older than `maxAge`. Captures run
-/// one at a time so a gallery full of sites doesn't spin up a dozen web views.
+/// last look (rendered grayscale by the views). A running site is captured at
+/// most once per run, and only when its cached image is older than `maxAge`:
+/// each capture is a request that stamps the idle clock, so recapturing on
+/// every visit would keep unused sites from parking. "Refresh Preview" forces
+/// one. Captures run one at a time so a gallery full of sites doesn't spin up
+/// a dozen web views.
 @MainActor
 @Observable
 final class SitePreviews {
@@ -22,6 +25,8 @@ final class SitePreviews {
     @ObservationIgnored var isRunning: (UUID) -> Bool = { _ in false }
 
     @ObservationIgnored private var capturedAt: [UUID: Date] = [:]
+    /// Instances captured during their current run (see `runStarted`).
+    @ObservationIgnored private var capturedThisRun: Set<UUID> = []
     @ObservationIgnored private var loadedFromDisk: Set<UUID> = []
     @ObservationIgnored private var pending: Set<UUID> = []
     @ObservationIgnored private var chain: Task<Void, Never>?
@@ -34,11 +39,16 @@ final class SitePreviews {
     private static func file(_ id: UUID) -> URL { folder.appendingPathComponent("\(id.uuidString).png") }
 
     /// Loads the cached snapshot, then recaptures it when the instance is
-    /// running and the snapshot is missing or stale. Call from a view's `.task`.
+    /// running, wasn't captured yet this run, and the snapshot is missing or
+    /// stale. Call from a view's `.task`.
     func refresh(id: UUID, url: URL, isRunning: Bool, force: Bool = false) {
         loadFromDisk(id)
-        guard isRunning, !pending.contains(id) else { return }
-        if !force, let date = capturedAt[id], Date().timeIntervalSince(date) < Self.maxAge { return }
+        guard isRunning else { capturedThisRun.remove(id); return }
+        guard !pending.contains(id) else { return }
+        if !force {
+            if capturedThisRun.contains(id) { return }
+            if let date = capturedAt[id], Date().timeIntervalSince(date) < Self.maxAge { return }
+        }
         pending.insert(id)
         let previous = chain
         chain = Task { [weak self] in
@@ -51,14 +61,25 @@ final class SitePreviews {
         }
     }
 
+    /// A new run of `id` began, so its next `refresh` may capture again.
+    func runStarted(_ id: UUID) {
+        capturedThisRun.remove(id)
+    }
+
     private func store(_ image: NSImage?, for id: UUID) {
         pending.remove(id)
         guard let image else { return }
         images[id] = image
         capturedAt[id] = Date()
-        guard let tiff = image.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return }
-        try? FileManager.default.createDirectory(at: Self.folder, withIntermediateDirectories: true)
-        try? png.write(to: Self.file(id), options: .atomic)
+        capturedThisRun.insert(id)
+        guard let tiff = image.tiffRepresentation else { return }
+        let file = Self.file(id), folder = Self.folder
+        // Encoding and writing the PNG stays off the main actor.
+        Task.detached(priority: .utility) {
+            guard let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return }
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try? png.write(to: file, options: .atomic)
+        }
     }
 
     private func loadFromDisk(_ id: UUID) {

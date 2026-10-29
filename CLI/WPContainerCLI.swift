@@ -104,9 +104,7 @@ struct CLIContext {
     func unarchiveIfNeeded(siteID: UUID) async throws {
         let envelope = try await persistence.load()
         guard let site = envelope.sites.first(where: { $0.id == siteID }), site.isArchived else { return }
-        _ = try await persistence.mutate { store in
-            if let i = store.sites.firstIndex(where: { $0.id == siteID }) { store.sites[i].archivedAt = nil }
-        }
+        _ = try await persistence.mutate { store in _ = store.unarchiveSite(id: siteID) }
         FileHandle.standardError.write(Data("\(site.slug) was archived — unarchiving it.\n".utf8))
     }
 

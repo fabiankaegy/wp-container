@@ -315,6 +315,9 @@ public final class AppViewModel {
         if !current.status.isRunning {
             onStep(.startingSite)
             await unarchiveIfNeeded(siteID: current.id)
+            // Re-read: the upsert below replaces the whole record, and the
+            // copy above still carries the archive mark.
+            current = store.site(id: site.id) ?? current
             do {
                 let provisioned = try await lifecycle.startSite(current)
                 if provisioned != current.provisioned {
@@ -377,6 +380,9 @@ public final class AppViewModel {
         if !current.status.isRunning {
             onStep(.startingSite)
             await unarchiveIfNeeded(siteID: current.id)
+            // Re-read: the upsert below replaces the whole record, and the
+            // copy above still carries the archive mark.
+            current = store.site(id: site.id) ?? current
             do {
                 let provisioned = try await lifecycle.startSite(current)
                 if provisioned != current.provisioned {
@@ -870,6 +876,9 @@ public final class AppViewModel {
                 let prior = self.store.status(for: event.instanceID)
                 self.store.setStatus(event.status, for: event.instanceID)
                 self.notifyStatusTransition(event, prior: prior)
+                if event.status == .running, prior != .running {
+                    self.previews.runStarted(event.instanceID)
+                }
                 if event.status == .running, prior != .running,
                    let site = self.store.site(id: event.instanceID), site.networkType.isMultisite {
                     self.refreshNetworkHosts(site)
@@ -1448,10 +1457,14 @@ public final class AppViewModel {
         Task { await removeEnv(env, keepWorktree: keepWorktree) }
     }
 
-    /// Delete several envs, one at a time (see `removeEnv`).
+    /// Delete several envs, one at a time (see `removeEnv`). A checkout with
+    /// uncommitted changes stays on disk, as in the purge loop.
     public func deleteEnvs(_ envs: [WorktreeEnv]) {
         Task {
-            for env in envs { await removeEnv(env) }
+            for env in envs {
+                let dirty = await git.hasUncommittedChanges(at: env.worktreePath)
+                await removeEnv(env, keepWorktree: dirty)
+            }
         }
     }
 
@@ -1487,7 +1500,15 @@ public final class AppViewModel {
     /// Archive a site: stop it and its branch environments, settle the active
     /// ones (freeing their ports), then hide it from the library and drop it
     /// from the proxy's routes so nothing wakes it. Files and databases stay.
+    ///
+    /// Refused while the site starts or stops: a start in flight holds the
+    /// site's claim, so the stop would skip it and leave it running unrouted.
     public func archiveSite(_ site: Site) {
+        let status = store.status(for: site.id) ?? .stopped
+        guard !status.isTransitional else {
+            lastError = "Wait for \(site.name) to finish starting or stopping before archiving it."
+            return
+        }
         Task {
             // Unroute first: settling takes a few seconds, and a request from an
             // open tab in that window would otherwise wake the site again.
@@ -1566,7 +1587,7 @@ public final class AppViewModel {
     private func purgeSettledEnvs() async {
         guard AppSettings.autoPurgeSettledEnvs else { return }
         let days = AppSettings.purgeSettledAfterDays
-        let due = store.envs.filter { EnvSettlement.isDueForPurge($0, afterDays: days) }
+        let due = EnvSettlement.dueForPurge(store.envs, sites: store.sites, afterDays: days)
         guard !due.isEmpty else { return }
         var kept = 0
         for env in due {

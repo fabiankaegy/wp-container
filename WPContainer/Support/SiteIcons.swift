@@ -23,18 +23,27 @@ final class SiteIcons {
     }
 
     /// Resolves icons for newly running sites, in parallel, and forgets stopped
-    /// ones. A site whose lookup failed or was cancelled is retried next sync.
+    /// ones. A lookup that fails (MariaDB not accepting connections yet) is
+    /// retried a few times, 10 s apart; one cancelled by the next sync is
+    /// retried by that sync.
     func sync(_ sites: [Site], cli: ContainerCLI) async {
         let running = sites.filter { $0.status.isRunning }
         resolved.formIntersection(running.map(\.id))
-        await withTaskGroup(of: (Site, URL?)?.self) { group in
-            for site in running where !resolved.contains(site.id) {
-                group.addTask { await Self.iconFile(for: site, cli: cli) }
+        for attempt in 0..<4 {
+            if attempt > 0 {
+                guard (try? await Task.sleep(for: .seconds(10))) != nil else { return }
             }
-            for await case let (site, file)? in group where !Task.isCancelled {
-                resolved.insert(site.id)
-                await FaviconImageCache.shared.setPreferred(file, wordpressFolder: site.wordpressFolder)
-                versions[site.wordpressFolder.path, default: 0] += 1
+            let pending = running.filter { !resolved.contains($0.id) }
+            guard !pending.isEmpty else { return }
+            await withTaskGroup(of: (Site, URL?)?.self) { group in
+                for site in pending {
+                    group.addTask { await Self.iconFile(for: site, cli: cli) }
+                }
+                for await case let (site, file)? in group where !Task.isCancelled {
+                    resolved.insert(site.id)
+                    await FaviconImageCache.shared.setPreferred(file, wordpressFolder: site.wordpressFolder)
+                    versions[site.wordpressFolder.path, default: 0] += 1
+                }
             }
         }
     }

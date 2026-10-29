@@ -116,7 +116,7 @@ struct BranchTable: View {
             }
             Button("Cancel", role: .cancel) { confirmingDelete = [] }
         } message: {
-            Text("Removes containers, cloned files and worktree checkouts. Git branches are kept.")
+            Text("Removes containers, cloned files and worktree checkouts. Git branches, and checkouts with uncommitted changes, are kept.")
         }
     }
 

@@ -121,6 +121,33 @@ final class EnvSettlementTests: XCTestCase {
         XCTAssertFalse(restored.env.isSettled)
     }
 
+    func testArchivedSitesEnvsAreNeverDueForPurge() {
+        var parent = Site(id: parentID, name: "My Site", slug: "my-site",
+                          path: tempRoot.appendingPathComponent("my-site"), port: 8880,
+                          imageTag: "wordpress:6.8")
+        let old = env(settledAt: now.addingTimeInterval(-30 * day))
+        XCTAssertEqual(EnvSettlement.dueForPurge([old], sites: [parent], afterDays: 30, now: now).map(\.id), [old.id])
+        parent.archivedAt = now.addingTimeInterval(-40 * day)
+        XCTAssertTrue(EnvSettlement.dueForPurge([old], sites: [parent], afterDays: 30, now: now).isEmpty)
+    }
+
+    func testUnarchivingRestartsThePurgeWindow() {
+        var parent = Site(id: parentID, name: "My Site", slug: "my-site",
+                          path: tempRoot.appendingPathComponent("my-site"), port: 8880,
+                          imageTag: "wordpress:6.8")
+        parent.archivedAt = now.addingTimeInterval(-40 * day)
+        let settled = env(slug: "settled", settledAt: now.addingTimeInterval(-40 * day))
+        let active = env(slug: "active", port: 8891)
+        var envelope = StoreEnvelope(sites: [parent], envs: [settled, active])
+
+        XCTAssertTrue(envelope.unarchiveSite(id: parentID, now: now))
+        XCTAssertFalse(envelope.sites[0].isArchived)
+        XCTAssertEqual(envelope.envs[0].settledAt, now)
+        XCTAssertNil(envelope.envs[1].settledAt)
+        // Already unarchived: nothing to do.
+        XCTAssertFalse(envelope.unarchiveSite(id: parentID, now: now))
+    }
+
     // MARK: - Helpers
 
     private func env(slug: String = "feature", port: Int = 8890, createdAt: Date? = nil,

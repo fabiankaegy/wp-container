@@ -80,17 +80,22 @@ public enum WPConfigService {
     /// `getenv_docker('WORDPRESS_TABLE_PREFIX', 'wp_')`. nil when absent or not
     /// `[A-Za-z0-9_]+`, so callers can inline a non-nil prefix into SQL.
     static func parseTablePrefix(_ text: String) -> String? {
+        // Drop `/* … */` blocks first, so a line inside a multi-line one is
+        // never read as code.
+        let uncommented = text.replacing(#/(?s)\/\*.*?\*\//#, with: "")
         // Split on any line ending: in Swift "\r\n" is ONE character, so a
         // CRLF wp-config.php never splits on "\n" alone.
         // Skip commented-out assignments, so `// $table_prefix = 'old_';` above
         // the real one doesn't win.
-        guard let line = text.split(whereSeparator: \.isNewline).first(where: { line in
+        guard let line = uncommented.split(whereSeparator: \.isNewline).first(where: { line in
                   let code = line.drop(while: \.isWhitespace)
-                  return !code.hasPrefix("//") && !code.hasPrefix("/*") && !code.hasPrefix("#") && !code.hasPrefix("*")
+                  return !code.hasPrefix("//") && !code.hasPrefix("#")
                       && code.contains("$table_prefix") && code.contains("=")
               }),
               let assignment = line.split(separator: "=", maxSplits: 1).last else { return nil }
-        let literals = assignment.matches(of: #/['"]([A-Za-z0-9_]*)['"]/#).map { String($0.output.1) }
+        // Only the statement itself: a trailing comment can quote another prefix.
+        let statement = assignment.prefix(while: { $0 != ";" })
+        let literals = statement.matches(of: #/['"]([A-Za-z0-9_]*)['"]/#).map { String($0.output.1) }
         return literals.last.flatMap { $0.isEmpty ? nil : $0 }
     }
 

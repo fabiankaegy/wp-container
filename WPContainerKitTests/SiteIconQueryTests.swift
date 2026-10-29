@@ -23,6 +23,15 @@ final class SiteIconQueryTests: XCTestCase {
         XCTAssertEqual(WPConfigService.parseTablePrefix(config), "nw7_")
     }
 
+    func testPrefixIgnoresTrailingComment() {
+        XCTAssertEqual(WPConfigService.parseTablePrefix("$table_prefix = 'wp_'; // was 'old_'"), "wp_")
+    }
+
+    func testPrefixSkipsMultiLineBlockComments() {
+        let config = "<?php\n/*\n$table_prefix = 'old_';\n*/\n$table_prefix = 'nw7_';\n"
+        XCTAssertEqual(WPConfigService.parseTablePrefix(config), "nw7_")
+    }
+
     func testPrefixRejectsMissingAndUnsafeValues() {
         XCTAssertNil(WPConfigService.parseTablePrefix(""))
         XCTAssertNil(WPConfigService.parseTablePrefix("$table_prefix = 'x; DROP TABLE';"))
