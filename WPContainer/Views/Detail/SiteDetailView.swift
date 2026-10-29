@@ -67,6 +67,7 @@ struct SiteDetailView: View {
         case .overview:
             VStack(alignment: .leading, spacing: 18) {
                 OverviewCard(site: site)
+                DatabaseCard(instance: site, status: site.status)
                 if site.networkType.isMultisite {
                     SubsitesCard(site: site)
                 }

@@ -53,6 +53,9 @@ public enum SiteRecipe {
     public static let dbUser = "wordpress"
     public static let dbPassword = "wordpress"
     public static let dbRootPassword = "root"
+    /// MariaDB's port. The DB container publishes no host port; the host
+    /// reaches it on the container's own IP.
+    public static let dbPort = 3306
 
     // MARK: Admin credentials (auto-provisioning)
     public static let adminUser = "admin"
