@@ -166,7 +166,7 @@ final class HTTPSProxyShareTests: XCTestCase {
     }
 
     func testExemptRequestReachesTheUpstreamWithoutCookies() async throws {
-        let exception = try ShareException(parsing: "?wc-api")
+        let exception = try ShareException(parsing: "/wp-admin/?wc-api=1")
         let port = try await openShare(instanceID: UUID(), route: route, config: config(allow: [exception]))
 
         let response = try await LoopbackClient.exchange(port: port, request: """
@@ -187,7 +187,7 @@ final class HTTPSProxyShareTests: XCTestCase {
     }
 
     func testAuthenticatedRequestOnAnExceptionKeepsCookies() async throws {
-        let exception = try ShareException(parsing: "?wc-api")
+        let exception = try ShareException(parsing: "/wp-admin/?wc-api=1")
         let port = try await openShare(instanceID: UUID(), route: route, config: config(allow: [exception]))
 
         _ = try await LoopbackClient.exchange(port: port, request: """
@@ -205,7 +205,7 @@ final class HTTPSProxyShareTests: XCTestCase {
     }
 
     func testLoginEndpointWithAnExceptionQueryIsChallenged() async throws {
-        let exception = try ShareException(parsing: "?wc-api")
+        let exception = try ShareException(parsing: "/")
         let port = try await openShare(instanceID: UUID(), route: route, config: config(allow: [exception]))
 
         let login = try await LoopbackClient.exchange(port: port, request: Self.request("/wp-login.php?wc-api=1"))

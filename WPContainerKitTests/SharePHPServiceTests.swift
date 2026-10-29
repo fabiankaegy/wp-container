@@ -155,6 +155,64 @@ final class SharePHPServiceTests: XCTestCase {
         XCTAssertTrue(try run(exempt: true, origin: "https://forged.example.com").contains("REACHED"))
     }
 
+    /// Runs the save handler's exempt-request check under the host `php` with
+    /// WordPress's hook functions and `$wp` stubbed.
+    func testSaveHandlerSmokeRunRefusesQueryVarsOnExemptRequests() throws {
+        let candidates = [
+            "/opt/homebrew/bin/php", "/usr/local/bin/php", "/usr/bin/php",
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support/Herd/bin/php").path,
+        ]
+        guard let php = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            throw XCTSkip("php is not installed")
+        }
+        let handler = tempRoot.appendingPathComponent("save-\(UUID().uuidString).php")
+        try SharePHPService.saveContents.write(to: handler, atomically: true, encoding: .utf8)
+
+        func run(exempt: Bool, keys: String? = nil, get: String = "", post: String = "",
+                 queryVars: String = "array()") throws -> String {
+            let exemptLine = exempt ? "$_SERVER['HTTP_X_WPC_SHARE_EXEMPT'] = '1';" : ""
+            let keysLine = keys.map { "$_SERVER['HTTP_X_WPC_SHARE_EXEMPT_KEYS'] = '\($0)';" } ?? ""
+            let driver = """
+                <?php
+                define( 'WPC_SHARE_ORIGIN', 'https://example-share.example.com' );
+                define( 'WPC_SHARE_LOCAL', 'https://my-site.localhost' );
+                function wpc_share_replace_origins( $value ) { return $value; }
+                function add_filter() {}
+                function add_action() {}
+                $wp = (object) array( 'public_query_vars' => array( 'p', 'page_id', 'wc-api' ) );
+                \(exemptLine)
+                \(keysLine)
+                parse_str( '\(get)', $_GET );
+                parse_str( '\(post)', $_POST );
+                require '\(handler.path)';
+                wpc_share_refuse_exempt_query_vars( \(queryVars) );
+                echo "REACHED";
+                """
+            let script = tempRoot.appendingPathComponent("driver-\(UUID().uuidString).php")
+            try driver.write(to: script, atomically: true, encoding: .utf8)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: php)
+            process.arguments = ["-n", script.path]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            return String(decoding: data, as: UTF8.self)
+        }
+
+        XCTAssertTrue(try run(exempt: true, get: "p=5").contains("Authentication required."))
+        XCTAssertTrue(try run(exempt: true, post: "page_id=5").contains("Authentication required."))
+        XCTAssertTrue(try run(exempt: true, get: "wc-api=1").contains("Authentication required."))
+        XCTAssertTrue(try run(exempt: true, keys: "wc-api", get: "wc-api=1").contains("REACHED"))
+        XCTAssertTrue(try run(exempt: true, keys: "wc-api", get: "wc-api=1&p=5").contains("Authentication required."))
+        XCTAssertTrue(try run(exempt: true, get: "other=1").contains("REACHED"))
+        XCTAssertTrue(try run(exempt: true, get: "p=5", queryVars: "array( 'rest_route' => '/x' )").contains("REACHED"))
+        XCTAssertTrue(try run(exempt: false, get: "p=5").contains("REACHED"))
+    }
+
     private func makeSite() -> Site {
         Site(name: "Example", slug: "my-site", path: tempRoot.appendingPathComponent("my-site", isDirectory: true),
              port: 8881, imageTag: SiteRecipe.defaultWordPressImage)

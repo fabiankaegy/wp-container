@@ -199,11 +199,13 @@ Sites are provisioned automatically (no install wizard) and log in with
   **cloudflared** (a temporary `*.trycloudflare.com` link needs no account; a
   fixed `--hostname` uses a named tunnel after `cloudflared tunnel login`), or
   your own executable in `~/Library/Application Support/WPContainer/share-providers/`.
-  `--allow /wp-json/wc/v3/webhooks` or `--allow '?wc-api'` lets payment and
-  webhook callbacks through without the password. A `?key` exception applies on
-  every path, and requests that skip the password reach the site without
-  cookies, as a logged-out visitor; `/wp-login.php` and `/xmlrpc.php` always ask
-  for it. Links are rewritten to the public URL on the fly, edits saved through
+  `--allow /wp-json/wc/v3/webhooks` or `--allow '?wc-api=wc_stripe'` lets
+  payment and webhook callbacks through without the password. A `?key=value`
+  exception applies on `/` only (`/path?key=value` names another path), and a
+  request that skips the password is refused when it sets a WordPress query
+  variable such as `p` or `page_id`, other than its exception's key. Requests
+  that skip the password reach the site without cookies, as a logged-out
+  visitor; `/wp-login.php` and `/xmlrpc.php` always ask for it. Links are rewritten to the public URL on the fly, edits saved through
   a share keep local URLs, and every response carries
   `X-Robots-Tag: noindex, nofollow`. A proxy host (the app or
   `wp-container proxy serve`) from a build with sharing must be running; an

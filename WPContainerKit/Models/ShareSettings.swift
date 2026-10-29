@@ -69,23 +69,34 @@ public struct ShareSettings: Codable, Sendable, Hashable {
 }
 
 /// A request pattern that skips the share password gate. The string form is
-/// `/path-prefix` or `?query-key[=value]`.
+/// `/path-prefix`, or `?key=value` / `/path?key=value` for a query parameter on
+/// one exact path (`/` when none is given).
 public struct ShareException: Codable, Sendable, Hashable, CustomStringConvertible {
     private enum Rule: Sendable, Hashable {
         case pathPrefix(String)
-        case query(key: String, value: String?)
+        case query(path: String, key: String, value: String)
     }
 
     public let description: String
     private let rule: Rule
 
+    /// The query key a query exception matches; nil for a path prefix.
+    public var queryKey: String? {
+        guard case .query(_, let key, _) = rule else { return nil }
+        return key
+    }
+
     public init(parsing text: String) throws(ShareError) {
-        if text.hasPrefix("/") {
+        if let mark = text.firstIndex(of: "?") {
+            let path = mark == text.startIndex ? "/" : String(text[..<mark])
+            let pair = Self.splitPair(String(text[text.index(after: mark)...]))
+            guard path.hasPrefix("/"), !pair.key.isEmpty, let value = pair.value, !value.isEmpty,
+                  !(pair.key + value).contains(where: Self.isReservedInQueryPart) else {
+                throw .invalidException(text)
+            }
+            self.rule = .query(path: path, key: pair.key, value: value)
+        } else if text.hasPrefix("/") {
             self.rule = .pathPrefix(text)
-        } else if text.hasPrefix("?") {
-            let pair = Self.splitPair(String(text.dropFirst()))
-            guard !pair.key.isEmpty else { throw .invalidException(text) }
-            self.rule = .query(key: pair.key, value: pair.value)
         } else {
             throw .invalidException(text)
         }
@@ -108,20 +119,28 @@ public struct ShareException: Codable, Sendable, Hashable, CustomStringConvertib
 
     /// Whether a request with this path and raw query string is exempt from the gate.
     /// The path is percent-decoded once and never matches when it contains a `..` segment.
+    /// A query exception matches only when PHP would read exactly one `key` from the query,
+    /// spelled literally, with the exception's value.
     public func matches(path: String, query: String?) -> Bool {
+        guard let decoded = path.removingPercentEncoding else { return false }
+        let hasDotDot = decoded.split(separator: "/", omittingEmptySubsequences: false).contains("..")
+        guard !hasDotDot else { return false }
         switch rule {
         case .pathPrefix(let prefix):
-            guard let decoded = path.removingPercentEncoding else { return false }
-            let hasDotDot = decoded.split(separator: "/", omittingEmptySubsequences: false).contains("..")
-            return !hasDotDot && decoded.hasPrefix(prefix)
-        case .query(let key, let value):
-            guard let query else { return false }
-            return query.split(separator: "&").contains { part in
-                let pair = Self.splitPair(String(part))
-                guard pair.key == key else { return false }
-                return value == nil || pair.value == value
-            }
+            return decoded.hasPrefix(prefix)
+        case .query(let exactPath, let key, let value):
+            guard decoded == exactPath, let query else { return false }
+            let pairs = query.split(separator: "&").map { Self.splitPair(String($0)) }
+            let readAsKey = pairs.filter { ShareGate.phpVariableName($0.key) == key }
+            guard readAsKey.count == 1, let pair = readAsKey.first else { return false }
+            return pair.key == key && pair.value == value
         }
+    }
+
+    /// Characters a query exception's key or value may not hold: they would split the
+    /// query, end the URL, or break the header that names the exempt keys upstream.
+    private static func isReservedInQueryPart(_ character: Character) -> Bool {
+        character.isWhitespace || "&#,".contains(character) || character.unicodeScalars.contains { $0.properties.generalCategory == .control }
     }
 
     private static func splitPair(_ text: String) -> (key: String, value: String?) {
@@ -185,7 +204,7 @@ public enum ShareError: Error, Sendable, CustomStringConvertible {
     public var description: String {
         switch self {
         case .invalidException(let text):
-            return "Invalid share exception \"\(text)\": use /path-prefix or ?query-key[=value]."
+            return "Invalid share exception \"\(text)\": use /path-prefix, ?key=value or /path?key=value."
         case .invalidGateConfig(let field):
             return "Invalid share configuration: \(field) must not contain line breaks."
         case .providerNotFound(let name):

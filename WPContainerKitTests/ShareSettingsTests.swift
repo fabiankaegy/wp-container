@@ -69,12 +69,28 @@ final class ShareSettingsTests: XCTestCase {
         XCTAssertFalse(rule.matches(path: "/wp-json/wc/v3/orders", query: nil))
     }
 
-    func testQueryExceptionWithAndWithoutValue() throws {
-        XCTAssertTrue(try exception("?wc-api").matches(path: "/", query: "wc-api=wc_stripe&x=1"))
-        let valued = try exception("?wc-api=wc_stripe")
-        XCTAssertTrue(valued.matches(path: "/", query: "x=1&wc-api=wc_stripe"))
-        XCTAssertFalse(valued.matches(path: "/", query: "wc-api=paypal"))
-        XCTAssertFalse(valued.matches(path: "/", query: nil))
+    func testQueryExceptionMatchesItsValueOnOnePath() throws {
+        let rule = try exception("?wc-api=wc_stripe")
+        XCTAssertTrue(rule.matches(path: "/", query: "x=1&wc-api=wc_stripe"))
+        XCTAssertFalse(rule.matches(path: "/sample-page/", query: "wc-api=wc_stripe"))
+        XCTAssertFalse(rule.matches(path: "/", query: "wc-api=paypal"))
+        XCTAssertFalse(rule.matches(path: "/", query: nil))
+
+        let bound = try exception("/hooks/stripe?event=payment")
+        XCTAssertTrue(bound.matches(path: "/hooks/stripe", query: "event=payment"))
+        XCTAssertFalse(bound.matches(path: "/hooks/stripe/x", query: "event=payment"))
+        XCTAssertFalse(bound.matches(path: "/", query: "event=payment"))
+        XCTAssertEqual(bound.queryKey, "event")
+        XCTAssertNil(try exception("/hooks").queryKey)
+    }
+
+    func testQueryExceptionNeedsTheOnlyLiteralSpellingOfItsKey() throws {
+        let rule = try exception("?wc-api=wc_stripe")
+        XCTAssertFalse(rule.matches(path: "/", query: "wc-api=wc_stripe&wc-api="))
+        XCTAssertFalse(rule.matches(path: "/", query: "wc-api=wc_stripe&wc-api[]=x"))
+        let underscored = try exception("?my_hook=1")
+        XCTAssertFalse(underscored.matches(path: "/", query: "my_hook=1&my.hook=2"))
+        XCTAssertFalse(underscored.matches(path: "/", query: "my.hook=1"))
     }
 
     func testExceptionCannotBeWidenedByEncoding() throws {
@@ -85,7 +101,7 @@ final class ShareSettingsTests: XCTestCase {
     }
 
     func testInvalidExceptionsAreRejected() {
-        for text in ["", "wp-json", "?", "?=x"] {
+        for text in ["", "wp-json", "?", "?=x", "?wc-api", "?wc-api=", "hooks?x=1", "?a=b c", "?a=b,c", "?a=b&c=d", "?a=b#c"] {
             XCTAssertThrowsError(try ShareException(parsing: text), text) { error in
                 guard case ShareError.invalidException = error else {
                     return XCTFail("unexpected error \(error)")

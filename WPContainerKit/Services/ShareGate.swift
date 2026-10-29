@@ -53,11 +53,7 @@ public enum ShareGate {
         if config.authDisabled { return .pass }
         if hasValidCredentials(headerLines, config: config) { return .pass }
 
-        let target = requestLine.split(separator: " ", omittingEmptySubsequences: true).dropFirst().first.map(String.init) ?? "/"
-        let withoutFragment = target.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? target
-        let parts = withoutFragment.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
-        let path = parts.first.map(String.init) ?? "/"
-        let query = parts.count > 1 ? String(parts[1]) : nil
+        let (path, query) = target(of: requestLine)
         if reachesLoginEndpoint(path) { return .challenge }
         // WordPress serves `rest_route` from the query string whatever the path, so only an
         // exception on the `rest_route` key itself can cover a request that carries it, and
@@ -72,7 +68,8 @@ public enum ShareGate {
 
     /// Builds the upstream request header block, ending in a blank line. An `exempt`
     /// request loses its cookies, so it reaches the site as a logged-out visitor, and
-    /// carries `X-WPC-Share-Exempt: 1` for the PHP handler.
+    /// carries `X-WPC-Share-Exempt: 1` for the PHP handler, plus
+    /// `X-WPC-Share-Exempt-Keys` with the keys of the query exceptions it matched.
     public static func rewriteRequest(requestLine: String, headerLines: [String], config: ShareGateConfig,
                                       exempt: Bool = false) -> String {
         var dropped: Set<String> = [
@@ -91,7 +88,12 @@ public enum ShareGate {
         kept.append("X-Forwarded-Host: \(publicHost)")
         kept.append("X-Forwarded-Proto: https")
         kept.append("X-WPC-Share-Origin: \(config.publicOrigin)")
-        if exempt { kept.append("X-WPC-Share-Exempt: 1") }
+        if exempt {
+            kept.append("X-WPC-Share-Exempt: 1")
+            let (path, query) = target(of: requestLine)
+            let keys = config.allow.filter { $0.matches(path: path, query: query) }.compactMap(\.queryKey)
+            if !keys.isEmpty { kept.append("X-WPC-Share-Exempt-Keys: \(keys.joined(separator: ","))") }
+        }
         kept.append("Connection: close")
         return requestLine + "\r\n" + kept.joined(separator: "\r\n") + "\r\n\r\n"
     }
@@ -175,15 +177,22 @@ public enum ShareGate {
 
     /// Whether the exception is a query exception on the `rest_route` key.
     private static func isRestRouteException(_ exception: ShareException) -> Bool {
-        let text = exception.description
-        guard text.hasPrefix("?") else { return false }
-        let key = text.dropFirst().split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init)
-        return key == "rest_route"
+        exception.queryKey == "rest_route"
+    }
+
+    /// The path and raw query string of a request line's target, without its fragment.
+    private static func target(of requestLine: String) -> (path: String, query: String?) {
+        let target = requestLine.split(separator: " ", omittingEmptySubsequences: true).dropFirst().first.map(String.init) ?? "/"
+        let withoutFragment = target.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? target
+        let parts = withoutFragment.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        let path = parts.first.map(String.init) ?? "/"
+        let query = parts.count > 1 ? String(parts[1]) : nil
+        return (path, query)
     }
 
     /// The `$_GET` name PHP derives from a raw query key: percent-decoded and cut at the first NUL byte, leading spaces dropped,
     /// array suffix removed, and spaces, dots and an unmatched `[` turned into `_`.
-    private static func phpVariableName(_ rawKey: String) -> String {
+    static func phpVariableName(_ rawKey: String) -> String {
         let plusDecoded = rawKey.replacingOccurrences(of: "+", with: " ")
         let percentDecoded = plusDecoded.removingPercentEncoding ?? plusDecoded
         let decoded = percentDecoded.split(separator: "\0", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""

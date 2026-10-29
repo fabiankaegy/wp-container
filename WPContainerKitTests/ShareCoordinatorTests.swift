@@ -166,7 +166,7 @@ final class ShareCoordinatorTests: XCTestCase {
         XCTAssertFalse(stored.authDisabled)
         XCTAssertEqual(stored.requestID, request)
 
-        try await setShare(site.id) { $0.allow = [try! ShareException(parsing: "?example-callback")] }
+        try await setShare(site.id) { $0.allow = [try! ShareException(parsing: "?example-callback=1")] }
         try await reconcile(coordinator, running: ["my-site"])
         try await reconcile(coordinator, running: ["my-site"])
         XCTAssertEqual(launcher.launches.count, 1)

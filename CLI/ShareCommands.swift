@@ -29,7 +29,7 @@ struct ShareStart: AsyncParsableCommand {
     @Flag(name: .long, help: "Forget the saved provider so the share follows the default provider.") var clearProvider = false
     @Option(name: .long, help: "Fixed public hostname, when the provider supports one.") var hostname: String?
     @Flag(name: .long, help: "Forget the fixed hostname.") var clearHostname = false
-    @Option(name: .long, help: "Request that bypasses the password: /path-prefix or ?query-key[=value]. Repeatable.") var allow: [String] = []
+    @Option(name: .long, help: "Request that bypasses the password: /path-prefix, ?key=value on /, or /path?key=value. Repeatable.") var allow: [String] = []
     @Flag(name: .long, help: "Remove all saved password exceptions before applying --allow.") var clearAllow = false
     @Flag(name: .long, help: "Generate a new password.") var resetPassword = false
     @Flag(name: .long, help: "Turn the password gate off for this share.") var noAuth = false

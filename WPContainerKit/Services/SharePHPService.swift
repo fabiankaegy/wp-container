@@ -12,8 +12,9 @@ import Foundation
 ///       carry the matching header it swaps local origins for the public one in
 ///       the response body and `Location` header.
 ///   php/prepend.d/wpc-share-save.php  — runs at `muplugins_loaded`. Swaps the
-///       public origin back to the local one in everything WordPress stores, and
-///       refuses changes to the site addresses.
+///       public origin back to the local one in everything WordPress stores,
+///       refuses changes to the site addresses, and refuses a request that
+///       skipped the share password when it sets WordPress query variables.
 ///
 /// `php/wpc-share.json` holds the origins both handlers read. Requests without
 /// the matching header, and CLI runs, are untouched.
@@ -293,7 +294,9 @@ public enum SharePHPService {
      * Loaded at muplugins_loaded. For share requests (WPC_SHARE_ORIGIN is
      * defined by the early handler), swaps the public origin back to the local
      * one in content before WordPress stores it, so saved content keeps working
-     * after the share closes, and refuses changes to the site addresses.
+     * after the share closes, and refuses changes to the site addresses. A
+     * request that skipped the share password through a gate exception is
+     * refused when its query string or form body sets a WordPress query variable.
      */
     if ( ! defined( 'WPC_SHARE_ORIGIN' ) || ! function_exists( 'wpc_share_replace_origins' ) ) {
         return;
@@ -514,8 +517,41 @@ public enum SharePHPService {
         }
     }
 
+    if ( ! function_exists( 'wpc_share_refuse_exempt_query_vars' ) ) {
+        /**
+         * Refuses a request that skipped the share password through a gate exception
+         * when its query string or form body sets a public WordPress query variable,
+         * such as `p`, `page_id` or a post type's slug. Those win over the permalink, so
+         * an exempt address would serve any published content. The keys of the query
+         * exceptions the request matched are allowed. REST requests never reach the
+         * template loader and are left alone.
+         */
+        function wpc_share_refuse_exempt_query_vars( $query_vars ) {
+            global $wp;
+
+            if ( ! isset( $_SERVER['HTTP_X_WPC_SHARE_EXEMPT'] ) || isset( $query_vars['rest_route'] ) ) {
+                return $query_vars;
+            }
+            $header  = isset( $_SERVER['HTTP_X_WPC_SHARE_EXEMPT_KEYS'] ) ? (string) $_SERVER['HTTP_X_WPC_SHARE_EXEMPT_KEYS'] : '';
+            $allowed = '' === $header ? array() : explode( ',', $header );
+            foreach ( $wp->public_query_vars as $var ) {
+                if ( in_array( $var, $allowed, true ) ) {
+                    continue;
+                }
+                if ( isset( $_GET[ $var ] ) || isset( $_POST[ $var ] ) ) {
+                    http_response_code( 401 );
+                    header( 'Content-Type: text/plain; charset=utf-8' );
+                    header( 'Cache-Control: no-store' );
+                    echo "Authentication required.\n";
+                    exit;
+                }
+            }
+            return $query_vars;
+        }
+    }
+
     if ( ! function_exists( 'wpc_share_register_hooks' ) ) {
-        /** Registers the filters that swap the public origin back before content is stored. */
+        /** Registers the filters that swap the public origin back before content is stored, and the exempt request check. */
         function wpc_share_register_hooks() {
             add_filter( 'wp_insert_post_data', 'wpc_share_filter_post_data' );
             add_filter( 'pre_update_option', 'wpc_share_filter_option' );
@@ -549,6 +585,7 @@ public enum SharePHPService {
             add_filter( 'pre_update_option_home', 'wpc_share_refuse_url_change', 10, 2 );
             add_filter( 'pre_update_option_siteurl', 'wpc_share_refuse_url_change', 10, 2 );
             add_action( 'wp_validate_site_data', 'wpc_share_validate_site_data', 10, 3 );
+            add_filter( 'request', 'wpc_share_refuse_exempt_query_vars', PHP_INT_MAX );
         }
     }
 

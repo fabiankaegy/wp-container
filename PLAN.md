@@ -701,9 +701,10 @@ exec my-tunnel-tool --to "$WPC_SHARE_UPSTREAM" ${WPC_SHARE_HOSTNAME:+--host "$WP
   CLI and app, not MCP.
 - 10 wrong passwords within 60 seconds lock the share for 30 seconds (HTTP 429). Requests on exception paths that carry a wrong or foreign `Authorization` header also count toward the lockout. The right password still passes while the share is locked.
 - **Exceptions** (`--allow`, repeatable, saved per site; `--clear-allow` removes
-  them): a path prefix (`/wp-json/wc/v3/webhooks`) or a query parameter
-  (`?wc-api`, `?wc-api=wc_stripe`). A query exception applies on every path, so
-  `?wc-api` also matches `/wp-admin/?wc-api=1`. A path-prefix exception does not
+  them): a path prefix (`/wp-json/wc/v3/webhooks`) or a query parameter with
+  its value on one exact path (`?wc-api=wc_stripe` on `/`,
+  `/hooks/stripe?event=payment` elsewhere). A query exception matches only when
+  PHP reads its key exactly once, spelled literally. A path-prefix exception does not
   apply to a request carrying `rest_route` in its query, and a request that
   skipped the password with a POST `rest_route` is refused with 401 by the share
   PHP handler; either would reach any REST endpoint. `/wp-login.php` and
@@ -711,8 +712,12 @@ exec my-tunnel-tool --to "$WPC_SHARE_UPSTREAM" ${WPC_SHARE_HOSTNAME:+--host "$WP
   with the link can reach listed addresses without the password.
 - A request that skips the password through an exception reaches the site
   without its `Cookie` header, as a logged-out visitor, and carries
-  `X-WPC-Share-Exempt: 1`. Valid share credentials on the same request keep the
-  cookies.
+  `X-WPC-Share-Exempt: 1`, plus `X-WPC-Share-Exempt-Keys` naming the query
+  exception keys it matched. The share PHP handler refuses it with 401 when its
+  query string or form body sets a public WordPress query variable other than
+  those keys (`p`, `page_id`, a post type's slug), since those win over the
+  permalink; REST requests are left alone. Valid share credentials on the same
+  request keep the cookies.
 
 ### URL handling
 
