@@ -15,6 +15,7 @@ struct SiteInspector: View {
             // The site's own Overview already shows its branches.
             if vm.screen?.id != site.id, !site.isArchived { BranchesSummary(site: site) }
             OverviewCard(site: site)
+            DatabaseCard(instance: site, status: site.status)
             if site.networkType.isMultisite { SubsitesCard(site: site) }
             DevelopmentCard(site: site)
             SoftwareCard(site: site)

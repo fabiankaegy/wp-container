@@ -425,7 +425,9 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// sites also at their domain, regardless of `httpsEnabled` (the flag
     /// governs WordPress URL rewriting, not proxy reachability). Subdomain-
     /// multisite wildcards are handled by the leftmost-label fallback in
-    /// `route(forHost:)`.
+    /// `route(forHost:)`; a subsite mapped to a domain of its own routes by its
+    /// recorded `networkHosts` entry, after every site's own hosts so it can
+    /// never take over another site's name.
     ///
     /// An env route reached by Host takes the same path as one reached on the
     /// env's own `127.0.0.1:<port>` listener (see `route(inbound:…)`): the same
@@ -447,6 +449,11 @@ public final class HTTPSProxy: @unchecked Sendable {
                                                            containerPort: UInt16(SiteRecipe.mailpitWebPort),
                                                            isMailbox: true)
             }
+        }
+        for site in envelope.sites where !site.isArchived {
+            let route = Route(port: site.port, slug: site.slug, displayName: site.name,
+                              containerName: site.wpContainerName)
+            for host in site.networkHosts where map[host] == nil { map[host] = route }
         }
         // A settled env serves nothing until it is restored (`EnvSettlement`),
         // and neither does any env of an archived site.

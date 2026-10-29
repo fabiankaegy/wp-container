@@ -187,7 +187,7 @@ extension HelpTopic {
             ),
             HelpSection(
                 title: "Custom domains",
-                body: "Give a site a custom domain to reach it at a friendly address over HTTPS instead of a localhost port. WP Container adds the mapping to `/etc/hosts` for you (with one admin prompt).",
+                body: "Give a site a custom domain to reach it at a friendly address over HTTPS instead of a localhost port. WP Container adds the mapping to `/etc/hosts` for you (with one admin prompt). If an entry goes missing (the prompt was skipped, or another app such as LocalWP removed it), the site's Overview and Settings tabs flag it and **Sync** adds it back. On a subdomain multisite each subsite needs its own entry, flagged the same way after the site starts.",
             ),
             HelpSection(
                 title: "Choosing a TLD",

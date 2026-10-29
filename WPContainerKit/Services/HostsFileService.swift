@@ -104,16 +104,29 @@ public enum HostsFileService {
         }
     }
 
-    // MARK: - Apply (admin prompt)
-
-    /// Whether a single custom domain currently has a managed `/etc/hosts` entry
-    /// (used to flag a site whose domain was configured but not yet registered).
-    public static func isRegistered(_ domain: String) -> Bool {
-        let want = domain.trimmingCharacters(in: .whitespaces)
-        guard !want.isEmpty,
-              let current = try? String(contentsOfFile: hostsPath, encoding: .utf8) else { return false }
-        return managedDomains(in: current).contains(want)
+    /// Every hostname the managed block should hold for `sites`: each site's
+    /// custom domain and subsite hosts (`Site.hostsFileDomains`), deduped.
+    public static func domains(for sites: [Site]) -> [String] {
+        var seen = Set<String>()
+        return sites.flatMap(\.hostsFileDomains).filter { seen.insert($0).inserted }
     }
+
+    /// The hostnames of `site` that have no managed `/etc/hosts` entry (used to
+    /// flag a site whose domain or subsites are not registered yet).
+    public static func missingDomains(for site: Site) -> [String] {
+        let wanted = site.hostsFileDomains
+        guard !wanted.isEmpty else { return [] }
+        let current = (try? String(contentsOfFile: hostsPath, encoding: .utf8)) ?? ""
+        return missingDomains(wanted, in: current)
+    }
+
+    /// Pure form of `missingDomains(for:)` for testing.
+    static func missingDomains(_ wanted: [String], in contents: String) -> [String] {
+        let registered = Set(managedDomains(in: contents))
+        return wanted.filter { !registered.contains($0) }
+    }
+
+    // MARK: - Apply (admin prompt)
 
     /// True if the managed block already exactly matches `domains` (no admin
     /// prompt needed). Compares whole lines, not just domains, so a block written

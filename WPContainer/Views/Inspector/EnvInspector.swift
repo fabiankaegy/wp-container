@@ -23,6 +23,7 @@ struct EnvInspector: View {
             if env.status.isRunning { LiveSection(id: env.id) }
             overviewCard
             if !env.isSettled {
+                DatabaseCard(instance: env, status: env.status)
                 IdleStopCard(configured: env.idleStopMinutes, isEnv: true, envPort: env.port) { minutes in
                     vm.setIdleStop(env, minutes: minutes)
                 }

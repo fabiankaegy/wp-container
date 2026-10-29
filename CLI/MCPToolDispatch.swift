@@ -517,6 +517,9 @@ enum MCPToolDispatch {
         // Per-env: one port may be served while another collides with a
         // pre-upgrade container still publishing it.
         warnings.append(contentsOf: Set(envs.compactMap { ProxyControl.envProxyWarning(port: $0.port) }))
+        if let warning = await NetworkHostsService.hostsWarningAfterStart(site, cli: ctx.cli, persistence: ctx.persistence) {
+            warnings.append(warning)
+        }
         if !outcome.envErrorMessages.isEmpty || !warnings.isEmpty {
             var payload: [String: Any] = ["slug": site.slug, "status": "running"]
             if !outcome.envErrorMessages.isEmpty { payload["envWarnings"] = outcome.envErrorMessages }

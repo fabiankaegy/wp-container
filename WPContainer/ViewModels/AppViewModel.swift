@@ -539,12 +539,12 @@ public final class AppViewModel {
             // Bring the app frontmost so the /etc/hosts admin dialog is visible.
             NSApp.activate(ignoringOtherApps: true)
             do {
-                let all = store.sites.compactMap(\.customDomain)
-                try await DomainService(cli: cli, ca: ca).apply(site: updated, allCustomDomains: all)
+                let all = HostsFileService.domains(for: store.sites)
+                try await DomainService(cli: cli, ca: ca).apply(site: updated, hostsDomains: all)
                 await refreshProxyRouting()
             } catch let error as HostsFileService.HostsError {
                 // A dismissed dialog leaves the domain configured but
-                // unregistered (the Domain card offers "Register now"); other
+                // unregistered (the Domain card offers "Sync"); other
                 // hosts errors surface.
                 if case .cancelled = error {} else { lastError = error.description }
             } catch { lastError = SiteLifecycleErrorText(error) }
@@ -557,8 +557,8 @@ public final class AppViewModel {
             updated.customDomain = nil
             await store.upsertSite(updated)
             do {
-                let all = store.sites.compactMap(\.customDomain)
-                try await DomainService(cli: cli, ca: ca).apply(site: updated, allCustomDomains: all)
+                let all = HostsFileService.domains(for: store.sites)
+                try await DomainService(cli: cli, ca: ca).apply(site: updated, hostsDomains: all)
                 await refreshProxyRouting()
             } catch { lastError = SiteLifecycleErrorText(error) }
         }
@@ -606,13 +606,25 @@ public final class AppViewModel {
         return (v?.isEmpty == false) ? v : nil
     }
 
-    /// Multisite subsites (`wp site list`) when running (§2j).
+    /// The IP the host reaches an instance's database on, while its DB
+    /// container runs. The container gets its IP when it starts.
+    public func databaseHost(_ inst: any RunnableInstance) async -> String? {
+        guard let ip = try? await cli.ipAddress(of: inst.dbContainerName), !ip.isEmpty else { return nil }
+        return ip
+    }
+
+    /// Multisite subsites (`wp site list`) when running (§2j). Also records
+    /// the subsite hostnames, so a subsite added in Network Admin shows up as
+    /// missing from /etc/hosts.
     public func subsites(_ site: Site) async -> [(blogID: String, url: String)] {
         guard site.networkType.isMultisite,
               let dbHost = try? await cli.ipAddress(of: site.dbContainerName), !dbHost.isEmpty,
               let result = try? await cli.runCapturing(SiteRecipe.wpSiteListArgs(site, dbHost: dbHost)),
               let data = result.stdout.data(using: .utf8),
               let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
+        if let hosts = NetworkHostsService.hosts(fromSiteList: result.stdout, for: site) {
+            await NetworkHostsService.record(hosts, for: site, cli: cli, persistence: StorePersistence())
+        }
         return rows.map { row in
             let id = (row["blog_id"].map { "\($0)" }) ?? "?"
             let url = (row["url"] as? String) ?? ""
@@ -858,6 +870,10 @@ public final class AppViewModel {
                 let prior = self.store.status(for: event.instanceID)
                 self.store.setStatus(event.status, for: event.instanceID)
                 self.notifyStatusTransition(event, prior: prior)
+                if event.status == .running, prior != .running,
+                   let site = self.store.site(id: event.instanceID), site.networkType.isMultisite {
+                    self.refreshNetworkHosts(site)
+                }
             }
         }
     }
@@ -1078,7 +1094,8 @@ public final class AppViewModel {
     }
 
     /// Register `site`'s custom domain in `/etc/hosts` (+ cert SANs + proxy +
-    /// WordPress URLs). Brings the app frontmost first so the admin/Touch-ID
+    /// WordPress URLs). The hosts block is rewritten to every site's hostnames,
+    /// so subsite hosts are registered in the same approval. Brings the app frontmost first so the admin/Touch-ID
     /// dialog appears above our windows, and honors `Task` cancellation — a
     /// cancelled Task SIGTERMs the pending `osascript`, dismissing the dialog.
     /// A user-dismissed dialog (or a skip/timeout cancellation) resolves to
@@ -1088,8 +1105,8 @@ public final class AppViewModel {
         // Encourage the auth dialog to attach above our sheet.
         NSApp.activate(ignoringOtherApps: true)
         do {
-            let all = store.sites.compactMap(\.customDomain)
-            try await DomainService(cli: cli, ca: ca).apply(site: site, allCustomDomains: all)
+            let all = HostsFileService.domains(for: store.sites)
+            try await DomainService(cli: cli, ca: ca).apply(site: site, hostsDomains: all)
             await refreshProxyRouting()
             return .registered
         } catch {
@@ -1104,12 +1121,39 @@ public final class AppViewModel {
         }
     }
 
-    /// Whether a site's configured custom domain currently has a `/etc/hosts`
-    /// entry. False (unregistered) is the state the Domain card flags with a
-    /// "Register now" affordance.
-    public func isDomainRegistered(_ site: Site) -> Bool {
-        guard let domain = site.customDomain, !domain.isEmpty else { return true }
-        return HostsFileService.isRegistered(domain)
+    /// The hostnames of `site` (custom domain and subsite hosts) that have no
+    /// `/etc/hosts` entry. A non-empty list is the state the Domain card flags
+    /// with a "Sync" affordance.
+    public func missingHostsDomains(_ site: Site) -> [String] {
+        HostsFileService.missingDomains(for: site)
+    }
+
+    /// Register every missing hostname of `site` in `/etc/hosts`. A missing
+    /// custom domain goes through `registerCustomDomain` (cert SANs and
+    /// WordPress URLs too); otherwise only the hosts block is rewritten.
+    public func registerMissingHosts(_ site: Site) async {
+        let current = store.site(id: site.id) ?? site
+        if let domain = current.customDomain, !domain.isEmpty,
+           HostsFileService.missingDomains(for: current).contains(domain.lowercased()) {
+            _ = await registerCustomDomain(current)
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        do {
+            try await HostsFileService.apply(domains: HostsFileService.domains(for: store.sites))
+            await refreshProxyRouting()
+        } catch let error as HostsFileService.HostsError {
+            if case .cancelled = error {} else { lastError = error.description }
+        } catch { lastError = SiteLifecycleErrorText(error) }
+    }
+
+    /// Re-read a multisite network's subsite hosts after it starts, so new
+    /// subsites get in-container loopback entries and show up as missing from
+    /// /etc/hosts. The proxy picks up their routes from the store on its own.
+    private func refreshNetworkHosts(_ site: Site) {
+        Task {
+            await NetworkHostsService.refresh(site, cli: cli, persistence: StorePersistence())
+        }
     }
 
     /// Awaitable worktree-env creation for the "New Branch Environment" sheet:
