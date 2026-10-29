@@ -489,7 +489,25 @@ private struct SitesSettingsPane: View {
                     }
                 }
             }
+            SectionCard(title: "Sharing", systemImage: "link") {
+                SettingRow(title: "Default share provider",
+                           explanation: "The tunnel used by shares that don’t pick their own. Custom providers are executables in the share-providers folder.") {
+                    // The built-in default is stored as nil, so picking it clears the setting.
+                    Picker("", selection: Binding(
+                        get: { vm.shareDefaultProvider ?? ShareSettings.defaultProvider },
+                        set: { name in
+                            Task { await vm.setDefaultShareProvider(name == ShareSettings.defaultProvider ? nil : name) }
+                        }
+                    )) {
+                        ForEach(ShareSettings.builtInProviders + vm.customShareProviders(), id: \.self) { name in
+                            Text(name).tag(name)
+                        }
+                    }
+                    .labelsHidden().fixedSize()
+                }
+            }
         }
+        .task { await vm.loadShareDefaultProvider() }
         .fileImporter(isPresented: $choosingFolder, allowedContentTypes: [.folder]) { result in
             if case .success(let url) = result { defaultSitesRoot = url.path(percentEncoded: false) }
         }

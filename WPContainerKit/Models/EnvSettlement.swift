@@ -24,7 +24,8 @@ public enum EnvSettlement {
 
     /// Whether an active env has gone unused long enough to suggest settling it.
     public static func isStale(_ env: WorktreeEnv, now: Date = Date()) -> Bool {
-        !env.isSettled && daysUnused(env, now: now) >= suggestAfterDays
+        guard env.share?.active != true else { return false }
+        return !env.isSettled && daysUnused(env, now: now) >= suggestAfterDays
     }
 
     /// When a settled env becomes due for purge; nil while it is active.
