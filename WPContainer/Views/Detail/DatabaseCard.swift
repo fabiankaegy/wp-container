@@ -33,11 +33,6 @@ struct DatabaseCard: View {
                 InfoRow(label: "Password") {
                     credential(SiteRecipe.dbPassword)
                 }
-                if let host {
-                    InfoRow(label: "URL") {
-                        connectionURL(SiteRecipe.databaseURL(dbHost: host, database: instance.databaseName))
-                    }
-                }
             }
         }
         .task(id: status) { host = await vm.databaseHost(instance) }
@@ -47,25 +42,6 @@ struct DatabaseCard: View {
         HStack(spacing: 3) {
             Text(value).monospaced().textSelection(.enabled)
             CopyButton(value: value, help: "Copy \(value)")
-        }
-    }
-
-    private func connectionURL(_ value: String) -> some View {
-        HStack(spacing: 6) {
-            Text(value)
-                .monospaced()
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
-            CopyButton(value: value, help: "Copy connection URL")
-            if let url = URL(string: value), let app = SystemActions.appName(toOpen: url) {
-                Button("Open in \(app)") {
-                    SystemActions.openInBrowser(url)
-                }
-                .buttonStyle(.link)
-                .padding(.leading, 4)
-            }
         }
     }
 }

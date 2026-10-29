@@ -57,12 +57,6 @@ public enum SiteRecipe {
     /// reaches it on the container's own IP.
     public static let dbPort = 3306
 
-    /// A `mysql://` connection URL for the app user on `dbHost`, which
-    /// database clients such as TablePlus open directly.
-    public static func databaseURL(dbHost: String, database: String) -> String {
-        "mysql://\(dbUser):\(dbPassword)@\(dbHost):\(dbPort)/\(database)"
-    }
-
     // MARK: Admin credentials (auto-provisioning)
     public static let adminUser = "admin"
     public static let adminPassword = "password"

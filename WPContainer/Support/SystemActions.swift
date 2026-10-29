@@ -10,13 +10,6 @@ enum SystemActions {
         NSWorkspace.shared.open(url)
     }
 
-    /// The display name of the app that opens `url` (e.g. TablePlus for a
-    /// `mysql://` URL), or nil when no installed app handles its scheme.
-    static func appName(toOpen url: URL) -> String? {
-        guard let app = NSWorkspace.shared.urlForApplication(toOpen: url) else { return nil }
-        return FileManager.default.displayName(atPath: app.path).replacingOccurrences(of: ".app", with: "")
-    }
-
     /// Reveal a folder (or file) in Finder.
     static func revealInFinder(_ url: URL) {
         NSWorkspace.shared.activateFileViewerSelecting([url])
