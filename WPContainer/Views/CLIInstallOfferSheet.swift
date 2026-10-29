@@ -37,7 +37,7 @@ struct CLIInstallOfferSheet: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(phase == .done ? "Command-line tool installed" : "Install the command-line tool?")
                         .font(.headline)
-                    Text(phase == .done ? "You're all set." : "Optional — you can do this later in Settings.")
+                    Text(phase == .done ? "You're all set." : "Optional. You can install it later in Settings.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -49,10 +49,10 @@ struct CLIInstallOfferSheet: View {
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                Text("Install the `wp-container` command (and its `wpc` alias) into /usr/local/bin so you can script sites and branch environments from Terminal — and drive the app from AI agents over MCP.")
+                Text("Adds `wp-container` and its `wpc` alias to /usr/local/bin, so you can script sites from Terminal and let AI agents drive the app over MCP.")
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Label("Installing needs your administrator password once. It's symlinked to the app, so it stays in sync with updates.",
+                Label("Asks for your admin password once. It updates with the app.",
                       systemImage: "lock.shield")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -75,12 +75,32 @@ public enum WPConfigService {
         return out
     }
 
+    /// The table prefix assigned to `$table_prefix`: either a plain literal
+    /// (`'wp_'`) or the default of the official image's
+    /// `getenv_docker('WORDPRESS_TABLE_PREFIX', 'wp_')`. nil when absent, any
+    /// other expression (`getenv('TABLE_PREFIX')`), or not `[A-Za-z0-9_]+`, so
+    /// callers can inline a non-nil prefix into SQL.
     static func parseTablePrefix(_ text: String) -> String? {
-        let pattern = #"\$table_prefix\s*=\s*['\"]([^'\"]*)['\"]\s*;"#
-        guard let re = try? NSRegularExpression(pattern: pattern) else { return nil }
-        let ns = text as NSString
-        guard let m = re.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)) else { return nil }
-        return ns.substring(with: m.range(at: 1))
+        // Drop `/* … */` blocks first, so a line inside a multi-line one is
+        // never read as code.
+        let uncommented = text.replacing(#/(?s)\/\*.*?\*\//#, with: "")
+        // Split on any line ending: in Swift "\r\n" is ONE character, so a
+        // CRLF wp-config.php never splits on "\n" alone.
+        // Skip commented-out assignments, so `// $table_prefix = 'old_';` above
+        // the real one doesn't win.
+        guard let line = uncommented.split(whereSeparator: \.isNewline).first(where: { line in
+                  let code = line.drop(while: \.isWhitespace)
+                  return !code.hasPrefix("//") && !code.hasPrefix("#")
+                      && code.contains("$table_prefix") && code.contains("=")
+              }),
+              let assignment = line.split(separator: "=", maxSplits: 1).last else { return nil }
+        // Only the statement itself: a trailing comment can quote another prefix.
+        let statement = assignment.prefix(while: { $0 != ";" }).trimmingCharacters(in: .whitespaces)
+        // A plain literal, or the default of the official image's `getenv_docker()`.
+        // Any other call (`getenv('TABLE_PREFIX')`) is unknown: nil.
+        if let m = statement.wholeMatch(of: #/['"]([A-Za-z0-9_]+)['"]/#) { return String(m.output.1) }
+        let docker = #/getenv_docker\s*\(\s*['"][A-Za-z0-9_]+['"]\s*,\s*['"]([A-Za-z0-9_]+)['"]\s*\)/#
+        return statement.wholeMatch(of: docker).map { String($0.output.1) }
     }
 
     private static func unquote(_ value: String) -> String {

@@ -1,37 +1,111 @@
 {
-  "fill" : {
-    "automatic-gradient" : "extended-srgb:0.00000,0.53333,1.00000,1.00000"
-  },
-  "groups" : [
+  "fill-specializations": [
     {
-      "layers" : [
-        {
-          "glass" : false,
-          "image-name" : "exec-6e209ba0-5509-4f6a-aecf-323c6db3e427.png",
-          "name" : "exec-6e209ba0-5509-4f6a-aecf-323c6db3e427",
-          "position" : {
-            "scale" : 0.93,
-            "translation-in-points" : [
-              -1.1368683772161603e-13,
-              -1.1368683772161603e-13
-            ]
-          }
-        }
-      ],
-      "shadow" : {
-        "kind" : "neutral",
-        "opacity" : 0.6
-      },
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.2
+      "value": {
+        "automatic-gradient": "extended-srgb:0.21961,0.34510,0.91373,1.00000"
+      }
+    },
+    {
+      "appearance": "dark",
+      "value": {
+        "solid": "extended-srgb:0.07,0.11,0.36,1.0"
       }
     }
   ],
-  "supported-platforms" : {
-    "circles" : [
-      "watchOS"
-    ],
-    "squares" : "shared"
+  "groups": [
+    {
+      "name": "card0",
+      "layers": [
+        {
+          "image-name": "mark0.svg",
+          "name": "mark0",
+          "glass": false
+        },
+        {
+          "image-name": "panel0.svg",
+          "name": "panel0",
+          "glass": true,
+          "fill-specializations": [
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "extended-srgb:1,1,1,1"
+              }
+            }
+          ],
+          "opacity": 0.97
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.12
+      }
+    },
+    {
+      "name": "card1",
+      "layers": [
+        {
+          "image-name": "panel1.svg",
+          "name": "panel1",
+          "glass": true,
+          "fill-specializations": [
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "extended-srgb:1,1,1,1"
+              }
+            }
+          ],
+          "opacity": 0.4
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.3
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.25
+      }
+    },
+    {
+      "name": "card2",
+      "layers": [
+        {
+          "image-name": "panel2.svg",
+          "name": "panel2",
+          "glass": true,
+          "fill": {
+            "solid": "extended-srgb:0.80,0.85,1.0,1.0"
+          },
+          "fill-specializations": [
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "extended-srgb:0.80,0.85,1.0,1.0"
+              }
+            }
+          ],
+          "opacity": 0.92
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.3
+      },
+      "translucency": {
+        "enabled": false,
+        "value": 0
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": [
+      "macOS"
+    ]
   }
 }

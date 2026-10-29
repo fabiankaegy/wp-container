@@ -25,8 +25,8 @@ struct DomainCard: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Text(HostsHelperClient.isEnabled
-                     ? "Setting a domain edits /etc/hosts (confirm with Touch ID) and re-issues the local certificate."
-                     : "Setting a domain edits /etc/hosts (one admin approval) and re-issues the local certificate. Enable the Touch ID helper in Settings to skip the password.")
+                     ? "Setting a domain edits /etc/hosts, which you confirm with Touch ID."
+                     : "Setting a domain edits /etc/hosts, which needs your admin password. Turn on the Touch ID helper in Settings to skip it.")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -45,7 +45,7 @@ struct DomainCard: View {
 
     private var editor: some View {
         HStack(spacing: 8) {
-            TextField("mysite.local", text: $field)
+            TextField("mysite.test", text: $field)
                 .textFieldStyle(.roundedBorder)
                 .autocorrectionDisabled()
             Button("Set") {

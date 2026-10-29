@@ -37,4 +37,12 @@ public enum EnvSettlement {
         guard let date = purgeDate(env, afterDays: afterDays) else { return false }
         return date <= now
     }
+
+    /// The envs of `envs` due for purge at `now`. An archived site's envs are
+    /// never due: archiving keeps them settled until the site comes back.
+    public static func dueForPurge(_ envs: [WorktreeEnv], sites: [Site], afterDays: Int,
+                                   now: Date = Date()) -> [WorktreeEnv] {
+        let archived = Set(sites.filter(\.isArchived).map(\.id))
+        return envs.filter { !archived.contains($0.parentSiteID) && isDueForPurge($0, afterDays: afterDays, now: now) }
+    }
 }

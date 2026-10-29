@@ -23,19 +23,20 @@ struct ResourcesCard: View {
     var body: some View {
         SectionCard(title: "Resources", systemImage: "cpu") {
             VStack(alignment: .leading, spacing: 14) {
-                row(title: "CPU cores",
-                    detail: "Cap on CPUs per container (db, WordPress, and any Elasticsearch/Mailpit). This is a scheduling cap, not a reservation — idle containers still use ~0%.") {
+                SettingRow(title: "CPU cores",
+                           detail: Text("Maximum CPUs per container. Idle containers use almost none.")) {
                     Picker("", selection: cpuSelection) {
                         Text("Default (4)").tag(0)
                         ForEach(1...8, id: \.self) { Text("\($0)").tag($0) }
                     }
                     .labelsHidden().fixedSize()
                 }
+                .help("A scheduling limit, not a reservation.")
 
                 Divider().opacity(0.5)
 
-                row(title: "Memory",
-                    detail: "Cap on RAM per container. Lower it (512 MB) to fit more sites on a 16 GB Mac; Elasticsearch runs a 512 MB Java heap.") {
+                SettingRow(title: "Memory",
+                           detail: Text("Maximum memory per container. Choose 512 MB to fit more sites on a 16 GB Mac.")) {
                     Picker("", selection: memorySelection) {
                         Text("Default (1 GB)").tag(0)
                         Text("512 MB").tag(512)
@@ -45,27 +46,13 @@ struct ResourcesCard: View {
                     }
                     .labelsHidden().fixedSize()
                 }
+                .help("Elasticsearch’s Java heap alone is 512 MB.")
 
                 if site.status.isRunning {
                     Text("Restart the site to apply new limits.")
                         .font(.caption2).foregroundStyle(.tertiary)
                 }
             }
-        }
-    }
-
-    @ViewBuilder
-    private func row<Control: View>(title: String, detail: String,
-                                    @ViewBuilder control: () -> Control) -> some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.callout.weight(.medium))
-                Text(detail)
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer()
-            control()
         }
     }
 }

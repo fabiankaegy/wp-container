@@ -78,6 +78,7 @@ struct CLIContext {
     @discardableResult
     func restore(_ env: WorktreeEnv, envelope: StoreEnvelope) async throws -> WorktreeEnv {
         FileHandle.standardError.write(Data("\(env.envSlug) was settled — restoring it…\n".utf8))
+        try await unarchiveIfNeeded(siteID: env.parentSiteID)
         let parent = envelope.sites.first { $0.id == env.parentSiteID }
         do {
             let (restored, warnings) = try await settler.restore(env, parent: parent)
@@ -94,6 +95,17 @@ struct CLIContext {
     func runningContainerNames() async -> Set<String> {
         guard let records = try? await cli.list(all: true) else { return [] }
         return Set(records.filter { $0.isRunning }.map { $0.name })
+    }
+
+    /// Starting an archived site, or one of its branch environments, brings the
+    /// site back: clear the archive mark so the app lists it again and the
+    /// proxy routes it (it skips archived sites' envs too). Takes the site's ID
+    /// and reads the store, so env paths can pass their parent's.
+    func unarchiveIfNeeded(siteID: UUID) async throws {
+        let envelope = try await persistence.load()
+        guard let site = envelope.sites.first(where: { $0.id == siteID }), site.isArchived else { return }
+        _ = try await persistence.mutate { store in _ = store.unarchiveSite(id: siteID) }
+        FileHandle.standardError.write(Data("\(site.slug) was archived — unarchiving it.\n".utf8))
     }
 
     /// Wake a stopped target before a one-shot command (`wp`, `db import`,
@@ -119,6 +131,7 @@ struct CLIContext {
         FileHandle.standardError.write(Data("\(label) was stopped — starting it first…\n".utf8))
         switch resolved {
         case .site(let site):
+            try await unarchiveIfNeeded(siteID: site.id)
             let provisioned = try await lifecycle.startSite(site)
             if provisioned != site.provisioned {
                 _ = try await persistence.mutate { store in
@@ -129,6 +142,7 @@ struct CLIContext {
             // The parent goes along as `dbProvider` so a shared-database env
             // can boot the server it borrows when the parent site is down
             // (issue #17) — same as the `start` command's env branch.
+            try await unarchiveIfNeeded(siteID: env.parentSiteID)
             let parent = envelope.sites.first { $0.id == env.parentSiteID }
             _ = try await lifecycle.startInstance(env, dbProvider: parent)
         }
@@ -470,6 +484,7 @@ struct StartCommand: AsyncParsableCommand {
             guard let resolved = resolveTarget(target, in: envelope) else { throw CLIErrorJSON("not_found", detail: target) }
             switch resolved {
             case .site(let site):
+                try await ctx.unarchiveIfNeeded(siteID: site.id)
                 // An explicit start is the clearest possible activity signal, so
                 // the idle sweep can't park what somebody just asked for (issue
                 // #16). Wake-triggered starts deliberately do NOT stamp — that
@@ -523,6 +538,7 @@ struct StartCommand: AsyncParsableCommand {
                 // action for the same env in THIS process. The parent goes along
                 // as `dbProvider` so a shared-database env can boot the server it
                 // borrows when the parent site is down (issue #17).
+                try await ctx.unarchiveIfNeeded(siteID: env.parentSiteID)
                 let parent = envelope.sites.first { $0.id == env.parentSiteID }
                 await ctx.persistence.recordActivity(instanceID: env.id)
                 // Same no-op as the site branch above: `start` on an env that's
@@ -713,6 +729,7 @@ struct WorktreeCreate: AsyncParsableCommand {
             guard WorktreeEnvService.isValidRepoRelPath(repo) else {
                 throw CLIErrorJSON("invalid_repo_path", detail: WorktreeError.invalidRepoPath(repo).description)
             }
+            try await ctx.unarchiveIfNeeded(siteID: parent.id)
             let running = await ctx.runningContainerNames()
             let parentRunning = running.contains(parent.wpContainerName)
 

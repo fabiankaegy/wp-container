@@ -121,7 +121,7 @@ struct AddSiteSheet: View {
                     ForEach(vm.versionMatrix.phpVersions(for: wpVersion), id: \.self) { v in Text(v).tag(v) }
                 }
                 if !vm.versionMatrix.isValid(wp: wpVersion, php: php) {
-                    Label("This combination may not be published on Docker Hub.", systemImage: "exclamationmark.triangle")
+                    Label("This WordPress and PHP combination may not exist on Docker Hub.", systemImage: "exclamationmark.triangle")
                         .font(.caption).foregroundStyle(.orange)
                 }
             }
@@ -151,12 +151,12 @@ struct AddSiteSheet: View {
                 }
                 .pickerStyle(.inline)
                 if networkType.isSubdomain {
-                    Text("Subdomain networks resolve zero-config on <slug>.localhost; use subdirectory for custom domains.")
+                    Text("Subdomain networks work on <slug>.localhost. Use subdirectories with a custom domain.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
             Section("Custom domain (optional)") {
-                TextField("mysite.local", text: $customDomain).textFieldStyle(.roundedBorder).autocorrectionDisabled()
+                TextField("Domain", text: $customDomain, prompt: Text("mysite.test")).textFieldStyle(.roundedBorder).autocorrectionDisabled()
             }
             Section("Add-ons") {
                 Toggle("Xdebug (step debugging on 9003)", isOn: $xdebug)
@@ -204,7 +204,7 @@ struct AddSiteSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
             if showSkip {
-                Button("Skip domain setup") { domainRegTask?.cancel() }
+                Button("Skip Domain Setup") { domainRegTask?.cancel() }
                     .controlSize(.small)
             }
         }
@@ -262,7 +262,7 @@ struct AddSiteSheet: View {
             httpsEnabled: https, wpDebug: wpDebug, scriptDebug: scriptDebug)
 
         guard let site, vm.store.site(id: site.id)?.status.isRunning == true else {
-            errorText = vm.lastError ?? "Could not create the site."
+            errorText = vm.lastError ?? "Couldn’t create the site."
             phase = .failed
             return
         }
@@ -280,7 +280,7 @@ struct AddSiteSheet: View {
     /// (domain-unregistered) site rather than an indefinite spinner (§2l).
     private func registerDomainStep(site: Site, domain: String) async {
         phase = .registeringDomain
-        domainStatus = "Waiting for admin approval to register \(domain)…"
+        domainStatus = "Waiting for your approval to add \(domain) to /etc/hosts…"
         showSkip = false
 
         let task = Task { await vm.registerCustomDomain(site) }
@@ -302,7 +302,7 @@ struct AddSiteSheet: View {
 
         if case .registered = outcome {} else {
             // Skipped, timed out, or a soft failure — the site still exists.
-            domainStatus = "Domain not registered. Register it later from the site's Domain settings."
+            domainStatus = "\(domain) isn’t in /etc/hosts yet. Add it later from the site’s Domain section."
             try? await Task.sleep(for: .seconds(1.2))
         }
     }

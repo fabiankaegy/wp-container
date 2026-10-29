@@ -27,12 +27,30 @@ struct CopyButton: View {
 }
 
 /// A labeled key/value row in an info grid. The value can be plain text, a
-/// clickable link (browser/Finder), and optionally show a copy button.
+/// clickable link (browser/Finder), and optionally show a copy button. In the
+/// narrow inspector the label sits above the value, so values aren't squeezed.
 struct InfoRow<Value: View>: View {
     let label: String
     @ViewBuilder var value: () -> Value
 
+    @Environment(\.sectionCardStyle) private var style
+
     var body: some View {
+        if style == .inspector {
+            GridRow {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(label).font(.caption).foregroundStyle(.secondary)
+                    value().font(.callout)
+                }
+                .gridCellColumns(2)
+                .gridColumnAlignment(.leading)
+            }
+        } else {
+            columns
+        }
+    }
+
+    private var columns: some View {
         GridRow {
             Text(label)
                 .font(.callout)
@@ -45,14 +63,82 @@ struct InfoRow<Value: View>: View {
     }
 }
 
+/// One setting in a card, inspector section or the Settings window: the title
+/// and its control share the first line, and the description runs full width
+/// underneath. Keeping the description out of the column beside the control
+/// stops it wrapping into a tall, narrow block in the inspector. `footer` holds
+/// extras such as a link or a "restarts the site" note.
+struct SettingRow<Control: View, Footer: View>: View {
+    let title: LocalizedStringKey
+    var detail: Text?
+    @ViewBuilder var control: () -> Control
+    @ViewBuilder var footer: () -> Footer
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 12) {
+                // The title wins the width: a short label wrapping beside a
+                // fixed-size control looks broken.
+                Text(title).font(.callout.weight(.medium)).layoutPriority(1)
+                Spacer(minLength: 8)
+                control()
+            }
+            if let detail {
+                detail
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            footer()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+extension SettingRow where Footer == EmptyView {
+    init(title: LocalizedStringKey, detail: Text? = nil, @ViewBuilder control: @escaping () -> Control) {
+        self.init(title: title, detail: detail, control: control, footer: { EmptyView() })
+    }
+}
+
+/// The small note under a setting that restarts a running site when changed.
+struct RestartNote: View {
+    var body: some View {
+        Text("Changing this restarts the site.").font(.caption2).foregroundStyle(.tertiary)
+    }
+}
+
+/// How `SectionCard` renders: a standalone rounded card, or a compact,
+/// foldable section stacked in the inspector column.
+enum SectionCardStyle { case card, inspector }
+
+extension EnvironmentValues {
+    @Entry var sectionCardStyle: SectionCardStyle = .card
+    /// Which inspector a section sits in ("site", "env", "envs"), so folding a
+    /// section in one inspector doesn't fold the same-titled one in another.
+    @Entry var sectionCardScope: String = ""
+}
+
 /// A card section with a title (optionally a trailing accessory) and content.
+/// Inside the inspector (`.sectionCardStyle(.inspector)`) it becomes a foldable
+/// section with a colored icon tile; which sections are folded is remembered.
 struct SectionCard<Content: View, Accessory: View>: View {
     let title: String
     var systemImage: String?
     @ViewBuilder var accessory: () -> Accessory
     @ViewBuilder var content: () -> Content
 
+    @Environment(\.sectionCardStyle) private var style
+    @Environment(\.sectionCardScope) private var scope
+    @AppStorage("inspectorFoldedSections") private var foldedRaw = ""
+
     var body: some View {
+        switch style {
+        case .card: card
+        case .inspector: inspectorSection
+        }
+    }
+
+    private var card: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Label {
@@ -68,10 +154,150 @@ struct SectionCard<Content: View, Accessory: View>: View {
         }
         .card()
     }
+
+    /// The section's entry in `foldedRaw`: "scope/title".
+    private var foldKey: String { "\(scope)/\(title)" }
+
+    private var folded: Bool { foldedRaw.split(separator: "|").contains { $0 == foldKey } }
+
+    private func toggleFolded() {
+        var keys = foldedRaw.split(separator: "|").map(String.init).filter { $0 != foldKey }
+        if !folded { keys.append(foldKey) }
+        withAnimation(.easeOut(duration: 0.18)) { foldedRaw = keys.joined(separator: "|") }
+    }
+
+    private var inspectorSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Button(action: toggleFolded) {
+                    HStack(spacing: 8) {
+                        if let systemImage { SectionIcon(systemName: systemImage, color: Theme.sectionColor(for: title)) }
+                        Text(title).font(.callout.weight(.semibold))
+                        Spacer(minLength: 4)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                if !folded { accessory() }
+                Button(action: toggleFolded) {
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(folded ? 0 : 90))
+                        .frame(width: 16, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(folded ? "Show \(title)" : "Hide \(title)")
+            }
+            if !folded {
+                content()
+                    .controlSize(.small)
+                    .transition(.opacity)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A small rounded tile holding a white SF Symbol, like System Settings' sidebar icons.
+struct SectionIcon: View {
+    let systemName: String
+    let color: Color
+    var size: CGFloat = 20
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: size * 0.27, style: .continuous)
+            .fill(color.gradient)
+            .frame(width: size, height: size)
+            .overlay {
+                Image(systemName: systemName)
+                    .font(.system(size: size * 0.52, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+    }
 }
 
 extension SectionCard where Accessory == EmptyView {
     init(title: String, systemImage: String? = nil, @ViewBuilder content: @escaping () -> Content) {
         self.init(title: title, systemImage: systemImage, accessory: { EmptyView() }, content: content)
+    }
+}
+
+/// A monospaced command snippet with a copy button.
+struct CLISnippet: View {
+    let command: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(command)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 4)
+            CopyButton(value: command, help: "Copy command")
+        }
+        .padding(10)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+/// A small orange capsule flagging something unused for a while: a "Stale"
+/// tag or a stale count. On a selected row (accent background) it turns white
+/// so it stays readable.
+struct StaleBadge: View {
+    let text: String
+    @Environment(\.backgroundProminence) private var prominence
+
+    var body: some View {
+        let onAccent = prominence == .increased
+        Text(text)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background((onAccent ? Color.white : .orange).opacity(onAccent ? 0.25 : 0.18), in: Capsule())
+            .foregroundStyle(onAccent ? Color.white : .orange)
+    }
+}
+
+extension View {
+    /// A status color (orange "stale", green "running") that yields to the
+    /// row's own text color when the row is selected, where it would clash.
+    func statusTint(_ color: Color, when active: Bool = true) -> some View {
+        modifier(StatusTint(color: color, active: active))
+    }
+}
+
+private struct StatusTint: ViewModifier {
+    let color: Color
+    let active: Bool
+    @Environment(\.backgroundProminence) private var prominence
+
+    func body(content: Content) -> some View {
+        if active && prominence != .increased {
+            content.foregroundStyle(color)
+        } else {
+            content.foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Remembers a table's column layout (visibility, order, widths) across
+/// launches, the way Finder and Music do. Stored as JSON in UserDefaults.
+enum ColumnLayout {
+    /// The saved layout, or a fresh one with `hidden` column IDs turned off.
+    /// (`defaultVisibility(.hidden)` alone isn't reliably honored on macOS.)
+    static func load<Row: Identifiable>(_ key: String, hidden: [String] = []) -> TableColumnCustomization<Row> {
+        if let data = UserDefaults.standard.data(forKey: key),
+           let layout = try? JSONDecoder().decode(TableColumnCustomization<Row>.self, from: data) { return layout }
+        var layout = TableColumnCustomization<Row>()
+        for id in hidden { layout[visibility: id] = .hidden }
+        return layout
+    }
+
+    static func save<Row: Identifiable>(_ layout: TableColumnCustomization<Row>, _ key: String) {
+        if let data = try? JSONEncoder().encode(layout) { UserDefaults.standard.set(data, forKey: key) }
     }
 }

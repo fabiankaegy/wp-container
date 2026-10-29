@@ -434,7 +434,9 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// idle-clock stamp, the same container-IP dial, the same wake gate.
     public static func routes(from envelope: StoreEnvelope) -> [String: Route] {
         var map: [String: Route] = [:]
-        for site in envelope.sites {
+        // An archived site serves nothing, so no request can wake it.
+        let archived = Set(envelope.sites.filter(\.isArchived).map(\.id))
+        for site in envelope.sites where !site.isArchived {
             let route = Route(port: site.port, slug: site.slug, displayName: site.name,
                               containerName: site.wpContainerName)
             map["\(site.slug).localhost"] = route
@@ -448,13 +450,14 @@ public final class HTTPSProxy: @unchecked Sendable {
                                                            isMailbox: true)
             }
         }
-        for site in envelope.sites {
+        for site in envelope.sites where !site.isArchived {
             let route = Route(port: site.port, slug: site.slug, displayName: site.name,
                               containerName: site.wpContainerName)
             for host in site.networkHosts where map[host] == nil { map[host] = route }
         }
-        // A settled env serves nothing until it is restored (`EnvSettlement`).
-        for env in envelope.envs where !env.isSettled {
+        // A settled env serves nothing until it is restored (`EnvSettlement`),
+        // and neither does any env of an archived site.
+        for env in envelope.envs where !env.isSettled && !archived.contains(env.parentSiteID) {
             let host = env.domainHost
             // `sites.json` can end up with two envs sharing an `envSlug` (same
             // parent + branch, created twice). They collide on this key, and since

@@ -134,6 +134,7 @@ enum MCPToolDispatch {
     private static func dbHost(for inst: any RunnableInstance, ctx: CLIContext) async throws -> String {
         if await !ctx.lifecycle.isWPContainerRunning(inst) {
             FileHandle.standardError.write(Data("\(inst.siteSlug) was stopped — starting it first…\n".utf8))
+            try await ctx.unarchiveIfNeeded(siteID: (inst as? WorktreeEnv)?.parentSiteID ?? inst.instanceID)
             if let site = inst as? Site {
                 let provisioned = try await ctx.lifecycle.startSite(site)
                 if provisioned != site.provisioned {
@@ -500,6 +501,7 @@ enum MCPToolDispatch {
             throw ToolError("bad_args", "no_pull and refresh_images are mutually exclusive")
         }
         let policy: PullPolicy = noPull ? .never : (refreshImages ? .refresh : .ifMissing)
+        try await ctx.unarchiveIfNeeded(siteID: site.id)
         let outcome = await ctx.lifecycle.startSiteWithEnvs(site, envs: envs, pullPolicy: policy)
         if outcome.provisioned != site.provisioned {
             _ = try await ctx.persistence.mutate { env in
@@ -545,6 +547,7 @@ enum MCPToolDispatch {
 
     private static func siteRestart(ctx: CLIContext, slug: String) async throws -> CallTool.Result {
         let site = try await resolveSite(slug, ctx: ctx)
+        try await ctx.unarchiveIfNeeded(siteID: site.id)
         await ctx.lifecycle.stop(site)
         _ = try await ctx.lifecycle.startSite(site)
         return try await siteStatus(ctx: ctx, slug: slug)
@@ -606,6 +609,7 @@ enum MCPToolDispatch {
         guard WorktreeEnvService.isValidRepoRelPath(repo) else {
             throw ToolError("invalid_repo_path", WorktreeError.invalidRepoPath(repo).description)
         }
+        try await ctx.unarchiveIfNeeded(siteID: parent.id)
         let running = await ctx.runningContainerNames()
         // Port allocation + env reservation happen in ONE locked store mutation
         // (#3) so a concurrent creator can't observe the same port as free.

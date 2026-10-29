@@ -51,91 +51,64 @@ struct DevelopmentCard: View {
     // MARK: Xdebug
 
     private var xdebugRow: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Xdebug").font(.callout.weight(.medium))
-                Text("Step debugging on port 9003. Map `\(site.wordpressFolder.path)` ↔ `/var/www/html` in your IDE.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if site.status.isRunning {
-                    Text("Toggling restarts the site.").font(.caption2).foregroundStyle(.tertiary)
-                }
-            }
-            Spacer()
+        SettingRow(title: "Xdebug",
+                   detail: Text("Step debugging on port 9003. In your IDE, map `\(site.wordpressFolder.path)` to `/var/www/html`.")) {
             Toggle("", isOn: Binding(get: { site.xdebugEnabled },
                                      set: { vm.setXdebug(site, enabled: $0) }))
                 .labelsHidden().toggleStyle(.switch)
+        } footer: {
+            if site.status.isRunning { RestartNote() }
         }
     }
 
     // MARK: Elasticsearch
 
     private var elasticsearchRow: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Elasticsearch").font(.callout.weight(.medium))
-                if site.elasticsearchEnabled, let esEndpoint {
-                    Text("Endpoint \(esEndpoint) — ElasticPress-ready.")
-                        .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                } else {
-                    Text("Single-node Elasticsearch sidecar; WordPress connects automatically (ElasticPress).")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            Spacer()
+        SettingRow(title: "Elasticsearch",
+                   detail: site.elasticsearchEnabled && esEndpoint != nil
+                       ? Text("Endpoint \(esEndpoint ?? ""), ready for ElasticPress.")
+                       : Text("A search server WordPress connects to automatically, for ElasticPress.")) {
             Toggle("", isOn: Binding(get: { site.elasticsearchEnabled },
                                      set: { vm.setElasticsearch(site, enabled: $0) }))
                 .labelsHidden().toggleStyle(.switch)
+        } footer: {
+            if site.status.isRunning { RestartNote() }
         }
+        .textSelection(.enabled)
     }
 
     // MARK: Mailpit
 
     private var mailpitRow: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Mailpit").font(.callout.weight(.medium))
-                Text("Catch all outgoing site email locally and browse it in Mailpit's web UI — nothing leaves your Mac.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if site.mailpitEnabled, let mailbox = site.mailboxURL {
-                    Button {
-                        SystemActions.openInBrowser(mailbox)
-                    } label: {
-                        Label("Open Mailbox", systemImage: "envelope")
-                    }
-                    .buttonStyle(.link).controlSize(.small)
-                    .disabled(!site.status.isRunning)
-                }
-                if site.status.isRunning {
-                    Text("Toggling restarts the site.").font(.caption2).foregroundStyle(.tertiary)
-                }
-            }
-            Spacer()
+        SettingRow(title: "Mailpit",
+                   detail: Text("Catches all email the site sends. Nothing leaves your Mac.")) {
             Toggle("", isOn: Binding(get: { site.mailpitEnabled },
                                      set: { vm.setMailpit(site, enabled: $0) }))
                 .labelsHidden().toggleStyle(.switch)
+        } footer: {
+            if site.mailpitEnabled, let mailbox = site.mailboxURL {
+                Button {
+                    SystemActions.openInBrowser(mailbox)
+                } label: {
+                    Label("Open Mailbox", systemImage: "envelope")
+                }
+                .buttonStyle(.link).controlSize(.small)
+                .disabled(!site.status.isRunning)
+            }
+            if site.status.isRunning { RestartNote() }
         }
     }
 
     // MARK: Redis
 
     private var redisRow: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Redis").font(.callout.weight(.medium))
-                Text("Object cache server. Sets WP_REDIS_HOST for a drop-in such as the Redis Object Cache plugin, which you install in the site. Empty after every restart.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if site.status.isRunning {
-                    Text("Toggling restarts the site.").font(.caption2).foregroundStyle(.tertiary)
-                }
-            }
-            Spacer()
+        SettingRow(title: "Redis",
+                   detail: Text("Object cache server, emptied on every restart. Install a drop-in such as Redis Object Cache to use it.")) {
             Toggle("", isOn: Binding(get: { site.redisEnabled },
                                      set: { vm.setRedis(site, enabled: $0) }))
                 .labelsHidden().toggleStyle(.switch)
+        } footer: {
+            if site.status.isRunning { RestartNote() }
         }
     }
 
@@ -179,7 +152,7 @@ struct DevelopmentCard: View {
             }
             Text("Environment: \(environment.isEmpty ? "local" : environment)")
                 .font(.caption2).foregroundStyle(.tertiary)
-            Text("Constants take effect immediately — no restart.")
+            Text("Changes apply right away, without a restart.")
                 .font(.caption2).foregroundStyle(.tertiary)
         }
     }

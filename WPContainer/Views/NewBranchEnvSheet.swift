@@ -107,13 +107,13 @@ struct NewBranchEnvSheet: View {
             Section {
                 Toggle("Seed runtime dependencies", isOn: $provision)
                     .disabled(phase == .working)
-                Text("Copies the parent's gitignored deps (vendor/, built assets, provisioned plugins) into the checkout so the env boots into a working site. Turn off for a bare checkout.")
+                Text("Copies the site’s gitignored files, like vendor/ and built assets, so the branch runs without a build step.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section {
                 Toggle("Isolated database", isOn: $isolatedDB)
                     .disabled(phase == .working)
-                Text("By default the environment gets its own database on \(site.name)'s existing database server — one container instead of two, saving around 470 MB. Turn this on to run a separate server, which is faster to set up for a very large database.")
+                Text("Runs its own database server instead of sharing \(site.name)’s. Uses about 470 MB more, but sets up faster for a very large database.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if phase == .working {
@@ -121,8 +121,8 @@ struct NewBranchEnvSheet: View {
                     HStack(spacing: 10) {
                         ProgressView().controlSize(.small)
                         Text(provision
-                             ? "Cloning site files & database, seeding runtime deps, and starting containers…"
-                             : "Cloning site files, database, and starting containers… (~5s)")
+                             ? "Copying files, database and dependencies, then starting…"
+                             : "Copying files and database, then starting…")
                             .font(.callout).foregroundStyle(.secondary)
                     }
                 }
@@ -132,7 +132,7 @@ struct NewBranchEnvSheet: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Label(errorText, systemImage: "exclamationmark.triangle.fill")
                             .font(.caption).foregroundStyle(.red)
-                        Text("The half-created environment was rolled back (the branch was kept).")
+                        Text("The partial environment was removed. The branch was kept.")
                             .font(.caption2).foregroundStyle(.secondary)
                         if let errorDetail, errorDetail != errorText {
                             DisclosureGroup("Details") {
@@ -234,7 +234,7 @@ struct NewBranchEnvSheet: View {
             createdEnv = env
             phase = .done
         } else {
-            errorText = vm.lastError ?? "Could not create the environment."
+            errorText = vm.lastError ?? "Couldn’t create the environment."
             errorDetail = vm.lastErrorDetail
             phase = .failed
         }
