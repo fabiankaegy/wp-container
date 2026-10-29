@@ -53,6 +53,9 @@ public enum SiteRecipe {
     public static let dbUser = "wordpress"
     public static let dbPassword = "wordpress"
     public static let dbRootPassword = "root"
+    /// MariaDB's port. The DB container publishes no host port; the host
+    /// reaches it on the container's own IP.
+    public static let dbPort = 3306
 
     // MARK: Admin credentials (auto-provisioning)
     public static let adminUser = "admin"
@@ -534,9 +537,8 @@ public enum SiteRecipe {
         return args
     }
 
-    /// Set `home`/`siteurl` to an arbitrary URL + flush cache — used when
-    /// toggling HTTPS on/off for a site (PLAN.md §2f) and to finish a worktree
-    /// env's URL migration (`EnvURLMigrator`).
+    /// Set `home`/`siteurl` to an arbitrary URL + flush cache — used to finish
+    /// a URL migration (`EnvURLMigrator`) and a database import.
     public static func wpSetURLsArgs(_ inst: any RunnableInstance, dbHost: String, url: String) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
         args += phpConfArgs(inst)

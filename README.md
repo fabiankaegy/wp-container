@@ -94,10 +94,16 @@ Sites are provisioned automatically (no install wizard) and log in with
   WordPress (ElasticPress-ready). Recipes validated in `scripts/validate-addons.sh`.
 - **Custom domains** — give a site `mysite.local`; a managed `/etc/hosts` block plus
   the host proxy route it (HTTP and HTTPS), the local cert re-issues to cover it,
-  and WordPress URLs update automatically.
+  and WordPress URLs update automatically. A domain missing from that block (the
+  admin prompt was skipped, or another tool removed its entry) is flagged on the
+  site's Overview tab and in `wp-container start`; **Sync** or
+  `wp-container domain sync` adds it back.
 - **Multisite** — create subdirectory or subdomain networks from the setup guide
   (`wp core multisite-install` + MULTISITE constants + network `.htaccess`); the
-  Overview tab lists network subsites.
+  Overview tab lists network subsites. Subsite hostnames (subdomains of a custom
+  domain, or a subsite's own mapped domain) are read from WordPress on every
+  start and get proxy routes, certificate coverage and loopback entries, and are
+  flagged and synced the same way.
 - **WP × PHP versions** — the new-site flow is a 3-step guide (name → WordPress ×
   PHP version with a live image-tag preview → options); change PHP later (image
   swap + restart) or update core from Settings → Software.

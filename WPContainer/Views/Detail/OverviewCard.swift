@@ -7,8 +7,13 @@ import WPContainerKit
 struct OverviewCard: View {
     let site: Site
 
+    @State private var missingHosts: [String] = []
+
     var body: some View {
         SectionCard(title: "Overview", systemImage: "info.circle") {
+            if !missingHosts.isEmpty {
+                MissingHostsRow(site: site, missing: $missingHosts)
+            }
             Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 24, verticalSpacing: 12) {
                 InfoRow(label: "URL") {
                     HStack(spacing: 6) {
@@ -86,6 +91,7 @@ struct OverviewCard: View {
                 }
             }
         }
+        .trackingMissingHosts(of: site, into: $missingHosts)
     }
 
     private func credential(_ value: String) -> some View {

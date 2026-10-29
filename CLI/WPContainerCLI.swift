@@ -500,6 +500,10 @@ struct StartCommand: AsyncParsableCommand {
                 for warning in outcome.warnings {
                     FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
                 }
+                if outcome.parentErrorMessage == nil,
+                   let warning = await NetworkHostsService.hostsWarningAfterStart(site, cli: ctx.cli, persistence: ctx.persistence) {
+                    FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
+                }
                 // Any env in the fan-out is served by the proxy, not by a
                 // published port (issue #16 follow-through). Per-env, because the
                 // answer differs per port: one may be served while another collides
