@@ -1505,8 +1505,10 @@ public final class AppViewModel {
     /// site's claim, so the stop would skip it and leave it running unrouted.
     public func archiveSite(_ site: Site) {
         let status = store.status(for: site.id) ?? .stopped
-        guard !status.isTransitional else {
-            lastError = "Wait for \(site.name) to finish starting or stopping before archiving it."
+        // An env mid-start holds its claim, so stopping would skip it and settling throw `busy`.
+        let envBusy = store.envs(forSite: site.id).contains { (store.status(for: $0.id) ?? .stopped).isTransitional }
+        guard !status.isTransitional, !envBusy else {
+            lastError = "Wait for \(site.name) and its branch environments to finish starting or stopping before archiving it."
             return
         }
         Task {

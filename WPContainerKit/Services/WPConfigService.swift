@@ -75,10 +75,11 @@ public enum WPConfigService {
         return out
     }
 
-    /// The table prefix: the last string literal assigned to `$table_prefix`,
-    /// which covers both `'wp_'` and the official image's
-    /// `getenv_docker('WORDPRESS_TABLE_PREFIX', 'wp_')`. nil when absent or not
-    /// `[A-Za-z0-9_]+`, so callers can inline a non-nil prefix into SQL.
+    /// The table prefix assigned to `$table_prefix`: either a plain literal
+    /// (`'wp_'`) or the default of the official image's
+    /// `getenv_docker('WORDPRESS_TABLE_PREFIX', 'wp_')`. nil when absent, any
+    /// other expression (`getenv('TABLE_PREFIX')`), or not `[A-Za-z0-9_]+`, so
+    /// callers can inline a non-nil prefix into SQL.
     static func parseTablePrefix(_ text: String) -> String? {
         // Drop `/* … */` blocks first, so a line inside a multi-line one is
         // never read as code.
@@ -94,9 +95,12 @@ public enum WPConfigService {
               }),
               let assignment = line.split(separator: "=", maxSplits: 1).last else { return nil }
         // Only the statement itself: a trailing comment can quote another prefix.
-        let statement = assignment.prefix(while: { $0 != ";" })
-        let literals = statement.matches(of: #/['"]([A-Za-z0-9_]*)['"]/#).map { String($0.output.1) }
-        return literals.last.flatMap { $0.isEmpty ? nil : $0 }
+        let statement = assignment.prefix(while: { $0 != ";" }).trimmingCharacters(in: .whitespaces)
+        // A plain literal, or the default of the official image's `getenv_docker()`.
+        // Any other call (`getenv('TABLE_PREFIX')`) is unknown: nil.
+        if let m = statement.wholeMatch(of: #/['"]([A-Za-z0-9_]+)['"]/#) { return String(m.output.1) }
+        let docker = #/getenv_docker\s*\(\s*['"][A-Za-z0-9_]+['"]\s*,\s*['"]([A-Za-z0-9_]+)['"]\s*\)/#
+        return statement.wholeMatch(of: docker).map { String($0.output.1) }
     }
 
     private static func unquote(_ value: String) -> String {

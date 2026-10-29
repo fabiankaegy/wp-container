@@ -37,6 +37,11 @@ final class SiteIconQueryTests: XCTestCase {
         XCTAssertNil(WPConfigService.parseTablePrefix("$table_prefix = 'x; DROP TABLE';"))
     }
 
+    func testPrefixIgnoresOtherCallArguments() {
+        // The argument is an env var's name, not the prefix: unknown, so callers fall back to `wp_`.
+        XCTAssertNil(WPConfigService.parseTablePrefix("$table_prefix = getenv( 'TABLE_PREFIX' );"))
+    }
+
     func testQueryUsesPrefix() {
         let sql = SiteIconQuery.sql(prefix: "nw7_")
         XCTAssertTrue(sql.contains("FROM nw7_options"))
