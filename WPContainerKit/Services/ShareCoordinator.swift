@@ -556,7 +556,7 @@ public actor ShareCoordinator {
                 pids.remember(pid, executable: Self.executablePath(of: pid) ?? spec.executable.path, instanceID: id)
             }
             process = launched.process
-            let executable = Self.executablePath(of: launched.process.pid) ?? spec.executable.path
+            let executable = spec.executable.path
             runtime = try currentAttempt(id, attempt)
 
             let reportedHost = URLComponents(string: launched.url)?.host?.lowercased() ?? launched.url

@@ -296,4 +296,46 @@ final class ShareProcessTests: XCTestCase {
         XCTAssertTrue(finished)
         XCTAssertTrue(isGone(process.pid))
     }
+
+    func testSupervisorStopsTheProviderAndItsChildrenWhenItsStdinCloses() async throws {
+        let spec = try script("sleep 300 &\necho \"child $!\"\nwait")
+        let supervisor = Process()
+        supervisor.executableURL = URL(fileURLWithPath: "/bin/bash")
+        supervisor.arguments = ["-c", ShareProcess.supervisorScript, "wpc-share-supervisor", spec.executable.path]
+        let stdin = Pipe()
+        let stdout = Pipe()
+        supervisor.standardInput = stdin
+        supervisor.standardOutput = stdout
+        try supervisor.run()
+
+        var output = Data()
+        while !output.contains(UInt8(ascii: "\n")) {
+            let chunk = stdout.fileHandleForReading.availableData
+            guard !chunk.isEmpty else { break }
+            output.append(chunk)
+        }
+        let line = String(decoding: output, as: UTF8.self)
+        let child = try XCTUnwrap(line.split(whereSeparator: \.isWhitespace).last.flatMap { Int32($0) }, line)
+        XCTAssertFalse(isGone(child))
+
+        try stdin.fileHandleForWriting.close()
+        let deadline = Date().addingTimeInterval(5)
+        while (!isGone(child) || supervisor.isRunning) && Date() < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertTrue(isGone(child))
+        XCTAssertFalse(supervisor.isRunning)
+    }
+
+    func testSupervisorExitsWithTheProviderStatus() throws {
+        let spec = try script("exit 3")
+        let supervisor = Process()
+        supervisor.executableURL = URL(fileURLWithPath: "/bin/bash")
+        supervisor.arguments = ["-c", ShareProcess.supervisorScript, "wpc-share-supervisor", spec.executable.path]
+        let stdin = Pipe()
+        supervisor.standardInput = stdin
+        try supervisor.run()
+        supervisor.waitUntilExit()
+        XCTAssertEqual(supervisor.terminationStatus, 3)
+    }
 }

@@ -3,6 +3,10 @@ import Foundation
 
 /// Runs one tunnel provider process: reads its output until it reports a public URL, reports
 /// its exit, and stops it and every process it started with SIGTERM followed by SIGKILL.
+///
+/// The provider runs under a `/bin/bash` supervisor whose stdin is a pipe this process holds
+/// open. When this process exits, however it exits, the pipe closes and the supervisor
+/// stops the provider, so a public URL never outlives the listener it points at.
 public final class ShareProcess: @unchecked Sendable {
     /// Called once when the process exits, with its status and the last stderr lines.
     public var onExit: (@Sendable (_ status: Int32, _ stderrTail: [String]) -> Void)? {
@@ -13,6 +17,22 @@ public final class ShareProcess: @unchecked Sendable {
     public var pid: Int32 { lock.withLock { processID } }
 
     private static let stderrTailLimit = 20
+
+    /// Runs the provider (`"$@"`) and stops it and its children with SIGTERM once stdin reaches
+    /// EOF, then exits with the provider's status. The watcher reads stdin through fd 3 because
+    /// an asynchronous list's stdin is otherwise `/dev/null`.
+    static let supervisorScript = """
+        exec 3<&0
+        "$@" </dev/null 3<&- &
+        provider=$!
+        { while read -r _; do :; done; pkill -TERM -P "$provider"; kill -TERM "$provider"; } <&3 >/dev/null 2>&1 &
+        watcher=$!
+        exec 3<&-
+        wait "$provider"
+        status=$?
+        kill "$watcher" 2>/dev/null
+        exit "$status"
+        """
 
     private let spec: ShareLaunchSpec
     private let provider: any ShareProvider
@@ -33,6 +53,8 @@ public final class ShareProcess: @unchecked Sendable {
     private var stderrTail: [String] = []
     private var sources: [DispatchSourceRead] = []
     private let drained = DispatchGroup()
+    /// The write end of the supervisor's stdin, held open until the provider exits.
+    private var lifeline: FileHandle?
 
     public init(spec: ShareLaunchSpec, provider: any ShareProvider) {
         self.spec = spec
@@ -91,12 +113,15 @@ public final class ShareProcess: @unchecked Sendable {
             return
         }
 
+        let stdin = Pipe()
         let stdout = Pipe()
         let stderr = Pipe()
-        process.executableURL = spec.executable
-        process.arguments = spec.arguments
+        // Kept out of every other child this process starts, so only this process's exit closes it.
+        _ = fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETFD, FD_CLOEXEC)
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["-c", Self.supervisorScript, "wpc-share-supervisor", spec.executable.path] + spec.arguments
         process.environment = ProcessInfo.processInfo.environment.merging(spec.environment) { _, new in new }
-        process.standardInput = FileHandle.nullDevice
+        process.standardInput = stdin
         process.standardOutput = stdout
         process.standardError = stderr
         process.terminationHandler = { [weak self] finished in
@@ -114,6 +139,7 @@ public final class ShareProcess: @unchecked Sendable {
             try process.run()
         } catch {
             created.forEach { $0.cancel() }
+            try? stdin.fileHandleForWriting.close()
             try? stdout.fileHandleForWriting.close()
             try? stderr.fileHandleForWriting.close()
             drained.notify(queue: .global()) { [weak self] in
@@ -126,6 +152,7 @@ public final class ShareProcess: @unchecked Sendable {
         lock.withLock {
             processID = pid
             started = true
+            lifeline = stdin.fileHandleForWriting
         }
         launched?(pid)
     }
@@ -195,10 +222,12 @@ public final class ShareProcess: @unchecked Sendable {
     }
 
     private func handleTermination(status: Int32) {
-        let activeSources: [DispatchSourceRead] = lock.withLock {
+        let (activeSources, heldLifeline): ([DispatchSourceRead], FileHandle?) = lock.withLock {
             reaped = true
-            return sources
+            defer { lifeline = nil }
+            return (sources, lifeline)
         }
+        try? heldLifeline?.close()
         activeSources.forEach { $0.cancel() }
         drained.notify(queue: .global()) { [weak self] in
             self?.finishExit(status: status)
