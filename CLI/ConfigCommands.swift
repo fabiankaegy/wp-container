@@ -359,7 +359,7 @@ struct DomainCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "domain",
         abstract: "Manage a site's custom domain (updates /etc/hosts — prompts for admin).",
-        subcommands: [DomainSet.self, DomainClear.self]
+        subcommands: [DomainSet.self, DomainClear.self, DomainSync.self]
     )
 }
 
@@ -382,8 +382,8 @@ struct DomainSet: AsyncParsableCommand {
                 if let i = env.sites.firstIndex(where: { $0.id == site.id }) { env.sites[i].customDomain = normalized }
             }
             let newSite = updated.sites.first { $0.id == site.id } ?? site
-            let all = updated.sites.compactMap(\.customDomain)
-            try await DomainService(cli: ctx.cli).apply(site: newSite, allCustomDomains: all)
+            let all = HostsFileService.domains(for: updated.sites)
+            try await DomainService(cli: ctx.cli).apply(site: newSite, hostsDomains: all)
             if output.json { emitLine(MCPJSON.string(["ok": true, "domain": normalized, "url": newSite.url.absoluteString])) }
             else { emitLine("Set \(slug) domain to \(normalized) → \(newSite.url.absoluteString) (proxy must be running; trust the CA for HTTPS).") }
         } catch { throw failCommand(error, json: output.json) }
@@ -404,10 +404,35 @@ struct DomainClear: AsyncParsableCommand {
                 if let i = env.sites.firstIndex(where: { $0.id == site.id }) { env.sites[i].customDomain = nil }
             }
             let newSite = updated.sites.first { $0.id == site.id } ?? site
-            let all = updated.sites.compactMap(\.customDomain)
-            try await DomainService(cli: ctx.cli).apply(site: newSite, allCustomDomains: all)
+            let all = HostsFileService.domains(for: updated.sites)
+            try await DomainService(cli: ctx.cli).apply(site: newSite, hostsDomains: all)
             if output.json { emitLine(MCPJSON.string(["ok": true, "url": newSite.url.absoluteString])) }
             else { emitLine("Cleared \(slug) custom domain → \(newSite.url.absoluteString).") }
+        } catch { throw failCommand(error, json: output.json) }
+    }
+}
+
+struct DomainSync: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "sync",
+        abstract: "Rewrite /etc/hosts to every site's custom domain and multisite subsite hosts.",
+        discussion: "Reads the subsites of every multisite network whose database is running first, so subsites added in Network Admin are included. Prompts for admin only when /etc/hosts changes."
+    )
+    @OptionGroup var output: JSONOptions
+
+    func run() async throws {
+        let ctx = CLIContext()
+        do {
+            for site in try await ctx.load().sites where site.networkType.isMultisite {
+                await NetworkHostsService.refresh(site, cli: ctx.cli, persistence: ctx.persistence)
+            }
+            let domains = HostsFileService.domains(for: try await ctx.load().sites)
+            let changed = !HostsFileService.isUpToDate(domains: domains)
+            try await HostsFileService.apply(domains: domains)
+            if output.json { emitLine(MCPJSON.string(["ok": true, "changed": changed, "domains": domains])) }
+            else if !changed { emitLine("/etc/hosts already lists every site hostname.") }
+            else if domains.isEmpty { emitLine("Removed the wp-container block from /etc/hosts.") }
+            else { emitLine("Synced /etc/hosts: \(domains.joined(separator: ", ")).") }
         } catch { throw failCommand(error, json: output.json) }
     }
 }
