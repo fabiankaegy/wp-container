@@ -534,9 +534,8 @@ public enum SiteRecipe {
         return args
     }
 
-    /// Set `home`/`siteurl` to an arbitrary URL + flush cache — used when
-    /// toggling HTTPS on/off for a site (PLAN.md §2f) and to finish a worktree
-    /// env's URL migration (`EnvURLMigrator`).
+    /// Set `home`/`siteurl` to an arbitrary URL + flush cache — used to finish
+    /// a URL migration (`EnvURLMigrator`) and a database import.
     public static func wpSetURLsArgs(_ inst: any RunnableInstance, dbHost: String, url: String) -> [String] {
         var args = wpCLIBaseArgs(inst, dbHost: dbHost)
         args += phpConfArgs(inst)

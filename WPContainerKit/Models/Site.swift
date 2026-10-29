@@ -62,6 +62,18 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     public var customDomain: String?
     /// WordPress network type — single site or a multisite network (PLAN.md §2j).
     public var networkType: NetworkType
+    /// Hostnames the network's subsites are served at, other than the site's
+    /// own host: subdomain subsites (`sub.mysite.local`) and subsites mapped to
+    /// a domain of their own. Read from WordPress after every start and every
+    /// Subsites refresh (`NetworkHostsService`), so `/etc/hosts`, proxy routes,
+    /// certificate SANs and in-container loopback hosts can cover them while
+    /// the site is stopped too. Empty for a single site.
+    public var networkHosts: [String] = []
+    /// The URL WordPress's `home`/`siteurl` were last brought in line with
+    /// (`SiteURLReconciler`). A start whose `url` differs (HTTPS or the domain
+    /// changed while the site was stopped) reconciles the database first. nil
+    /// = never checked.
+    public var wordpressURL: String?
     /// Where the agent-tools artifacts (MCP configs + doc) were written, so
     /// disable/regenerate targets the same place (PLAN.md §2d rework). nil = the
     /// site folder default. Absolute path.
@@ -101,7 +113,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
 
     private enum CodingKeys: String, CodingKey {
         case id, name, slug, path, port, imageTag, phpVersion, webServer, createdAt, provisioned, groupID, httpsEnabled
-        case xdebugEnabled, elasticsearchEnabled, customDomain, networkType
+        case xdebugEnabled, elasticsearchEnabled, customDomain, networkType, networkHosts, wordpressURL
         case agentToolsRoot, agentToolsDoc
         case cpuLimit, memoryLimitMB
         case idleStopMinutes, lastActivityAt
@@ -136,6 +148,8 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         lastActivityAt: Date? = nil,
         customDomain: String? = nil,
         networkType: NetworkType = .none,
+        networkHosts: [String] = [],
+        wordpressURL: String? = nil,
         agentToolsRoot: String? = nil,
         agentToolsDoc: String? = nil,
         lastImportSourceURL: String? = nil,
@@ -166,6 +180,8 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.lastActivityAt = lastActivityAt
         self.customDomain = customDomain
         self.networkType = networkType
+        self.networkHosts = networkHosts
+        self.wordpressURL = wordpressURL
         self.agentToolsRoot = agentToolsRoot
         self.agentToolsDoc = agentToolsDoc
         self.lastImportSourceURL = lastImportSourceURL
@@ -210,6 +226,10 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.lastActivityAt = try? c.decodeIfPresent(Date.self, forKey: .lastActivityAt)
         self.customDomain = try? c.decodeIfPresent(String.self, forKey: .customDomain)
         self.networkType = (try? c.decodeIfPresent(NetworkType.self, forKey: .networkType)) ?? .none
+        // Absent in stores written before subsite hosts were tracked.
+        self.networkHosts = ((try? c.decodeIfPresent([String].self, forKey: .networkHosts)) ?? []) ?? []
+        // Absent in stores written before URL reconciliation: checked on next start.
+        self.wordpressURL = try? c.decodeIfPresent(String.self, forKey: .wordpressURL)
         self.agentToolsRoot = try? c.decodeIfPresent(String.self, forKey: .agentToolsRoot)
         self.agentToolsDoc = try? c.decodeIfPresent(String.self, forKey: .agentToolsDoc)
         // Absent in stores written before the Database Importer (§2m).
@@ -243,7 +263,8 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     /// The site's canonical hostname: a custom domain when set, else `<slug>.localhost`.
     public var primaryHost: String { (customDomain?.isEmpty == false ? customDomain! : localhostHost) }
     /// All hostnames the proxy/cert must cover for this site (§2i/§2j):
-    /// `<slug>.localhost`, any custom domain, and a subdomain-multisite wildcard.
+    /// `<slug>.localhost`, any custom domain, a subdomain-multisite wildcard,
+    /// and the network's subsite hosts.
     public var proxyHosts: [String] {
         var hosts = [localhostHost]
         if let d = customDomain, !d.isEmpty { hosts.append(d) }
@@ -251,7 +272,19 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
             hosts.append("*.\(localhostHost)")
             if let d = customDomain, !d.isEmpty { hosts.append("*.\(d)") }
         }
+        hosts.append(contentsOf: networkHosts.filter { !hosts.contains($0) })
         return hosts
+    }
+    /// The hostnames this site needs in the managed `/etc/hosts` block: its
+    /// custom domain and every subsite host. `.localhost` names resolve to
+    /// loopback without an entry, so they are left out.
+    public var hostsFileDomains: [String] {
+        var domains: [String] = []
+        if let d = customDomain, !d.isEmpty { domains.append(d.lowercased()) }
+        for host in networkHosts where !host.hasSuffix(".localhost") && !domains.contains(host) {
+            domains.append(host)
+        }
+        return domains
     }
     /// `https://<primary host>` — valid only while HTTPS is enabled and the proxy runs.
     public var secureURL: URL { SiteURL.secure(host: primaryHost) }
@@ -279,12 +312,13 @@ extension Site: RunnableInstance {
     public var displayName: String { name }
     public var isProvisioned: Bool { provisioned }
     public var extraMounts: [Mount] { mounts }
-    /// `<slug>.localhost` plus any custom domain. Subdomain-multisite wildcards
-    /// are omitted — /etc/hosts can't express them; subsite loopbacks would
-    /// need per-subsite entries (acceptable gap, matches the proxy SAN story).
+    /// `<slug>.localhost`, any custom domain, and the network's subsite hosts.
+    /// Subdomain-multisite wildcards are omitted (/etc/hosts can't express
+    /// them); each known subsite host gets its own entry instead.
     public var loopbackHosts: [String] {
         var hosts = [localhostHost]
         if let d = customDomain, !d.isEmpty { hosts.append(d.lowercased()) }
+        hosts.append(contentsOf: networkHosts.filter { !hosts.contains($0) })
         return hosts
     }
 }
