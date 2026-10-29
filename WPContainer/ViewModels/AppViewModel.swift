@@ -570,6 +570,13 @@ public final class AppViewModel {
         return (v?.isEmpty == false) ? v : nil
     }
 
+    /// The IP the host reaches an instance's database on, while its DB
+    /// container runs. The container gets its IP when it starts.
+    public func databaseHost(_ inst: any RunnableInstance) async -> String? {
+        guard let ip = try? await cli.ipAddress(of: inst.dbContainerName), !ip.isEmpty else { return nil }
+        return ip
+    }
+
     /// Multisite subsites (`wp site list`) when running (§2j).
     public func subsites(_ site: Site) async -> [(blogID: String, url: String)] {
         guard site.networkType.isMultisite,

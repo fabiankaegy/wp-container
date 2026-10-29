@@ -34,6 +34,7 @@ struct EnvDetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     overviewCard
+                    DatabaseCard(instance: env, status: env.status)
                     IdleStopCard(configured: env.idleStopMinutes, isEnv: true, envPort: env.port) { minutes in
                         vm.setIdleStop(env, minutes: minutes)
                     }
