@@ -232,21 +232,24 @@ final class ShareGateTests: XCTestCase {
         XCTAssertFalse(rewritten.lowercased().contains("x-wpc-share-exempt"), rewritten)
     }
 
-    func testShareDecisionKeepsExceptionsExemptAndCountsTheirBadCredentials() throws {
-        let cfg = try config(allow: ["?wc-api"])
+    func testShareDecisionLetsValidCredentialsThroughALock() throws {
+        let cfg = try config(allow: ["?wc-api=1"])
         let throttle = ShareAuthThrottle()
         let now = Date()
         let bad = [basic("share:nope")]
-        XCTAssertEqual(HTTPSProxy.shareDecision(requestLine: "GET /?wc-api=1 HTTP/1.1", headerLines: [], config: cfg,
-                                                throttle: throttle, now: now), .exempt)
+        let good = [basic("share:pw")]
+        func decide(_ line: String, _ headers: [String]) -> ShareGateDecision {
+            HTTPSProxy.shareDecision(requestLine: line, headerLines: headers, config: cfg, throttle: throttle, now: now)
+        }
+        XCTAssertEqual(decide("GET /?wc-api=1 HTTP/1.1", []), .exempt)
         for _ in 0..<10 {
-            XCTAssertEqual(HTTPSProxy.shareDecision(requestLine: "GET /?wc-api=1 HTTP/1.1", headerLines: bad, config: cfg,
-                                                    throttle: throttle, now: now), .exempt)
+            XCTAssertEqual(decide("GET /?wc-api=1 HTTP/1.1", bad), .exempt)
         }
         XCTAssertTrue(throttle.isLocked(now: now))
-        XCTAssertEqual(HTTPSProxy.shareDecision(requestLine: "GET /?wc-api=1 HTTP/1.1", headerLines: [basic("share:pw")],
-                                                config: cfg, throttle: throttle, now: now), .exempt)
-        XCTAssertEqual(HTTPSProxy.shareDecision(requestLine: "GET / HTTP/1.1", headerLines: [basic("share:pw")],
-                                                config: cfg, throttle: throttle, now: now), .throttled)
+        XCTAssertEqual(decide("GET / HTTP/1.1", good), .pass)
+        XCTAssertEqual(decide("GET /?wc-api=1 HTTP/1.1", good), .pass)
+        XCTAssertEqual(decide("GET / HTTP/1.1", bad), .throttled)
+        XCTAssertEqual(decide("GET /?wc-api=1 HTTP/1.1", bad), .exempt)
+        XCTAssertEqual(decide("GET / HTTP/1.1", []), .challenge)
     }
 }

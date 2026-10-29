@@ -699,7 +699,7 @@ exec my-tunnel-tool --to "$WPC_SHARE_UPSTREAM" ${WPC_SHARE_HOSTNAME:+--host "$WP
   site and kept across shares (`--reset-password` replaces it).
 - `--no-auth` turns the gate off for that share only. It is available from the
   CLI and app, not MCP.
-- 10 wrong passwords within 60 seconds lock the share for 30 seconds (HTTP 429). Requests on exception paths that carry a wrong or foreign `Authorization` header also count toward the lockout.
+- 10 wrong passwords within 60 seconds lock the share for 30 seconds (HTTP 429). Requests on exception paths that carry a wrong or foreign `Authorization` header also count toward the lockout. The right password still passes while the share is locked.
 - **Exceptions** (`--allow`, repeatable, saved per site; `--clear-allow` removes
   them): a path prefix (`/wp-json/wc/v3/webhooks`) or a query parameter
   (`?wc-api`, `?wc-api=wc_stripe`). A query exception applies on every path, so

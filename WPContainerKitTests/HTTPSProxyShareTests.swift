@@ -70,7 +70,7 @@ final class HTTPSProxyShareTests: XCTestCase {
         XCTAssertEqual(upstream.connectionCount, 0)
     }
 
-    func testWrongCredentialsLockTheShareWithoutReachingTheUpstream() async throws {
+    func testWrongCredentialsLockTheShareButNotTheRightPassword() async throws {
         let port = try await openShare(instanceID: UUID(), route: route, config: config())
 
         for _ in 0..<10 {
@@ -84,8 +84,8 @@ final class HTTPSProxyShareTests: XCTestCase {
             port: port, request: Self.request(authorization: Self.credentials))
 
         XCTAssertTrue(locked.hasPrefix("HTTP/1.1 429"), locked)
-        XCTAssertTrue(lockedWithGoodCredentials.hasPrefix("HTTP/1.1 429"), lockedWithGoodCredentials)
-        XCTAssertEqual(upstream.connectionCount, 0)
+        XCTAssertFalse(lockedWithGoodCredentials.hasPrefix("HTTP/1.1 429"), lockedWithGoodCredentials)
+        XCTAssertEqual(upstream.connectionCount, 1)
     }
 
     func testRequestsWithoutCredentialsNeverLockTheShare() async throws {

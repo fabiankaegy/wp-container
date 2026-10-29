@@ -1649,23 +1649,21 @@ public final class HTTPSProxy: @unchecked Sendable {
     /// Gate one share request, consulting the throttle.
     ///
     /// Every visitor reaches the listener from the tunnel agent on loopback, so
-    /// the throttle is per share rather than per client. To keep one party from
-    /// locking everyone out, only a request that sent credentials that failed
-    /// counts as a failure, and the lock answers 429 only to requests that send
-    /// credentials. An auth-disabled share always passes, and an exception path is
-    /// always relayed: as `.pass` when its credentials are valid, otherwise as
-    /// `.exempt` (also while locked, when credentials are not checked). A request
-    /// without credentials always gets the plain 401.
+    /// the throttle is per share rather than per client. Valid credentials always
+    /// pass, also while the share is locked, so failed attempts cannot lock out
+    /// the people who hold the password. Only a request that sent credentials
+    /// that failed counts as a failure, and the lock answers 429 only to such
+    /// requests. An exception path is always relayed: as `.exempt` when its
+    /// credentials fail, also while locked. A request without credentials always
+    /// gets the plain 401.
     static func shareDecision(requestLine: String, headerLines: [String], config: ShareGateConfig,
                               throttle: ShareAuthThrottle, now: Date) -> ShareGateDecision {
-        let credentialless = headerLines.filter { !isAuthorizationHeader($0) }
-        let open = ShareGate.authorize(requestLine: requestLine, headerLines: credentialless, config: config)
-        if open == .pass { return .pass }
-        let sentCredentials = credentialless.count != headerLines.count
-        guard sentCredentials else { return open }
-        if throttle.isLocked(now: now) { return open == .exempt ? .exempt : .throttled }
         let decision = ShareGate.authorize(requestLine: requestLine, headerLines: headerLines, config: config)
-        if decision != .pass { throttle.recordFailure(now: now) }
+        if decision == .pass { return .pass }
+        let sentCredentials = headerLines.contains(where: isAuthorizationHeader)
+        guard sentCredentials else { return decision }
+        if throttle.isLocked(now: now) { return decision == .exempt ? .exempt : .throttled }
+        throttle.recordFailure(now: now)
         return decision
     }
 
