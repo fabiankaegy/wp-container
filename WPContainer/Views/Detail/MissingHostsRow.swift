@@ -13,22 +13,22 @@ struct MissingHostsRow: View {
     @Binding var missing: [String]
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Not registered in /etc/hosts").font(.callout.weight(.medium))
-                Text("\(missing.joined(separator: ", ")) won't resolve until \(missing.count == 1 ? "it's" : "they're") added to /etc/hosts.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 8)
-            Button("Sync") {
-                Task {
-                    await vm.registerMissingHosts(site)
-                    missing = vm.missingHostsDomains(site)
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 12) {
+                Label("Not in /etc/hosts", systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout.weight(.medium)).foregroundStyle(.orange)
+                Spacer(minLength: 8)
+                Button("Sync") {
+                    Task {
+                        await vm.registerMissingHosts(site)
+                        missing = vm.missingHostsDomains(site)
+                    }
                 }
+                .buttonStyle(.borderedProminent).controlSize(.small)
             }
-            .buttonStyle(.borderedProminent).controlSize(.small)
+            Text("\(missing.joined(separator: ", ")) won’t load until \(missing.count == 1 ? "it’s" : "they’re") added.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

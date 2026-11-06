@@ -51,22 +51,18 @@ struct SoftwareCard: View {
     }
 
     private var versionRow: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("WordPress").font(.callout.weight(.medium))
-                Text(liveVersion.map { "Version \($0) (live)" } ?? "Image \(site.imageTag)")
-                    .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-            }
-            Spacer()
+        SettingRow(title: "WordPress",
+                   detail: Text(liveVersion.map { "Version \($0)" } ?? "Image \(site.imageTag)")) {
             Button("Update Core…") { confirmingUpdate = true }
                 .buttonStyle(.bordered).controlSize(.small)
                 .disabled(!site.status.isRunning)
         }
+        .textSelection(.enabled)
         .confirmationDialog("Update WordPress core?", isPresented: $confirmingUpdate, titleVisibility: .visible) {
             Button("Update Core") { vm.updateWordPressCore(site) }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Runs `wp core update` and updates the database. Your content is preserved.")
+            Text("Runs `wp core update` and upgrades the database. Your content is kept.")
         }
     }
 
@@ -93,7 +89,7 @@ struct SoftwareCard: View {
                 .controlSize(.small)
             }
             if !vm.versionMatrix.isValid(wp: wpVersion, php: php) {
-                Label("This WP × PHP combination may not be published.", systemImage: "exclamationmark.triangle")
+                Label("This WordPress and PHP combination may not exist on Docker Hub.", systemImage: "exclamationmark.triangle")
                     .font(.caption2).foregroundStyle(.orange)
             }
             Picker("Web server", selection: $webServer) {

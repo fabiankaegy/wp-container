@@ -1,12 +1,10 @@
 import SwiftUI
 import WPContainerKit
 
-/// Compact detail pane for a worktree environment (PLAN.md §2b): header with
-/// branch + status + Start/Stop, an action bar (Open / WP Admin / Copy URL /
-/// Finder), an overview card (URL, port, branch, repo, paths, parent), live
-/// logs, and a danger zone whose delete keeps the git branch (optionally the
-/// worktree checkout too).
-struct EnvDetailView: View {
+/// Every setting for one worktree environment: live stats, where it lives
+/// (URL, port, branch, repo, paths, parent), auto-stop, and settle / restore /
+/// delete. Delete keeps the git branch (optionally the worktree checkout too).
+struct EnvInspector: View {
     @Environment(AppViewModel.self) private var vm
     let env: WorktreeEnv
 
@@ -20,35 +18,20 @@ struct EnvDetailView: View {
     private var parent: Site? { vm.store.site(id: env.parentSiteID) }
 
     var body: some View {
-        VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 16) {
-                header
-                actionBar
-            }
-            .padding(.horizontal, 26)
-            .padding(.top, 22)
-            .padding(.bottom, 18)
-
-            Divider().opacity(0.6)
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    overviewCard
-                    DatabaseCard(instance: env, status: env.status)
-                    IdleStopCard(configured: env.idleStopMinutes, isEnv: true, envPort: env.port) { minutes in
-                        vm.setIdleStop(env, minutes: minutes)
-                    }
-                    LogsView(env: env)
-                    dangerZone
+        InspectorStack {
+            header
+            if env.status.isRunning { LiveSection(id: env.id) }
+            overviewCard
+            if !env.isSettled {
+                DatabaseCard(instance: env, status: env.status)
+                IdleStopCard(configured: env.idleStopMinutes, isEnv: true, envPort: env.port) { minutes in
+                    vm.setIdleStop(env, minutes: minutes)
                 }
-                .padding(26)
-                .frame(maxWidth: 860, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            dangerZone
         }
-        // Same pattern as IntegrationsCard: the proxy may have been started or
-        // killed by another process since this view was built, and `vm.proxyPort`
-        // is only refreshed when somebody asks.
+        // The proxy may have been started or killed by another process since
+        // this view was built, and `vm.proxyPort` is only refreshed on request.
         .task(id: env.id) {
             vm.refreshProxyLiveness()
             portOwnership = ProxyControl.envPortOwnership(env.port)
@@ -58,89 +41,27 @@ struct EnvDetailView: View {
     // MARK: Header
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 14) {
-            // Branch glyph avatar — deliberately NOT the site avatar, so envs
-            // read as clones, echoing the sidebar's branch rows.
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Theme.accent.opacity(0.14))
-                .frame(width: 48, height: 48)
-                .overlay {
-                    Image(systemName: "arrow.triangle.branch")
-                        .font(.system(size: 22, weight: .semibold))
-                        .foregroundStyle(Theme.accent)
-                }
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 8) {
-                    Text(env.branch)
-                        .font(.system(.largeTitle, weight: .bold))
-                        .lineLimit(1)
-                    if let parent {
-                        Text("· \(parent.name)")
-                            .font(.title3)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                }
-                StatusPill(status: env.status)
-            }
-            Spacer()
-            startStopButton
-        }
-    }
-
-    @ViewBuilder
-    private var startStopButton: some View {
-        if env.status.isRunning {
-            Button {
-                vm.stopEnv(env)
-            } label: {
-                Label("Stop", systemImage: "stop.fill").frame(minWidth: 68)
-            }
-            .controlSize(.large)
-            .buttonStyle(.bordered)
-            .tint(.red)
-        } else {
-            Button {
-                vm.startEnv(env)
-            } label: {
-                if env.status.isTransitional {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
-                        Text(env.status.label)
-                    }
-                    .frame(minWidth: 68)
-                } else {
-                    Label("Start", systemImage: "play.fill").frame(minWidth: 68)
-                }
-            }
-            .controlSize(.large)
-            .buttonStyle(.borderedProminent)
-            .disabled(env.status.isTransitional)
-        }
-    }
-
-    // MARK: Action bar
-
-    private var actionBar: some View {
-        HStack(spacing: 8) {
-            actionButton("Open", "safari") { SystemActions.openInBrowser(env.url) }
+        InspectorHeader(title: env.branch, monospacedTitle: true) {
+            SectionIcon(systemName: "arrow.triangle.branch", color: .purple, size: 44)
+        } subtitle: {
+            if env.isSettled { SettledPill() } else { StatusPill(status: env.status) }
+            if let parent { Text(parent.name) }
+        } actions: {
+            EnvRunButton(env: env)
+            Button("Open") { SystemActions.openInBrowser(env.url) }
                 .disabled(!env.status.isRunning)
-            actionButton("WP Admin", "person.badge.key") { SystemActions.openInBrowser(env.adminURL) }
+            Button("WP Admin") { SystemActions.openInBrowser(env.adminURL) }
                 .disabled(!env.status.isRunning)
-            actionButton("Copy URL", "link") { SystemActions.copyToClipboard(env.url.absoluteString) }
-            actionButton("Finder", "folder") { SystemActions.revealInFinder(env.envPath) }
-            // Envs open the worktree checkout — that's the branch you edit.
-            OpenInButton(folder: env.worktreePath)
-            Spacer()
+            Spacer(minLength: 0)
+            Menu {
+                EnvMoreMenuItems(env: env)
+            } label: {
+                Image(systemName: "ellipsis")
+            }
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("More")
         }
-    }
-
-    private func actionButton(_ title: String, _ symbol: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: symbol)
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.regular)
     }
 
     // MARK: Overview
@@ -163,7 +84,7 @@ struct EnvDetailView: View {
                 switch portOwnership {
                 case .noProxy:
                     HStack(spacing: 6) {
-                        Text("The reverse proxy serves this URL and isn’t running.")
+                        Text("This URL needs the proxy, which isn’t running.")
                             .font(.caption2).foregroundStyle(.secondary)
                         Button("Start Proxy") {
                             Task {
@@ -174,10 +95,9 @@ struct EnvDetailView: View {
                         .buttonStyle(.link).font(.caption2)
                     }
                 case .conflicted:
-                    Text("The proxy is running but doesn’t own port \(env.port), so this URL "
-                         + "and idle-stop aren’t being served. If this environment was started "
-                         + "by an older build, stop and start it once; otherwise something else "
-                         + "is holding the port.")
+                    Text("The proxy doesn’t hold port \(env.port), so this URL and idle stop "
+                         + "don’t work. Stop and start this environment. If that doesn’t help, "
+                         + "another app is using the port.")
                         .font(.caption2).foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 case .owned, .unknown:
@@ -223,7 +143,7 @@ struct EnvDetailView: View {
                 }
                 if let parent {
                     InfoRow(label: "Parent site") {
-                        Button(parent.name) { vm.selection = parent.id }
+                        Button(parent.name) { vm.openScreen(parent.id) }
                             .buttonStyle(.link)
                     }
                 }
@@ -242,35 +162,28 @@ struct EnvDetailView: View {
     private var dangerZone: some View {
         SectionCard(title: "Danger Zone", systemImage: "exclamationmark.triangle") {
             VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Settle this environment").font(.callout.weight(.medium))
-                        Text("Stops it and frees its port. Its checkout, files and database are kept until you restore it from the site’s Branches card.")
-                            .font(.caption).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Spacer()
+                if env.isSettled {
+                    Text(EnvUsageText.settled(env))
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Restore") { vm.restoreEnv(env) }
+                } else {
+                    Text("Settling stops it and frees its port. Its checkout, files and database are kept, so you can restore it anytime.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     Button("Settle") { vm.settleEnvs([env]) }
-                        .buttonStyle(.bordered)
                 }
                 Divider().opacity(0.5)
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Delete this environment").font(.callout.weight(.medium))
-                        Text("Stops its containers and removes the cloned files. The git branch is always kept.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("Delete Environment…", role: .destructive) { confirmingDelete = true }
-                        .buttonStyle(.bordered)
-                        .tint(.red)
-                }
+                Text("Deleting stops its containers and removes the cloned files. The git branch is always kept.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 Toggle(isOn: $keepWorktree) {
                     Text("Keep the worktree checkout on disk")
                         .font(.caption)
                 }
                 .toggleStyle(.checkbox)
                 .foregroundStyle(.secondary)
+                Button("Delete Environment…", role: .destructive) { confirmingDelete = true }
+                    .tint(.red)
             }
         }
         .confirmationDialog("Delete environment \"\(env.branch)\"?",
@@ -284,5 +197,40 @@ struct EnvDetailView: View {
                  ? "Removes containers and cloned files; the worktree checkout and the branch \(env.branch) are kept."
                  : "Removes containers, cloned files and the worktree checkout. The branch \(env.branch) is kept.")
         }
+    }
+}
+
+/// Start / Stop for an env; a settled env offers Restore instead.
+struct EnvRunButton: View {
+    @Environment(AppViewModel.self) private var vm
+    let env: WorktreeEnv
+
+    var body: some View {
+        if env.isSettled {
+            Button("Restore", systemImage: "arrow.uturn.backward") { vm.restoreEnv(env) }
+                .buttonStyle(.borderedProminent)
+        } else if env.status.isTransitional {
+            Button {} label: {
+                HStack(spacing: 5) { ProgressView().controlSize(.mini); Text(env.status.label) }
+            }
+            .disabled(true)
+        } else if env.status.isRunning {
+            Button("Stop", systemImage: "stop.fill") { vm.stopEnv(env) }
+        } else {
+            Button("Start", systemImage: "play.fill") { vm.startEnv(env) }
+                .buttonStyle(.borderedProminent)
+        }
+    }
+}
+
+/// Secondary env actions for the inspector's ••• menu and context menus.
+struct EnvMoreMenuItems: View {
+    let env: WorktreeEnv
+
+    var body: some View {
+        Button("Copy URL", systemImage: "link") { SystemActions.copyToClipboard(env.url.absoluteString) }
+        Button("Reveal in Finder", systemImage: "folder") { SystemActions.revealInFinder(env.envPath) }
+        // Envs open the worktree checkout — that's the branch you edit.
+        OpenInSubmenu(folder: env.worktreePath)
     }
 }

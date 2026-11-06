@@ -67,7 +67,8 @@ struct WPContainerApp: App {
                     }
                 }
         }
-        .windowStyle(.hiddenTitleBar)
+        // A unified toolbar shows each column's title and actions above it.
+        .windowToolbarStyle(.unified)
         .windowResizability(.contentMinSize)
         .commands { AppCommands(vm: viewModel) }
 
@@ -88,9 +89,10 @@ struct WPContainerApp: App {
         // Menu bar extra (PLAN.md §2h): a compact list of all sites + running
         // envs with inline start/stop. Keeps the app alive when the main window
         // is closed; Dock presence stays normal.
-        // The `server.rack` SF Symbol renders as a template image, so macOS
-        // tints and sizes it like every other status item.
-        MenuBarExtra("WP Container", systemImage: "server.rack") {
+        // Overlapping squares echo the app icon (a site and its branch copies);
+        // as an SF Symbol it renders as a template image, so macOS tints and
+        // sizes it like every other status item.
+        MenuBarExtra("WP Container", systemImage: "square.on.square") {
             MenuBarContent()
                 .environment(viewModel)
         }
@@ -123,6 +125,22 @@ private struct AppCommands: Commands {
             }
             .keyboardShortcut("i", modifiers: [.command, .shift])
         }
+        CommandGroup(after: .sidebar) {
+            Button("Back") { vm.goBack() }
+                .keyboardShortcut("[", modifiers: .command)
+                .disabled(!vm.canGoBack)
+            Button(vm.showsInspector ? "Hide Inspector" : "Show Inspector") { vm.showsInspector.toggle() }
+                .keyboardShortcut("i", modifiers: [.command, .option])
+            Button("Switch Branch…") { vm.presentingBranchPicker = true }
+                .keyboardShortcut("b", modifiers: [.command, .control])
+                .disabled(vm.screen?.tab != .overview || vm.store.envs(forSite: vm.screenSiteID ?? UUID()).isEmpty)
+            Divider()
+            Button("as Gallery") { vm.libraryStyle = .gallery }
+                .keyboardShortcut("1", modifiers: .command)
+            Button("as List") { vm.libraryStyle = .list }
+                .keyboardShortcut("2", modifiers: .command)
+            Divider()
+        }
         CommandMenu("Site") {
             Button("Start") { if let s = vm.selectedSite { vm.startSite(s) } }
                 .keyboardShortcut("r", modifiers: .command)
@@ -137,6 +155,16 @@ private struct AppCommands: Commands {
             Button("Open WP Admin") { if let s = vm.selectedSite { SystemActions.openInBrowser(s.adminURL) } }
                 .disabled(!(vm.selectedSite?.status.isRunning ?? false))
             Button("Reveal in Finder") { if let s = vm.selectedSite { SystemActions.revealInFinder(s.path) } }
+            Divider()
+            if vm.selectedSite?.isArchived == true {
+                Button("Unarchive") { if let s = vm.selectedSite { vm.unarchiveSite(s) } }
+            } else {
+                Button("Archive") { if let s = vm.selectedSite { vm.archiveSite(s) } }
+                    .disabled(vm.selectedSite == nil)
+            }
+            Button("Open Site Screen") { if let id = vm.selection { vm.openScreen(id) } }
+                .keyboardShortcut(.downArrow, modifiers: .command)
+                .disabled(vm.selection == nil || vm.screen?.id == vm.selection)
         }
     }
 }

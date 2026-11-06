@@ -27,4 +27,17 @@ public struct StoreEnvelope: Codable, Sendable {
         // `groups` absent in v1/v2 files.
         self.groups = (try? c.decode([SiteGroup].self, forKey: .groups)) ?? []
     }
+
+    /// Clear `id`'s archive mark and restart the purge window of its settled
+    /// envs: they sat out the archive, so a site archived for longer than the
+    /// window doesn't lose them on the first purge after it comes back.
+    /// Returns false when the site is gone or wasn't archived.
+    public mutating func unarchiveSite(id: UUID, now: Date = Date()) -> Bool {
+        guard let i = sites.firstIndex(where: { $0.id == id }), sites[i].isArchived else { return false }
+        sites[i].archivedAt = nil
+        for j in envs.indices where envs[j].parentSiteID == id && envs[j].isSettled {
+            envs[j].settledAt = now
+        }
+        return true
+    }
 }

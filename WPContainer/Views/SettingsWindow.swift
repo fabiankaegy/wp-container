@@ -6,7 +6,7 @@ import WPContainerKit
 
 /// The app Settings window (⌘,) — PLAN.md §2l. Three panes in a native settings
 /// TabView, each reusing the in-app card/row design language (`SectionCard` +
-/// label/explanation/trailing-control rows). Everything persists via
+/// `SettingRow`). Everything persists via
 /// `@AppStorage`; kit and launch wiring read the same keys through `AppSettings`.
 ///
 /// Scope note: these are APP-wide defaults only. Per-SITE settings (HTTPS, agent
@@ -50,27 +50,6 @@ private struct SettingsPane<Content: View>: View {
     }
 }
 
-/// A label + explanation on the left, a trailing control on the right — the same
-/// shape used throughout the in-app Settings cards (e.g. IntegrationsCard).
-private struct SettingRow<Control: View>: View {
-    let title: String
-    let explanation: String
-    @ViewBuilder var control: () -> Control
-
-    var body: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.callout.weight(.medium))
-                Text(explanation)
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 12)
-            control()
-        }
-    }
-}
-
 // MARK: - General
 
 private struct GeneralSettingsPane: View {
@@ -85,7 +64,7 @@ private struct GeneralSettingsPane: View {
             SectionCard(title: "General", systemImage: "gearshape") {
                 VStack(alignment: .leading, spacing: 14) {
                     SettingRow(title: "Show Dock icon",
-                               explanation: "Turn off to run WP Container as a menu-bar-first app: the Dock icon is hidden and the app stays available from the menu bar extra.") {
+                               detail: Text("When off, WP Container lives only in the menu bar.")) {
                         Toggle("", isOn: $showDockIcon)
                             .labelsHidden().toggleStyle(.switch)
                     }
@@ -99,7 +78,7 @@ private struct GeneralSettingsPane: View {
                     Divider().opacity(0.5)
 
                     SettingRow(title: "Launch at login",
-                               explanation: "Start WP Container automatically when you log in, so your sites and the HTTPS proxy are ready.") {
+                               detail: Text("Opens WP Container when you log in, so the proxy is ready.")) {
                         Toggle("", isOn: $launchAtLogin)
                             .labelsHidden().toggleStyle(.switch)
                     }
@@ -116,8 +95,8 @@ private struct GeneralSettingsPane: View {
 
             SectionCard(title: "Notifications", systemImage: "bell.badge") {
                 VStack(alignment: .leading, spacing: 12) {
-                    SettingRow(title: "Notifications",
-                               explanation: "Notify me when a site or environment starts or stops while WP Container is in the background, a new site or branch environment is ready, WordPress core finishes updating, or the HTTPS proxy can’t start.") {
+                    SettingRow(title: "Show notifications",
+                               detail: Text("When a site or environment is ready, starts or stops in the background, or something fails.")) {
                         Toggle("", isOn: $notificationsEnabled)
                             .labelsHidden().toggleStyle(.switch)
                     }
@@ -139,11 +118,11 @@ private struct GeneralSettingsPane: View {
     @ViewBuilder private var authorizationNote: some View {
         switch authStatus {
         case .authorized, .provisional, .ephemeral:
-            Label("Allowed in macOS System Settings.", systemImage: "checkmark.seal.fill")
+            Label("Allowed in System Settings.", systemImage: "checkmark.seal.fill")
                 .font(.caption).foregroundStyle(.green)
         case .denied:
             HStack(alignment: .top, spacing: 8) {
-                Label("Turned off in System Settings — WP Container can’t show notifications until you allow them there.",
+                Label("Notifications are turned off for WP Container in System Settings.",
                       systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(.orange)
                 Spacer(minLength: 8)
@@ -152,10 +131,10 @@ private struct GeneralSettingsPane: View {
             }
         case .notDetermined:
             HStack(alignment: .top, spacing: 8) {
-                Text("WP Container will ask for permission the first time it needs to notify you.")
+                Text("macOS asks for permission the first time WP Container notifies you.")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer(minLength: 8)
-                Button("Request…") {
+                Button("Allow…") {
                     Task {
                         _ = await NotificationService.shared.requestAuthorization()
                         authStatus = await NotificationService.shared.authorizationStatus()
@@ -183,7 +162,7 @@ private struct GeneralSettingsPane: View {
                 try SMAppService.mainApp.unregister()
             }
         } catch {
-            loginError = "Could not \(enabled ? "enable" : "disable") launch at login: \(error.localizedDescription)"
+            loginError = "Couldn’t \(enabled ? "turn on" : "turn off") launch at login: \(error.localizedDescription)"
             // Reflect the true state back into the toggle.
             launchAtLogin = SMAppService.mainApp.status == .enabled
         }
@@ -192,7 +171,6 @@ private struct GeneralSettingsPane: View {
 
 // MARK: - Custom domains (Touch ID hosts helper, §2f-bis)
 
-/// Registration UI for the privileged `wpc-hosts-helper`. When enabled, custom
 /// Install the bundled `wp-container` command-line tool (+ `wpc` alias) into
 /// `/usr/local/bin` with one admin prompt. It's symlinked to the app's embedded
 /// binary, so it tracks app updates automatically.
@@ -205,7 +183,7 @@ private struct CLIToolsSettingsSection: View {
         SectionCard(title: "Command-Line Tools", systemImage: "terminal") {
             VStack(alignment: .leading, spacing: 10) {
                 SettingRow(title: "wp-container CLI",
-                           explanation: "Install the `wp-container` command (and its `wpc` alias) into /usr/local/bin so you can script sites and branch environments from Terminal — and drive the app from AI agents over MCP. It's symlinked to this app, so it stays in sync with updates.") {
+                           detail: Text("Adds `wp-container` and its `wpc` alias to /usr/local/bin, for scripts, Terminal and AI agents over MCP. Updates with the app.")) {
                     control
                 }
                 statusLabel
@@ -244,12 +222,12 @@ private struct CLIToolsSettingsSection: View {
             Label("Installed at \(CLIToolInstaller.cliPath).", systemImage: "checkmark.seal.fill")
                 .font(.caption).foregroundStyle(.green)
         case .outdated:
-            Label("An older or external wp-container is on your PATH — update it to point at this app.",
+            Label("Another wp-container is on your PATH. Update it to use this app’s version.",
                   systemImage: "arrow.triangle.2.circlepath")
                 .font(.caption).foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
         case .notInstalled:
-            Text("Not installed. Installing needs your administrator password once.")
+            Text("Not installed. Installing asks for your admin password once.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -270,6 +248,7 @@ private struct CLIToolsSettingsSection: View {
     }
 }
 
+/// Registration UI for the privileged `wpc-hosts-helper`. When enabled, custom
 /// domain changes rewrite `/etc/hosts` behind the Touch ID-capable system
 /// authorization dialog instead of the osascript password prompt. Registration
 /// needs a one-time user approval in System Settings > Login Items — reaching
@@ -284,7 +263,7 @@ private struct HostsHelperSettingsSection: View {
                 if HostsHelperClient.isSupportedBuild {
                     content
                 } else {
-                    Label("The Touch ID helper is available in the signed release build. This build uses the one-time admin-password prompt for /etc/hosts.",
+                    Label("The Touch ID helper needs the signed release build. This build asks for your admin password instead.",
                           systemImage: "info.circle")
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -303,24 +282,24 @@ private struct HostsHelperSettingsSection: View {
         switch status {
         case .enabled:
             HStack(alignment: .top, spacing: 8) {
-                Label("Enabled — custom domain changes use Touch ID (no password).",
+                Label("On. Custom domain changes use Touch ID.",
                       systemImage: "checkmark.seal.fill")
                     .font(.callout).foregroundStyle(.green)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
-                Button("Disable") { setEnabled(false) }
+                Button("Turn Off") { setEnabled(false) }
                     .controlSize(.small)
             }
         case .requiresApproval:
             statusRow(
-                text: "Almost done — approve “WP Container” in System Settings › General › Login Items › Allow in the Background, then reopen this window.",
+                text: "Allow “WP Container” to run in the background in Login Items, then reopen Settings.",
                 systemImage: "exclamationmark.circle.fill", tint: .orange,
                 button: "Open Login Items…") { openLoginItems() }
         default:
             statusRow(
-                text: "Enable the privileged helper to update /etc/hosts with Touch ID. One-time setup — you'll approve it once in System Settings.",
+                text: "Confirm custom domain changes with Touch ID instead of your admin password. You approve the helper once in System Settings.",
                 systemImage: "touchid", tint: .secondary,
-                button: "Enable Helper…") { setEnabled(true) }
+                button: "Turn On…") { setEnabled(true) }
         }
     }
 
@@ -347,7 +326,7 @@ private struct HostsHelperSettingsSection: View {
                 try HostsHelperClient.unregister()
             }
         } catch {
-            self.error = "Could not \(enabled ? "enable" : "disable") the helper: \(error.localizedDescription)"
+            self.error = "Couldn’t \(enabled ? "turn on" : "turn off") the helper: \(error.localizedDescription)"
         }
         status = HostsHelperClient.status
         // Registration typically lands in .requiresApproval — send the user
@@ -392,7 +371,7 @@ private struct SitesSettingsPane: View {
                 VStack(alignment: .leading, spacing: 14) {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Default sites folder").font(.callout.weight(.medium))
-                        Text("Where the Add Site guide puts new sites unless you pick another location.")
+                        Text("Where new sites go unless you choose another location.")
                             .font(.caption).foregroundStyle(.secondary)
                         HStack {
                             Text(effectiveRoot.path(percentEncoded: false))
@@ -410,8 +389,7 @@ private struct SitesSettingsPane: View {
 
                     Divider().opacity(0.5)
 
-                    SettingRow(title: "WordPress version",
-                               explanation: "Prefilled in the Add Site guide's version step.") {
+                    SettingRow(title: "WordPress version") {
                         Picker("", selection: $defaultWordPress) {
                             ForEach(vm.versionMatrix.wordPressVersions, id: \.self) { v in
                                 Text(v == "latest" ? "Latest" : v).tag(v)
@@ -420,8 +398,7 @@ private struct SitesSettingsPane: View {
                         .labelsHidden().fixedSize()
                     }
 
-                    SettingRow(title: "PHP version",
-                               explanation: "Prefilled in the Add Site guide's version step.") {
+                    SettingRow(title: "PHP version") {
                         Picker("", selection: $defaultPHP) {
                             ForEach(vm.versionMatrix.phpVersions(for: defaultWordPress), id: \.self) { v in Text(v).tag(v) }
                         }
@@ -430,8 +407,8 @@ private struct SitesSettingsPane: View {
 
                     Divider().opacity(0.5)
 
-                    SettingRow(title: "\u{201C}Open In\u{201D} folder",
-                               explanation: "Which folder the Open In button and menus hand to external editors.") {
+                    SettingRow(title: "Open In folder",
+                               detail: Text("The folder Open In opens in your editor.")) {
                         Picker("", selection: $openInTarget) {
                             ForEach(OpenInTarget.allCases) { t in Text(t.label).tag(t.rawValue) }
                         }
@@ -439,7 +416,7 @@ private struct SitesSettingsPane: View {
                     }
 
                     SettingRow(title: "Terminal app",
-                               explanation: "Which app the Terminal buttons and menus open. Ghostty 1.3+ and iTerm2 appear here when installed.") {
+                               detail: Text("Used by Open in Terminal. Lists Ghostty 1.3+ and iTerm2 when installed.")) {
                         Picker("", selection: $terminalApp) {
                             ForEach(TerminalApps.installed()) { app in Text(app.name).tag(app.rawValue) }
                         }
@@ -448,25 +425,25 @@ private struct SitesSettingsPane: View {
 
                     Divider().opacity(0.5)
 
-                    SettingRow(title: "Enable HTTPS",
-                               explanation: "New sites serve over https://<slug>.localhost through the local proxy, with the certificate trusted automatically.") {
+                    SettingRow(title: "Use HTTPS",
+                               detail: Text("Serves new sites at https://<slug>.localhost.")) {
                         Toggle("", isOn: $defaultHTTPS).labelsHidden().toggleStyle(.switch)
                     }
                     SettingRow(title: "WP_DEBUG",
-                               explanation: "Turn on WordPress debug mode in new sites' wp-config.php.") {
+                               detail: Text("Turns on WordPress debug mode.")) {
                         Toggle("", isOn: $defaultWPDebug).labelsHidden().toggleStyle(.switch)
                     }
                     SettingRow(title: "SCRIPT_DEBUG",
-                               explanation: "Load unminified core CSS/JS in new sites' wp-config.php.") {
+                               detail: Text("Loads unminified core CSS and JavaScript.")) {
                         Toggle("", isOn: $defaultScriptDebug).labelsHidden().toggleStyle(.switch)
                     }
-                    SettingRow(title: "Global wp router",
-                               explanation: "When you create a site, install the global wp router (once) so plain `wp` inside any site folder runs containerized wp-cli. Adds a PATH line to ~/.zshrc; remove it anytime from a site's Integrations settings.") {
+                    SettingRow(title: "Global `wp` command",
+                               detail: Text("Run plain `wp` inside any site folder. Adds a line to ~/.zshrc.")) {
                         Toggle("", isOn: $defaultGlobalWPRouter).labelsHidden().toggleStyle(.switch)
                     }
 
                     if !vm.versionMatrix.isValid(wp: defaultWordPress, php: defaultPHP) {
-                        Label("This WordPress × PHP combination may not be published on Docker Hub.",
+                        Label("This WordPress and PHP combination may not exist on Docker Hub.",
                               systemImage: "exclamationmark.triangle")
                             .font(.caption).foregroundStyle(.orange)
                     }
@@ -476,11 +453,10 @@ private struct SitesSettingsPane: View {
             SectionCard(title: "Branch Environments", systemImage: "arrow.triangle.branch") {
                 VStack(alignment: .leading, spacing: 12) {
                     SettingRow(title: "Delete settled environments",
-                               explanation: "Settling stops an environment and frees its port but keeps its data. Settled environments are deleted after this long. A worktree checkout with uncommitted changes stays on disk, and branches are never deleted.") {
+                               detail: Text("Deletes environments that stay settled past the time below. Branches, and checkouts with uncommitted changes, are kept.")) {
                         Toggle("", isOn: $autoPurgeSettledEnvs).labelsHidden().toggleStyle(.switch)
                     }
-                    SettingRow(title: "Delete after",
-                               explanation: "How long an environment stays settled before it's deleted.") {
+                    SettingRow(title: "Delete after") {
                         Picker("", selection: $purgeSettledAfterDays) {
                             ForEach(EnvSettlement.purgeAfterDayChoices, id: \.self) { Text("\($0) days").tag($0) }
                         }
@@ -508,8 +484,8 @@ private struct ProxySettingsPane: View {
         SettingsPane {
             SectionCard(title: "HTTPS Proxy", systemImage: "lock.shield") {
                 VStack(alignment: .leading, spacing: 14) {
-                    SettingRow(title: "Start HTTPS proxy at launch",
-                               explanation: "Start the local HTTPS reverse proxy when WP Container opens, so https://<site>.localhost and custom domains work right away. Turning it off has little effect in practice: the proxy also starts whenever anything needs it — including any branch environment, whose http://127.0.0.1:<port> URL the proxy serves directly (its container publishes no port of its own), so it auto-starts as soon as one environment exists.") {
+                    SettingRow(title: "Start proxy at launch",
+                               detail: Text("Serves HTTPS sites and custom domains as soon as WP Container opens. The proxy also starts on its own whenever a site or branch environment needs it.")) {
                         Toggle("", isOn: $autoStartProxy)
                             .labelsHidden().toggleStyle(.switch)
                     }
@@ -523,15 +499,15 @@ private struct ProxySettingsPane: View {
                         Image(systemName: vm.proxyPort != nil ? "checkmark.seal.fill" : "pause.circle")
                             .foregroundStyle(vm.proxyPort != nil ? .green : .secondary)
                         if let port = vm.proxyPort {
-                            Text("Proxy running on port \(String(port)).")
+                            Text("Running on port \(String(port)).")
                                 .font(.caption).foregroundStyle(.secondary)
                         } else {
-                            Text("Proxy not running. Branch-environment URLs don’t answer without it, and it starts on demand when a site enables HTTPS.")
+                            Text("Not running. HTTPS sites and branch environments don’t load without it.")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
                         if vm.proxyPort == nil {
-                            Button("Start now") { Task { await vm.ensureProxyRunning() } }
+                            Button("Start Proxy") { Task { await vm.ensureProxyRunning() } }
                                 .controlSize(.small)
                         }
                     }
