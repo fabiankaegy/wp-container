@@ -72,9 +72,9 @@ struct ImportDatabaseSheet: View {
         var caption: String? {
             switch self {
             case .remote:
-                return "Missing images are proxied live from the source site's URL via a small mu-plugin — needs a known source URL."
+                return "Loads missing images from the source site. Needs the source URL."
             case .copy:
-                return "Copies a local uploads folder's contents into wp-content/uploads."
+                return "Copies a local uploads folder into wp-content/uploads."
             case .skip:
                 return nil
             }
@@ -212,7 +212,7 @@ struct ImportDatabaseSheet: View {
     private var scrubSection: some View {
         Section("Privacy") {
             Toggle("Scrub sensitive data", isOn: $scrub).disabled(phase == .working)
-            Text("Randomizes user emails, names and passwords; empties comments — inspired by wp-scrubber.")
+            Text("Replaces user emails, names and passwords with random values, and deletes comments.")
                 .font(.caption).foregroundStyle(.secondary)
             if scrub {
                 DisclosureGroup("Keep these emails/domains", isExpanded: $allowlistExpanded) {
@@ -260,7 +260,7 @@ struct ImportDatabaseSheet: View {
             TextField("Source URL", text: $sourceURLOverride, prompt: Text("Auto-detect from dump"))
                 .textFieldStyle(.roundedBorder)
                 .disabled(phase == .working)
-            Text("Used to rewrite URLs in the dump and, with \"Load from original site\" media, to fetch missing images.")
+            Text("Used to rewrite URLs and, with “Load from original site”, to fetch missing images.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
@@ -284,8 +284,8 @@ struct ImportDatabaseSheet: View {
                 }
                 if let errorRolledBack {
                     Text(errorRolledBack
-                         ? "The pre-import database was restored — the site is back to how it was before the import."
-                         : "Rollback ALSO failed — the database may be left mid-import. The pre-import backup is still on disk in .backups/.")
+                         ? "The previous database was restored, so the site is as it was before."
+                         : "Restoring the previous database also failed, so it may be incomplete. The backup is in the site’s .backups folder.")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
                 if let errorDetail, errorDetail != errorShort {
@@ -462,7 +462,7 @@ struct ImportDatabaseSheet: View {
             summary = result
             phase = .done
         } else {
-            errorShort = vm.lastError ?? "Could not import the database."
+            errorShort = vm.lastError ?? "Couldn’t import the database."
             errorDetail = vm.lastErrorDetail
             errorRolledBack = vm.lastImportRolledBack
             phase = .failed

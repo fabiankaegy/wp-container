@@ -110,8 +110,15 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     /// live.
     public var mounts: [Mount] = []
 
+    /// When the site was archived: stopped, its branch environments settled,
+    /// hidden from the default library and left out of the proxy's routes, with
+    /// every file and database kept. nil while active.
+    public var archivedAt: Date?
+
     /// Runtime-derived; NOT persisted.
     public var status: SiteStatus = .stopped
+
+    public var isArchived: Bool { archivedAt != nil }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, slug, path, port, imageTag, phpVersion, webServer, createdAt, provisioned, groupID, httpsEnabled
@@ -123,6 +130,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         case redisEnabled
         case lastImportSourceURL
         case pendingSchemaDrops
+        case archivedAt
         case mounts
         case share
     }
@@ -157,6 +165,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         agentToolsDoc: String? = nil,
         lastImportSourceURL: String? = nil,
         pendingSchemaDrops: [String] = [],
+        archivedAt: Date? = nil,
         mounts: [Mount] = [],
         share: ShareSettings? = nil,
         status: SiteStatus = .stopped
@@ -190,6 +199,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.agentToolsDoc = agentToolsDoc
         self.lastImportSourceURL = lastImportSourceURL
         self.pendingSchemaDrops = pendingSchemaDrops
+        self.archivedAt = archivedAt
         self.mounts = mounts
         self.share = share
         self.status = status
@@ -244,6 +254,8 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         // store can't widen the blast radius because every drop re-checks.
         self.pendingSchemaDrops = ((try? c.decodeIfPresent([String].self, forKey: .pendingSchemaDrops)) ?? [])
             ?? []
+        // Absent in stores written before archiving existed: an active site.
+        self.archivedAt = try? c.decodeIfPresent(Date.self, forKey: .archivedAt)
         // Absent in stores written before `create --wp-env`.
         self.mounts = ((try? c.decodeIfPresent([Mount].self, forKey: .mounts)) ?? []) ?? []
         // Absent in stores written before site sharing.

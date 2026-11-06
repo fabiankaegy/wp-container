@@ -7,7 +7,9 @@ import WPContainerKit
 /// (PLAN.md §2l). Runs entirely off the main actor and is bounded on every
 /// axis:
 ///
-/// - Locating the file is delegated to the pure `FaviconLocator`.
+/// - The site's real WordPress Site Icon wins when `SiteIcons` has resolved
+///   one (`setPreferred`); otherwise locating the file is delegated to the
+///   pure `FaviconLocator` heuristics.
 /// - Decoding uses ImageIO thumbnail generation capped at `maxPixel`, so a
 ///   huge or malformed source never blows up memory.
 /// - Results are cached per `wordpress/` folder and invalidated by the located
@@ -25,12 +27,20 @@ actor FaviconImageCache {
     }
 
     private var cache: [String: Entry] = [:]
+    /// The Site Icon file per `wordpress/` folder path, from the site's database.
+    private var preferred: [String: URL] = [:]
+
+    /// Records (or clears) the Site Icon file for a site's `wordpress/` folder.
+    func setPreferred(_ file: URL?, wordpressFolder: URL) {
+        preferred[wordpressFolder.path] = file
+    }
     private let maxPixel: CGFloat = 128
 
     /// Resolve the favicon PNG data for a site's `wordpress/` folder, or nil.
     func faviconPNG(wordpressFolder: URL) -> Data? {
         let key = wordpressFolder.path
-        let located = FaviconLocator.locate(in: wordpressFolder)
+        let known = preferred[key].flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+        let located = known ?? FaviconLocator.locate(in: wordpressFolder)
         let mtime = located.flatMap {
             (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
         }

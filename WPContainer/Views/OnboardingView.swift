@@ -44,7 +44,7 @@ struct OnboardingView: View {
 
     private var explanation: String {
         if status.binaryInstalled {
-            return "The Apple container CLI is installed, but its background service isn't running. WP Container needs it to create and run sites."
+            return "The Apple container CLI is installed, but its service isn’t running. Start it to create and run sites."
         }
         return "WP Container runs each WordPress site in an Apple container. Install the `container` CLI from Apple, then reopen this app."
     }
@@ -65,7 +65,7 @@ struct OnboardingView: View {
             .controlSize(.large)
             .disabled(starting)
 
-            Button("Re-check") { Task { await vm.refreshSystemStatus() } }
+            Button("Check Again") { Task { await vm.refreshSystemStatus() } }
                 .buttonStyle(.link)
                 .disabled(starting)
         } else {
@@ -76,7 +76,7 @@ struct OnboardingView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
 
-            Button("Re-check") { Task { await vm.refreshSystemStatus() } }
+            Button("Check Again") { Task { await vm.refreshSystemStatus() } }
                 .buttonStyle(.link)
         }
     }

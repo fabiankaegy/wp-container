@@ -45,55 +45,44 @@ struct IdleStopCard: View {
     /// judge it idle (see `HTTPSProxy.sweepIdleInstances`).
     private var enforcementProblem: String? {
         guard let envPort else {
-            return proxyRunning ? nil
-                : "The reverse proxy isn’t running, so nothing is enforcing this yet."
+            return proxyRunning ? nil : Self.noProxy
         }
         switch ProxyControl.envPortOwnership(envPort) {
         case .noProxy:
-            return "The reverse proxy isn’t running, so nothing is enforcing this yet."
+            return Self.noProxy
         case .conflicted:
-            return "The proxy doesn’t own port \(envPort), so it can’t see this environment’s "
-                + "traffic and won’t stop it. Stop and start the environment once."
+            return "Not active: the proxy doesn’t hold port \(envPort). Stop and start this environment."
         case .owned, .unknown:
             return nil
         }
     }
 
+    private static let noProxy = "Not active: the proxy isn’t running."
+
     var body: some View {
         SectionCard(title: "Idle stop", systemImage: "moon.zzz") {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Stop when unused").font(.callout.weight(.medium))
-                        Text(detailText)
-                            .font(.caption).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+            SettingRow(title: "Stop after", detail: Text(detailText)) {
+                Picker("", selection: selection) {
+                    Text(defaultLabel).tag(Int?.none)
+                    Text("Never").tag(Int?.some(0))
+                    // `selectableMinutes` leads with the recommended value.
+                    ForEach(IdlePolicy.selectableMinutes, id: \.self) { minutes in
+                        Text(minutes == IdlePolicy.recommendedMinutes
+                             ? "\(IdlePolicy.formatMinutes(minutes)) (recommended)"
+                             : IdlePolicy.formatMinutes(minutes))
+                            .tag(Int?.some(minutes))
                     }
-                    Spacer()
-                    Picker("", selection: selection) {
-                        Text(defaultLabel).tag(Int?.none)
-                        Text("Never").tag(Int?.some(0))
-                        // `selectableMinutes` leads with the recommended value.
-                        ForEach(IdlePolicy.selectableMinutes, id: \.self) { minutes in
-                            Text(minutes == IdlePolicy.recommendedMinutes
-                                 ? "\(IdlePolicy.formatMinutes(minutes)) (recommended)"
-                                 : IdlePolicy.formatMinutes(minutes))
-                                .tag(Int?.some(minutes))
-                        }
-                    }
-                    .labelsHidden().fixedSize()
                 }
-
-                if effective > 0 {
-                    Text(IdlePolicy.activityNote(isEnv: isEnv))
-                        .font(.caption2).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                .labelsHidden().fixedSize()
+            } footer: {
                 if effective > 0, let notEnforced = enforcementProblem {
                     Text(notEnforced)
-                        .font(.caption2).foregroundStyle(.tertiary)
+                        .font(.caption2).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 3)
                 }
             }
+            .help(helpText)
         }
     }
 
@@ -102,10 +91,30 @@ struct IdleStopCard: View {
         return fallback == 0 ? "Default (never)" : "Default (\(IdlePolicy.formatMinutes(fallback)))"
     }
 
+    /// One line on what the current choice does. Sites add the one thing that
+    /// would otherwise look like a bug: visits to `127.0.0.1:<port>` bypass the
+    /// proxy, so they don't count as use (see `IdlePolicy.activityNote`).
     private var detailText: String {
-        if isEnv {
-            return "On by default (\(IdlePolicy.formatMinutes(IdlePolicy.defaultEnvMinutes))). While on that default, a freshly created environment is never stopped for its first \(IdlePolicy.formatMinutes(IdlePolicy.envCreationGraceMinutes)) regardless of use — pick an explicit value below to opt out of that grace period too. After it applies, one nobody is using gives its ~500 MB back, and the next request to its URL starts it again in about a second behind a page that refreshes into the site."
+        guard effective > 0 else {
+            return "Runs until you stop it."
         }
-        return "Off by default — you’re usually working in a site. When on, it is never stopped while any of its environments are running, and opening its proxied URL starts it again."
+        let after = IdlePolicy.formatMinutes(effective)
+        if isEnv {
+            return "Stops after \(after) without visits, freeing about 500 MB. The next visit starts it again."
+        }
+        return "Stops after \(after) without visits to its .localhost or custom domain. The next visit starts it again."
+    }
+
+    /// The nuance that doesn't need to be on screen: what counts as a visit, and
+    /// the grace period new environments get while on the default.
+    private var helpText: String {
+        if isEnv {
+            let grace = configured == nil
+                ? " While on the default, a new environment isn’t stopped during its first "
+                    + "\(IdlePolicy.formatMinutes(IdlePolicy.envCreationGraceMinutes)); pick a time to skip that."
+                : ""
+            return "Browser requests, wp-cli, MCP and magic-login all count as visits." + grace
+        }
+        return "Requests to http://127.0.0.1:<port> don’t count, and a site is never stopped while one of its branch environments runs."
     }
 }

@@ -33,11 +33,11 @@ Sites are provisioned automatically (no install wizard) and log in with
 `admin` / `password`.
 
 <p align="center">
-  <img src="docs/assets/screenshot-main.png" alt="WP Container — site overview with branch environments" width="850">
+  <img src="docs/assets/screenshot-main.png" alt="WP Container: a gallery of sites with homepage snapshots, running branch environments in the sidebar, and the inspector for the selected site" width="850">
 </p>
 
 <p align="center">
-  <img src="docs/assets/screenshot-settings.png" alt="Settings — trusted HTTPS, AI agent tools, Xdebug, Elasticsearch, and WP_DEBUG controls" width="850">
+  <img src="docs/assets/screenshot-site.png" alt="A site screen: running branch environments, live CPU, memory and network, the add-on stack, and logs" width="850">
 </p>
 
 <p align="center">
@@ -76,19 +76,21 @@ Sites are provisioned automatically (no install wizard) and log in with
 - **Ephemeral containers, durable sites** — containers are disposable (`--rm`);
   all state lives in the site folder. Sites survive app restarts and reconcile
   against real container state via labels.
-- **Studio-style dark-frame UI** — dark window shell with a light inset content
-  panel, Overview / Logs / Settings tabs, collapsible **site groups** with
-  drag & drop, and a **menu bar extra** for one-glance status and start/stop of
-  every site. Sites with a favicon or WordPress Site Icon show it as their
-  avatar; sidebar rows get right-click quick actions and a clickable
-  start/stop status dot.
+- **Native macOS window** — a library sidebar, your sites as a **gallery** of
+  homepage snapshots or a sortable, configurable **list**, and an **inspector**
+  (⌥⌘I) with every setting for the selection. Each site gets a screen with its
+  branch environments, live CPU / memory / network, the add-on stack and logs,
+  plus a **Branches** table with filters and bulk actions for sites with dozens
+  of environments. **Site groups** with drag & drop, **archived** sites, each
+  site's WordPress Site Icon as its avatar, and a **menu bar extra** for
+  one-glance status and start/stop of every site.
 - **Menu-bar-first option** — app settings (⌘,) cover hiding the Dock icon,
   launch at login, default sites folder and WP×PHP versions, HTTPS-proxy
   autostart, and notifications. Native macOS notifications fire for background
   start/stops, site creation, branch environments coming up (click to open),
   core updates, and proxy failures.
 
-- **Xdebug & Elasticsearch** — per-site one-click toggles in Settings → Development.
+- **Xdebug & Elasticsearch** — per-site one-click toggles in the inspector's Development card.
   Xdebug builds a derived image once per base tag and points `client_host` at the
   host gateway (port 9003); Elasticsearch runs a single-node sidecar wired into
   WordPress (ElasticPress-ready). Recipes validated in `scripts/validate-addons.sh`.
@@ -106,9 +108,9 @@ Sites are provisioned automatically (no install wizard) and log in with
   flagged and synced the same way.
 - **WP × PHP versions** — the new-site flow is a 3-step guide (name → WordPress ×
   PHP version with a live image-tag preview → options); change PHP later (image
-  swap + restart) or update core from Settings → Software.
+  swap + restart) or update core from the inspector's Software card.
 - **Apache or nginx** — pick the web server when creating a site, or switch it
-  later from Settings → Software (`wp-container web-server nginx <site>`).
+  later from the inspector's Software card (`wp-container web-server nginx <site>`).
   nginx sites run nginx + PHP-FPM in one container, built once per version from
   the official `wordpress:<version>-fpm` image; files and database are untouched
   by a switch. Extra nginx rules go in the site's `nginx/` folder (next to
@@ -165,7 +167,7 @@ Sites are provisioned automatically (no install wizard) and log in with
   when the site is created.
 - **Dev-ready by default** — every site gets `WP_DEVELOPMENT_MODE=all` /
   `WP_ENVIRONMENT_TYPE=local`, with live `WP_DEBUG`-family switches in
-  Settings → Development.
+  the inspector's Development card.
 - **Mailpit email catching** — per-site toggle; all outgoing mail lands in a
   local mailbox (`https://<site>-mail.localhost`, plus a REST API agents can
   read). Persistent across restarts.
@@ -173,7 +175,7 @@ Sites are provisioned automatically (no install wizard) and log in with
   Redis container and defines `WP_REDIS_HOST`/`WP_REDIS_PORT` for an object-cache
   drop-in such as the Redis Object Cache plugin, which you install in the site.
 - **Per-site resource limits** — cap CPU/memory per site in
-  Settings → Resources or `wp-container limits <slug> --cpus 2 --memory 512`
+  the inspector's Resources card or `wp-container limits <slug> --cpus 2 --memory 512`
   (see [docs/RESOURCES.md](docs/RESOURCES.md)).
 - **Auto-stop idle, wake on request** — a branch environment nobody has used for
   3 hours is stopped and its ~500 MB returned to macOS; the next request to its
@@ -302,8 +304,8 @@ site.
 - A site is never auto-stopped while any of its environments are running, and
   stopping an environment also retires the parent's shared MariaDB container once
   nothing else needs it — that's the other ~470 MB.
-- Configure per instance: the **Idle stop** card on a site's Settings tab or an
-  environment's detail pane,
+- Configure per instance: the **Idle stop** card in the inspector for a site or an
+  environment,
   `wp-container idle <slug> [--minutes N | --off | --default]`, or the
   `set_idle_stop` MCP tool so an agent can opt its own environment out while it's
   mid-task and back in when it's done.
