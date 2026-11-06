@@ -98,8 +98,9 @@ struct MainWindow: View {
     }
 
     #if DEBUG
-    /// Debug-only: `-uiScreen <slug> [-uiTab branches] [-uiStyle list] [-uiLibrary branches|archived]` opens a
-    /// screen at launch, so layout can be checked from screenshots alone.
+    /// Debug-only: `-uiScreen <slug> [-uiTab branches] [-uiStyle list] [-uiLibrary branches|archived]
+    /// [-uiSelect <slug>]` opens a screen (or selects a site for the inspector) at launch, so layout
+    /// can be checked and README screenshots retaken without clicking.
     private func openLaunchScreen() {
         let defaults = UserDefaults.standard
         if let style = defaults.string(forKey: "uiStyle").flatMap(LibraryStyle.init(rawValue:)) { vm.libraryStyle = style }
@@ -107,6 +108,9 @@ struct MainWindow: View {
         case "branches": vm.showLibrary(.branches)
         case "archived": vm.showLibrary(.archived)
         default: break
+        }
+        if let slug = defaults.string(forKey: "uiSelect") {
+            vm.selection = vm.sites.first { $0.slug == slug }?.id ?? vm.envs.first { $0.envSlug == slug }?.id
         }
         guard let slug = defaults.string(forKey: "uiScreen") else { return }
         let id = vm.sites.first { $0.slug == slug }?.id ?? vm.envs.first { $0.envSlug == slug }?.id
