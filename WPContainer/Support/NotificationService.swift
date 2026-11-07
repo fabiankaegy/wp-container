@@ -113,6 +113,11 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
         post(title: "HTTPS proxy didn’t start", body: reason, url: nil, faviconFolder: nil)
     }
 
+    /// A live share went down while its instance kept running.
+    func notifyShareDown(name: String, error: String) {
+        post(title: "Sharing stopped for \(name)", body: error, url: nil, faviconFolder: nil)
+    }
+
     // MARK: - Delivery
 
     private func post(title: String, body: String, url: URL?, faviconFolder: URL?) {

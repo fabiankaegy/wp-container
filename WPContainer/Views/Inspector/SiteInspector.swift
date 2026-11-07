@@ -24,6 +24,7 @@ struct SiteInspector: View {
             IdleStopCard(configured: site.idleStopMinutes, isEnv: false) { minutes in
                 vm.setIdleStop(site, minutes: minutes)
             }
+            ShareCard(instanceID: site.id, share: site.share, networkType: site.networkType)
             IntegrationsCard(site: site)
             SiteDangerZone(site: site)
         }

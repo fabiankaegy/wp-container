@@ -45,6 +45,9 @@ enum MCPToolDispatch {
             case "site_export":       return try await siteExport(args, ctx: ctx, slug: scopedSlug)
             case "site_import":       return try await siteImport(args, ctx: ctx)
             case "set_idle_stop":     return try await setIdleStop(args, ctx: ctx, slug: scopedSlug)
+            case "share_start":       return try await shareStart(args, ctx: ctx, slug: scopedSlug)
+            case "share_stop":        return try await shareStop(args, ctx: ctx, slug: scopedSlug)
+            case "share_status":      return try await shareStatus(args, ctx: ctx)
             default:
                 return MCPResult.failure("Unknown tool: \(params.name)")
             }
@@ -112,6 +115,92 @@ enum MCPToolDispatch {
             "enforced": ProxyControl.current() != nil,
             "note": IdlePolicy.activityNote(isEnv: isEnv),
         ])
+    }
+
+    // MARK: - Sharing
+
+    /// Starts a public share. Only provider, hostname and a password reset can be
+    /// requested, or the saved provider cleared; the password gate and its exceptions
+    /// stay under human control.
+    private static func shareStart(_ args: [String: Value], ctx: CLIContext, slug: String) async throws -> CallTool.Result {
+        let target = args["slug"]?.stringValue ?? slug
+        let envelope = try await ctx.load()
+        guard let resolved = resolveTarget(target, in: envelope) else {
+            throw ToolError("not_found", "No site or environment with slug \(target).")
+        }
+        let instanceID = resolved.instance.instanceID
+
+        var hostnameChange: String?? = nil
+        if let hostname = args["hostname"]?.stringValue {
+            hostnameChange = .some(hostname)
+        }
+        let clearProvider = args["clear_provider"]?.boolValue ?? false
+        if clearProvider && args["provider"]?.stringValue != nil {
+            throw ToolError("bad_args", "provider and clear_provider cannot be combined.")
+        }
+        let request = ShareRequest(provider: args["provider"]?.stringValue, clearProvider: clearProvider,
+                                   hostname: hostnameChange, addAllow: [], clearAllow: false,
+                                   resetPassword: args["reset_password"]?.boolValue ?? false, noAuth: false)
+        let control = ShareControl(persistence: ctx.persistence)
+        try await control.validate(instanceID: instanceID, request)
+
+        await ctx.persistence.recordActivity(instanceID: instanceID)
+        try await ctx.ensureRunning(resolved, envelope: envelope)
+        let settings = try await control.request(instanceID: instanceID, request)
+        let status = try await control.waitForStatus(instanceID: instanceID, requestID: settings.requestID)
+        if status.state == .down {
+            throw ToolError("share_failed", status.error ?? "the share could not start")
+        }
+        return MCPResult.json([
+            "url": status.url ?? "",
+            "temporary": status.temporary,
+            "provider": status.provider,
+            "username": settings.username,
+            "password": settings.password,
+            "instance": status.slug,
+            "allow": settings.allow.map(\.description),
+            "state": status.state.rawValue,
+        ])
+    }
+
+    private static func shareStop(_ args: [String: Value], ctx: CLIContext, slug: String) async throws -> CallTool.Result {
+        let target = args["slug"]?.stringValue ?? slug
+        let envelope = try await ctx.load()
+        guard let resolved = resolveTarget(target, in: envelope) else {
+            throw ToolError("not_found", "No site or environment with slug \(target).")
+        }
+        try await ShareControl(persistence: ctx.persistence).stop(instanceID: resolved.instance.instanceID)
+        return MCPResult.json(["ok": true, "instance": target])
+    }
+
+    private static func shareStatus(_ args: [String: Value], ctx: CLIContext) async throws -> CallTool.Result {
+        let envelope = try await ctx.load()
+        var onlyID: UUID?
+        if let target = args["slug"]?.stringValue {
+            guard let resolved = resolveTarget(target, in: envelope) else {
+                throw ToolError("not_found", "No site or environment with slug \(target).")
+            }
+            onlyID = resolved.instance.instanceID
+        }
+        let control = ShareControl(persistence: ctx.persistence)
+        let entries = try await control.list()
+        let proxyRunning = control.isProxyRunning()
+        let rows: [[String: Any]] = entries
+            .filter { onlyID == nil || $0.instance.instanceID == onlyID }
+            .map { entry in
+                let status = entry.status
+                let listed = ShareControl.listedState(active: entry.settings.active, status: status,
+                                                      proxyRunning: proxyRunning)
+                return [
+                    "instance": entry.instance.containerSlug,
+                    "state": listed.state,
+                    "url": status?.url as Any? ?? NSNull(),
+                    "provider": status?.provider ?? envelope.effectiveProvider(for: entry.settings),
+                    "temporary": status?.temporary as Any? ?? NSNull(),
+                    "error": listed.error as Any? ?? NSNull(),
+                ]
+            }
+        return MCPResult.json(rows)
     }
 
     // MARK: - Resolution helpers

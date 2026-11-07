@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import os
 import WPContainerKit
 
 // MARK: - agent-tools (§2d)
@@ -243,15 +244,39 @@ struct ProxyServe: AsyncParsableCommand {
         do {
             let port = try await proxy.start()
             try ProxyControl.claim(port: port)
-            // Release the pidfile on termination (#4). Ownership-checked so a
-            // racing claimer's record is never deleted by mistake.
-            let cleanup: @convention(c) (Int32) -> Void = { _ in ProxyControl.releaseIfOwned(); Darwin.exit(0) }
-            signal(SIGINT, cleanup)
-            signal(SIGTERM, cleanup)
+            // On SIGINT/SIGTERM, stop the proxy (which stops share providers) and
+            // release the pidfile (#4). Ownership-checked so a racing claimer's
+            // record is never deleted by mistake. The default actions are ignored so
+            // the dispatch sources receive the signals. Both sources share one serial
+            // queue, so the first signal starts the shutdown exactly once; the
+            // shutdown runs elsewhere, and a second signal exits without waiting for it.
+            let signalQueue = DispatchQueue(label: "wp-container.proxy-serve.signals")
+            let stopping = OSAllocatedUnfairLock(initialState: false)
+            let signalSources = [SIGINT, SIGTERM].map { number -> DispatchSourceSignal in
+                signal(number, SIG_IGN)
+                let source = DispatchSource.makeSignalSource(signal: number, queue: signalQueue)
+                source.setEventHandler {
+                    let alreadyStopping = stopping.withLock { started in
+                        defer { started = true }
+                        return started
+                    }
+                    if alreadyStopping {
+                        ProxyControl.releaseIfOwned()
+                        _exit(1)
+                    }
+                    DispatchQueue.global().async {
+                        proxy.stop()
+                        ProxyControl.releaseIfOwned()
+                        Darwin.exit(0)
+                    }
+                }
+                source.resume()
+                return source
+            }
             if output.json { emitLine(MCPJSON.string(["ok": true, "port": Int(port)])) }
             else { emitLine("HTTPS proxy listening on port \(port). Ctrl-C to stop.") }
-            // Stay alive.
-            while true { try await Task.sleep(for: .seconds(3600)) }
+            // Stay alive; the loop also keeps the signal sources referenced.
+            while !signalSources.isEmpty { try await Task.sleep(for: .seconds(3600)) }
         } catch {
             // Only tear down a record THIS process wrote — between the
             // stale-check above and a failed claim, another owner may have

@@ -209,6 +209,9 @@ struct LibraryListView: View {
             HStack(spacing: 6) {
                 StatusDot(status: row.status, size: 7)
                 Text(row.status.label)
+                if vm.isShareLive(row.id) {
+                    Image(systemName: "link").accessibilityLabel("Shared")
+                }
             }
             .foregroundStyle(.secondary)
         }

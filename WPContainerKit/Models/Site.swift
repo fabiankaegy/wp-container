@@ -60,6 +60,8 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
     /// Optional custom domain (e.g. `mysite.local`), routed via /etc/hosts + the
     /// host proxy (PLAN.md §2i). nil = the zero-config `<slug>.localhost` name.
     public var customDomain: String?
+    /// Public-sharing settings; nil until sharing has been configured.
+    public var share: ShareSettings?
     /// WordPress network type — single site or a multisite network (PLAN.md §2j).
     public var networkType: NetworkType
     /// Hostnames the network's subsites are served at, other than the site's
@@ -130,6 +132,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         case pendingSchemaDrops
         case archivedAt
         case mounts
+        case share
     }
 
     public init(
@@ -164,6 +167,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         pendingSchemaDrops: [String] = [],
         archivedAt: Date? = nil,
         mounts: [Mount] = [],
+        share: ShareSettings? = nil,
         status: SiteStatus = .stopped
     ) {
         self.id = id
@@ -197,6 +201,7 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.pendingSchemaDrops = pendingSchemaDrops
         self.archivedAt = archivedAt
         self.mounts = mounts
+        self.share = share
         self.status = status
     }
 
@@ -253,6 +258,8 @@ public struct Site: Identifiable, Codable, Sendable, Hashable {
         self.archivedAt = try? c.decodeIfPresent(Date.self, forKey: .archivedAt)
         // Absent in stores written before `create --wp-env`.
         self.mounts = ((try? c.decodeIfPresent([Mount].self, forKey: .mounts)) ?? []) ?? []
+        // Absent in stores written before site sharing.
+        self.share = try? c.decodeIfPresent(ShareSettings.self, forKey: .share)
     }
 
     // MARK: Derived paths

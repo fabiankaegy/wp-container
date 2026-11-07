@@ -155,6 +155,9 @@ struct SiteCard: View {
                     HStack(spacing: 5) {
                         StatusDot(status: site.status, size: 7)
                         Text("\(site.status.label) · \(site.displayHost)").lineLimit(1)
+                        if vm.isShareLive(site.id) {
+                            Image(systemName: "link").accessibilityLabel("Shared")
+                        }
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
