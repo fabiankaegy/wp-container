@@ -72,15 +72,9 @@ struct ShareCard: View {
     }
 
     private var content: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Public link").font(.callout.weight(.medium))
-                    Text("Anyone with the link and password can open this site while it is shared. Sharing ends when the site stops or the app quits.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 12)
+        VStack(alignment: .leading, spacing: 14) {
+            SettingRow(title: "Public link",
+                       detail: Text("Anyone with the link and password can open this site while it is shared. Sharing ends when the site stops or the app quits.")) {
                 actionButton
             }
 
@@ -207,15 +201,9 @@ struct ShareCard: View {
     }
 
     private var options: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Provider").font(.callout.weight(.medium))
-                    Text("The tunnel that publishes the link. Custom providers are executables in the share-providers folder.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 12)
+        VStack(alignment: .leading, spacing: 14) {
+            SettingRow(title: "Provider",
+                       detail: Text("The tunnel that publishes the link. Custom providers are executables in the share-providers folder.")) {
                 Picker("", selection: $provider) {
                     Text("Default (\(defaultProvider))").tag(String?.none)
                     ForEach(providerChoices, id: \.self) { name in
@@ -225,64 +213,77 @@ struct ShareCard: View {
                 .labelsHidden().fixedSize()
             }
 
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Fixed hostname").font(.callout.weight(.medium))
-                    Text("Optional. Leave empty for a temporary address when the provider offers one.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 12)
+            Divider().opacity(0.5)
+
+            SettingRow(title: "Fixed hostname",
+                       detail: Text("Optional. Leave empty for a temporary address when the provider offers one.")) {
+                EmptyView()
+            } footer: {
                 TextField("share.example.com", text: $hostname)
-                    .textFieldStyle(.roundedBorder).frame(width: 220)
+                    .textFieldStyle(.roundedBorder)
+                    .autocorrectionDisabled()
+                    .padding(.top, 4)
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Open without password").font(.callout.weight(.medium))
-                Text("Requests that skip the password: a path prefix such as /wp-json/wc/v3/webhooks or a query such as ?wc-api=wc_stripe. A query applies on every path, and these requests reach the site without cookies.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                ForEach(allow, id: \.self) { rule in
-                    HStack {
-                        Text(rule).font(.callout.monospaced())
-                        Spacer()
-                        Button {
-                            allow.removeAll { $0 == rule }
-                        } label: {
-                            Image(systemName: "minus.circle")
-                        }
-                        .buttonStyle(.borderless)
-                        .accessibilityLabel("Remove \(rule)")
-                        .help("Remove")
-                    }
-                }
-                HStack {
-                    TextField("/path or ?key=value", text: $newAllow)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit(addAllow)
-                    Button("Add", action: addAllow)
-                        .disabled(newAllow.trimmingCharacters(in: .whitespaces).isEmpty)
-                }
-                if let allowError {
-                    Text(allowError).font(.caption).foregroundStyle(.red)
-                }
+            Divider().opacity(0.5)
+
+            SettingRow(title: "Open without password",
+                       detail: Text("Requests that skip the password: a path prefix such as `/wp-json/wc/v3/webhooks` or a query such as `?wc-api=wc_stripe`. A query applies on every path, and these requests reach the site without cookies.")) {
+                EmptyView()
+            } footer: {
+                allowList.padding(.top, 4)
             }
 
-            VStack(alignment: .leading, spacing: 4) {
-                Toggle("Generate a new password", isOn: $resetPassword)
-                Text("Applies when the share starts; the old password stops working.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            Divider().opacity(0.5)
+
+            SettingRow(title: "Generate a new password",
+                       detail: Text("Applies when the share starts. The old password stops working.")) {
+                Toggle("", isOn: $resetPassword)
+                    .labelsHidden().toggleStyle(.switch)
             }
 
-            VStack(alignment: .leading, spacing: 4) {
-                Toggle("Turn off password for this share", isOn: $noAuth)
+            Divider().opacity(0.5)
+
+            SettingRow(title: "Turn off password") {
+                Toggle("", isOn: $noAuth)
+                    .labelsHidden().toggleStyle(.switch)
+            } footer: {
                 if noAuth {
                     Label("This link is open to anyone who has the URL, including wp-admin.",
                           systemImage: "exclamationmark.triangle")
                         .font(.caption).foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+        }
+    }
+
+    private var allowList: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(allow, id: \.self) { rule in
+                HStack {
+                    Text(rule).font(.callout.monospaced())
+                    Spacer()
+                    Button {
+                        allow.removeAll { $0 == rule }
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Remove \(rule)")
+                    .help("Remove")
+                }
+            }
+            HStack(spacing: 8) {
+                TextField("/path or ?key=value", text: $newAllow)
+                    .textFieldStyle(.roundedBorder)
+                    .autocorrectionDisabled()
+                    .onSubmit(addAllow)
+                Button("Add", action: addAllow)
+                    .disabled(newAllow.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            if let allowError {
+                Text(allowError).font(.caption).foregroundStyle(.red)
             }
         }
     }
