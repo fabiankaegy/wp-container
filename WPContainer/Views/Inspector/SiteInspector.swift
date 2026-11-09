@@ -98,6 +98,11 @@ struct SiteMoreMenuItems: View {
     var body: some View {
         Button("Reveal in Finder", systemImage: "folder") { SystemActions.revealInFinder(site.path) }
         Button("Open in Terminal", systemImage: "terminal") { SystemActions.openTerminal(at: site.path, pathPrepend: site.path) }
+        Button("Move Site Folder…", systemImage: "folder.badge.gearshape") {
+            vm.moveSiteTarget = site
+            vm.presentingMoveSite = true
+        }
+            .disabled(site.isArchived || site.status.isTransitional)
         OpenInSubmenu(folder: ExternalEditors.target.url(for: site))
         Button("Copy URL", systemImage: "link") { SystemActions.copyToClipboard(site.url.absoluteString) }
         Divider()

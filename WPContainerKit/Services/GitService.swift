@@ -107,6 +107,24 @@ public actor GitService {
         try await git(args, cwd: repo)
     }
 
+    /// The path of every worktree `repo` knows, as git stored it: the main
+    /// worktree first, then each linked worktree, from
+    /// `git worktree list --porcelain`.
+    public func worktreePaths(repo: URL) async throws -> [String] {
+        let out = try await git(["-C", repo.path, "worktree", "list", "--porcelain"], cwd: repo)
+        let prefix = "worktree "
+        return out.split(separator: "\n")
+            .filter { $0.hasPrefix(prefix) }
+            .map { String($0.dropFirst(prefix.count)) }
+    }
+
+    /// `git -C <repo> worktree repair [<path>…]`. Run in a main worktree with
+    /// the new path of each moved linked worktree, it reconnects both sides.
+    /// Run in a moved linked worktree, it reconnects its main worktree to it.
+    public func worktreeRepair(repo: URL, paths: [String]) async throws {
+        try await git(["-C", repo.path, "worktree", "repair"] + paths, cwd: repo)
+    }
+
     /// Whether the checkout at `path` has uncommitted changes, untracked files
     /// included. A missing checkout has none. Any other git failure reads as
     /// dirty, so a caller deciding whether removal is safe errs toward keeping it.

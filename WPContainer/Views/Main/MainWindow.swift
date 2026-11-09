@@ -89,6 +89,11 @@ struct MainWindow: View {
                 ExportSiteSheet(site: site)
             }
         }
+        .sheet(isPresented: $vm.presentingMoveSite, onDismiss: { vm.moveSiteTarget = nil }) {
+            if let site = vm.moveSiteTarget {
+                MoveSiteSheet(site: site)
+            }
+        }
         .sheet(isPresented: $vm.presentingImportSite, onDismiss: { vm.pendingImportArchive = nil }) {
             ImportSiteSheet(initialArchive: vm.pendingImportArchive)
         }

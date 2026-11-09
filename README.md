@@ -163,6 +163,10 @@ Sites are provisioned automatically (no install wizard) and log in with
   `wp-content/plugins/<name>`, so edits reach the site live. `mount list` and
   `mount remove` manage them, and `create --mount <folder>:<path>` mounts folders
   when the site is created.
+- **Move a site folder** — `wpc move <slug> <folder>` (or Move Site Folder… in
+  the app, `site_move` over MCP) moves a site into another folder under the same
+  name. Running containers stop and start again; stored paths, the `wp` shim,
+  agent-tools files, and git worktree links follow the new location.
 - **Dev-ready by default** — every site gets `WP_DEVELOPMENT_MODE=all` /
   `WP_ENVIRONMENT_TYPE=local`, with live `WP_DEBUG`-family switches in
   the inspector's Development card.
