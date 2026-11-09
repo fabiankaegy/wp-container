@@ -67,7 +67,9 @@ Sites are provisioned automatically (no install wizard) and log in with
   and database (`wp-container worktree settle|restore <env>`, or the Settle
   buttons in the app). Settled envs are deleted after 30 days unless that's
   turned off in Settings → Sites; a checkout with uncommitted changes is
-  left on disk.
+  left on disk. Tools that make their own worktrees can hand them over with
+  `worktree adopt` instead — see
+  [Using worktrees from other tools](#using-worktrees-from-other-tools-t3-code).
 - **`wp-container` CLI** — everything the app does, scriptable, with `--json`
   everywhere: `list`, `create` (`--wp/--php/--web-server/--multisite/--domain/--group`),
   `start`, `stop`, `delete`, `worktree …`, `wp …` (wp-cli proxy), `web-server`, `xdebug`,
@@ -315,6 +317,40 @@ database** in the New Branch Environment sheet to opt out and get a dedicated
 container. It's worth it for a genuinely large database: an isolated env off a
 *stopped* parent copy-on-write-clones the `database/` folder, which is instant at
 any size, whereas the shared path is always a logical dump and restore.
+
+### Using worktrees from other tools (T3 Code)
+
+Agent tools like [T3 Code](https://t3.codes) create their own git worktree for
+each thread. `worktree adopt` turns such a checkout into a branch environment
+without moving it:
+
+```bash
+wp-container worktree adopt --path ~/.t3/worktrees/wp-content/t3code-1a2b3c4d
+# → Adopted … as env my-blog-wt-t3code-1a2b3c4d at http://my-blog-wt-t3code-1a2b3c4d.localhost
+```
+
+The site and repo path are found from the checkout's main repo (it must live in
+a site's `wordpress/` folder), and the branch from the checkout. The rest is the
+same as `worktree create`. The other tool keeps ownership of the checkout:
+deleting the env, rolling back a failed adopt, and the settled-env purge all
+leave it on disk. Running `adopt` again on an adopted checkout starts its env,
+restoring it first if it was settled.
+
+Because the env records where the checkout lives, `wp`, `wp-container run` and
+the MCP tools resolve to the env from anywhere inside it, so an agent working in
+the T3 worktree reaches its own site and database without any setup.
+
+In T3 Code, add two scripts. Set them as the default project scripts to cover
+every project at once: `--skip-unmatched` makes them do nothing for repos that
+aren't in a WP Container site.
+
+| Script | Command | Options |
+|---|---|---|
+| WP env | `wp-container worktree adopt --path "$T3CODE_WORKTREE_PATH" --skip-unmatched` | Run on worktree creation, not async (the agent waits until the env is up) |
+| Settle WP env | `wp-container worktree settle --path "$T3CODE_WORKTREE_PATH" --skip-unmatched` | Run on settle |
+
+Unsettling a T3 thread has no hook. The env comes back on the next `wp`, `run`
+or `login` against it, or by running the **WP env** script again.
 
 ## Development
 

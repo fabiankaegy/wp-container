@@ -677,12 +677,72 @@ struct DeleteCommand: AsyncParsableCommand {
 
 // MARK: - worktree
 
+/// Reserve a port and store record, run the full env creation flow, and
+/// persist the result, releasing the reservation if creation fails. Shared by
+/// `worktree create` and `worktree adopt`; `adopting` is the existing checkout
+/// for the latter. Warnings go to stderr.
+func createEnv(ctx: CLIContext, parent: Site, repoRelPath: String, branch: String, from: String?,
+               provision: Bool, isolatedDB: Bool, adopting: URL? = nil) async throws -> WorktreeEnv {
+    try await ctx.unarchiveIfNeeded(siteID: parent.id)
+    let parentRunning = await ctx.runningContainerNames().contains(parent.wpContainerName)
+
+    // Allocate the port AND reserve the env record in one locked store
+    // mutation (#3), so a concurrent creator can't pick the same port
+    // during the (long) creation flow below.
+    guard let (_, reserved, _) = try await ctx.persistence.allocatePort(reserve: { port, store in
+        WorktreeEnvService.reservedDescriptor(parent: parent, repoRelPath: repoRelPath, branch: branch,
+                                              port: port, adopting: adopting, into: &store)
+    }) else { throw CLIErrorJSON("no_free_port") }
+
+    do {
+        let outcome = try await ctx.worktrees.create(parent: parent, parentIsRunning: parentRunning,
+                                                    repoRelPath: repoRelPath, branch: branch, from: from,
+                                                    port: reserved.port, reserved: reserved,
+                                                    provision: provision, isolatedDB: isolatedDB)
+        let env = outcome.env
+        let reaped = outcome.reapedSchemas
+        _ = try await ctx.persistence.mutate { store in
+            store.envs.removeAll { $0.id == env.id }
+            store.envs.append(env)
+            // Clear exactly the tombstones whose DROP succeeded (#17); one
+            // that failed keeps its reminder for the next create.
+            if !reaped.isEmpty, let i = store.sites.firstIndex(where: { $0.id == parent.id }) {
+                store.sites[i].pendingSchemaDrops.removeAll { reaped.contains($0) }
+            }
+        }
+        for warning in await ctx.lifecycle.drainWarnings(for: env.id) {
+            FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
+        }
+        // The env was created and started; its URL, though, is the
+        // proxy's to serve (issue #16 follow-through).
+        if let warning = ProxyControl.envProxyWarning(port: env.port) {
+            FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
+        }
+        return env
+    } catch {
+        // Creation rolled back its containers/folders; also release the
+        // reserved store record (and with it, the port).
+        _ = try? await ctx.persistence.mutate { store in
+            store.envs.removeAll { $0.id == reserved.id }
+        }
+        throw error
+    }
+}
+
+/// The env whose checkout is `path` (symlinks resolved), if any.
+func envForWorktree(_ path: URL, in envelope: StoreEnvelope) -> WorktreeEnv? {
+    let target = path.resolvingSymlinksInPath().standardizedFileURL.path
+    return envelope.envs.first {
+        $0.worktreePath.resolvingSymlinksInPath().standardizedFileURL.path == target
+    }
+}
+
 struct WorktreeCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "worktree",
         abstract: "Manage git worktree environments.",
-        subcommands: [WorktreeCreate.self, WorktreeList.self, WorktreeSettle.self, WorktreeRestore.self,
-                      WorktreeDelete.self, WorktreeFixURLs.self]
+        subcommands: [WorktreeCreate.self, WorktreeAdopt.self, WorktreeList.self, WorktreeSettle.self,
+                      WorktreeRestore.self, WorktreeDelete.self, WorktreeFixURLs.self]
     )
 }
 
@@ -729,53 +789,8 @@ struct WorktreeCreate: AsyncParsableCommand {
             guard WorktreeEnvService.isValidRepoRelPath(repo) else {
                 throw CLIErrorJSON("invalid_repo_path", detail: WorktreeError.invalidRepoPath(repo).description)
             }
-            try await ctx.unarchiveIfNeeded(siteID: parent.id)
-            let running = await ctx.runningContainerNames()
-            let parentRunning = running.contains(parent.wpContainerName)
-
-            // Allocate the port AND reserve the env record in one locked store
-            // mutation (#3), so a concurrent creator can't pick the same port
-            // during the (long) creation flow below.
-            let repoArg = repo
-            let branchArg = branch
-            guard let (_, reserved, _) = try await ctx.persistence.allocatePort(reserve: { port, store in
-                WorktreeEnvService.reservedDescriptor(parent: parent, repoRelPath: repoArg,
-                                                      branch: branchArg, port: port, into: &store)
-            }) else { throw CLIErrorJSON("no_free_port") }
-
-            let env: WorktreeEnv
-            do {
-                let outcome = try await ctx.worktrees.create(parent: parent, parentIsRunning: parentRunning,
-                                                            repoRelPath: repo, branch: branch, from: from,
-                                                            port: reserved.port, reserved: reserved,
-                                                            provision: !noProvision, isolatedDB: isolatedDb)
-                env = outcome.env
-                let reaped = outcome.reapedSchemas
-                _ = try await ctx.persistence.mutate { store in
-                    store.envs.removeAll { $0.id == env.id }
-                    store.envs.append(env)
-                    // Clear exactly the tombstones whose DROP succeeded (#17); one
-                    // that failed keeps its reminder for the next create.
-                    if !reaped.isEmpty, let i = store.sites.firstIndex(where: { $0.id == parent.id }) {
-                        store.sites[i].pendingSchemaDrops.removeAll { reaped.contains($0) }
-                    }
-                }
-                for warning in await ctx.lifecycle.drainWarnings(for: env.id) {
-                    FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
-                }
-                // The env was created and started; its URL, though, is the
-                // proxy's to serve (issue #16 follow-through).
-                if let warning = ProxyControl.envProxyWarning(port: env.port) {
-                    FileHandle.standardError.write(Data(("warning: \(warning)\n").utf8))
-                }
-            } catch {
-                // Creation rolled back its containers/folders; also release the
-                // reserved store record (and with it, the port).
-                _ = try? await ctx.persistence.mutate { store in
-                    store.envs.removeAll { $0.id == reserved.id }
-                }
-                throw error
-            }
+            let env = try await createEnv(ctx: ctx, parent: parent, repoRelPath: repo, branch: branch,
+                                          from: from, provision: !noProvision, isolatedDB: isolatedDb)
             guard let dumpURL, let importOptions else {
                 if output.json { emitLine(CLIJSON.string(WorktreeDescriptor(from: env))) }
                 else { emitLine("Created env \(env.envSlug) at \(env.url.absoluteString) (worktree: \(env.worktreePath.path)).") }
@@ -826,6 +841,90 @@ struct WorktreeCreate: AsyncParsableCommand {
     }
 }
 
+struct WorktreeAdopt: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "adopt",
+        abstract: "Turn a git worktree another tool created into a branch environment.",
+        discussion: """
+        For tools that manage their own worktrees, such as T3 Code. The \
+        checkout's main repo must live inside a site's wordpress/ folder; the \
+        site and repo path are found from it, and the branch from the \
+        checkout. Everything else matches `worktree create`: dependencies \
+        are seeded, files and database cloned, and the env started. The \
+        checkout is never moved or removed: deleting the env, or the \
+        settled-env purge, leaves it on disk for the tool that made it.
+
+        Idempotent: adopting a checkout that already has an env starts that \
+        env (restoring it if settled) and prints it, so the same command \
+        works as a setup script that may run more than once.
+
+        --skip-unmatched exits 0 without doing anything when the checkout \
+        isn't part of a WP Container site, so one global setup script can \
+        cover every project.
+        """
+    )
+    @Option(name: .long, help: "Path inside the checkout to adopt (default: cwd).") var path: String?
+    @Flag(name: .long, help: "Skip seeding the checkout with the parent's gitignored runtime deps.") var noProvision = false
+    @Flag(name: .long, help: "Give the environment its own MariaDB container instead of a schema on the parent site's server.") var isolatedDb = false
+    @Flag(name: .long, help: "Exit 0 quietly when the checkout doesn't belong to a WP Container site.") var skipUnmatched = false
+    @OptionGroup var output: JSONOptions
+
+    func run() async throws {
+        let ctx = CLIContext()
+        do {
+            let target = URL(fileURLWithPath: path ?? FileManager.default.currentDirectoryPath, isDirectory: true)
+            let location: GitService.CheckoutLocation
+            do { location = try await ctx.git.checkoutLocation(of: target) }
+            catch {
+                if skipUnmatched { return skip("\(target.path) is not in a git checkout") }
+                throw CLIErrorJSON("not_a_worktree", detail: WorktreeError.notALinkedWorktree(target.path).description)
+            }
+            let envelope = try await ctx.load()
+
+            // Already adopted (a re-run, or a thread coming back): just make
+            // sure it's up.
+            if let existing = envForWorktree(location.topLevel, in: envelope) {
+                let env = existing.isSettled
+                    ? try await ctx.restore(existing, envelope: envelope)
+                    : existing
+                try await ctx.ensureRunning(.env(env), envelope: envelope)
+                await ctx.persistence.recordActivity(instanceID: env.id)
+                return report(env, verb: "Env \(env.envSlug) is running")
+            }
+
+            guard let (parent, repoRelPath) = WorktreeEnvService.adoptionParent(
+                mainCheckout: location.mainCheckout, sites: envelope.sites) else {
+                if skipUnmatched { return skip("\(location.mainCheckout.path) is not inside a WP Container site") }
+                throw CLIErrorJSON("site_not_found", detail: "No WP Container site contains \(location.mainCheckout.path).")
+            }
+            guard location.isLinkedWorktree else {
+                throw CLIErrorJSON("not_a_worktree", detail: WorktreeError.notALinkedWorktree(location.topLevel.path).description)
+            }
+            // A detached HEAD has no branch name; the folder name is the next
+            // most stable label, and the env slug is derived from it once.
+            var branch = (try? await ctx.git.currentBranch(repo: location.topLevel)) ?? "HEAD"
+            if branch == "HEAD" { branch = location.topLevel.lastPathComponent }
+
+            let env = try await createEnv(ctx: ctx, parent: parent, repoRelPath: repoRelPath, branch: branch,
+                                          from: nil, provision: !noProvision, isolatedDB: isolatedDb,
+                                          adopting: location.topLevel)
+            report(env, verb: "Adopted \(location.topLevel.path) as env \(env.envSlug)")
+        } catch {
+            throw failCommand(error, json: output.json)
+        }
+    }
+
+    private func report(_ env: WorktreeEnv, verb: String) {
+        if output.json { emitLine(CLIJSON.string(WorktreeDescriptor(from: env))) }
+        else { emitLine("\(verb) at \(env.url.absoluteString)") }
+    }
+
+    private func skip(_ reason: String) {
+        if output.json { emitLine(#"{"matched":false}"#) }
+        else { emitLine("Skipped: \(reason).") }
+    }
+}
+
 struct WorktreeList: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "list", abstract: "List worktree envs.")
     @Option(name: .long, help: "Filter by parent site slug.") var site: String?
@@ -871,14 +970,34 @@ struct WorktreeSettle: AsyncParsableCommand {
         (30 days by default); a checkout with uncommitted changes is kept.
         """
     )
-    @Argument(help: "Env slug.") var envSlug: String
+    @Argument(help: "Env slug.") var envSlug: String?
+    @Option(name: .long, help: "Settle the env whose worktree checkout is at this path instead of naming it.") var path: String?
+    @Flag(name: .long, help: "With --path: exit 0 quietly when no env uses that checkout.") var skipUnmatched = false
     @OptionGroup var output: JSONOptions
+
+    func validate() throws {
+        guard (envSlug == nil) != (path == nil) else {
+            throw ValidationError("Pass an env slug or --path, not both.")
+        }
+    }
 
     func run() async throws {
         let ctx = CLIContext()
         do {
             let envelope = try await ctx.load()
-            guard let env = envelope.envs.first(where: { $0.envSlug == envSlug }) else { throw CLIErrorJSON("env_not_found", detail: envSlug) }
+            let found: WorktreeEnv?
+            if let path {
+                let checkout = (try? await ctx.git.checkoutLocation(of: URL(fileURLWithPath: path)))?.topLevel
+                found = checkout.flatMap { envForWorktree($0, in: envelope) }
+                if found == nil, skipUnmatched {
+                    if output.json { emitLine(#"{"matched":false}"#) } else { emitLine("Skipped: no env uses \(path).") }
+                    return
+                }
+            } else {
+                found = envelope.envs.first { $0.envSlug == envSlug }
+            }
+            guard let env = found else { throw CLIErrorJSON("env_not_found", detail: envSlug ?? path ?? "") }
+            let envSlug = env.envSlug
             let parent = envelope.sites.first { $0.id == env.parentSiteID }
             do { try await ctx.settler.settle(env, parent: parent) }
             catch let error as EnvSettlementError { throw CLIErrorJSON("settle_failed", detail: error.description) }

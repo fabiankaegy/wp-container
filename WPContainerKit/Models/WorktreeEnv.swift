@@ -13,7 +13,8 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
     /// Repo path relative to `wordpress/`, e.g. `wp-content/plugins/my-plugin`.
     public var repoRelPath: String
     public var branch: String
-    /// Git worktree checkout: `<site>/.worktrees/<branch-slug>/`.
+    /// Git worktree checkout: `<site>/.worktrees/<branch-slug>/`, or wherever
+    /// another tool put it for an adopted env (see `adoptedWorktree`).
     public var worktreePath: URL
     /// Cloned site+db root: `<site>/.envs/<branch-slug>/`.
     public var envPath: URL
@@ -90,6 +91,11 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
     /// The parent site's mounts at creation (`Site.mounts`), so the env sees the
     /// same mounted plugins, themes, and folders.
     public var inheritedMounts: [Mount]
+    /// True when the checkout was created by another tool (e.g. T3 Code) and
+    /// handed over with `worktree adopt`. That tool owns the checkout, so
+    /// wp-container never removes it: deleting the env, rolling back a failed
+    /// create, and the settled-env purge all leave it on disk.
+    public var adoptedWorktree: Bool
 
     /// Runtime-derived; NOT persisted.
     public var status: SiteStatus = .stopped
@@ -100,7 +106,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
              xdebugEnabled, elasticsearchEnabled, cpuLimit, memoryLimitMB,
              idleStopMinutes, lastActivityAt,
              mailpitEnabled, mailpitPort, redisEnabled, sharedDatabase, databaseSchema,
-             usesDomainURL, httpsEnabled, settledAt, inheritedMounts
+             usesDomainURL, httpsEnabled, settledAt, inheritedMounts, adoptedWorktree
     }
 
     public init(
@@ -133,6 +139,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         httpsEnabled: Bool = false,
         settledAt: Date? = nil,
         inheritedMounts: [Mount] = [],
+        adoptedWorktree: Bool = false,
         status: SiteStatus = .stopped
     ) {
         self.id = id
@@ -164,6 +171,7 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         self.usesDomainURL = usesDomainURL
         self.httpsEnabled = httpsEnabled
         self.inheritedMounts = inheritedMounts
+        self.adoptedWorktree = adoptedWorktree
         self.settledAt = settledAt
         self.status = status
     }
@@ -214,6 +222,8 @@ public struct WorktreeEnv: Identifiable, Codable, Sendable, Hashable {
         self.inheritedMounts = ((try? c.decodeIfPresent([Mount].self, forKey: .inheritedMounts)) ?? []) ?? []
         // Absent in envs written before settling: they are active.
         self.settledAt = try? c.decodeIfPresent(Date.self, forKey: .settledAt)
+        // Absent in envs written before `worktree adopt`: wp-container made their checkout.
+        self.adoptedWorktree = (try? c.decode(Bool.self, forKey: .adoptedWorktree)) ?? false
     }
 
     // MARK: - Settling
