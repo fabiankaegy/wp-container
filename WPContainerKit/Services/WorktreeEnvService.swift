@@ -117,6 +117,21 @@ public actor WorktreeEnvService {
         return best.map { ($0.site, $0.repoRelPath) }
     }
 
+    /// The env whose checkout is `path` or contains it. The match uses the
+    /// path only, so it also finds the env after the checkout was removed from
+    /// disk. When checkouts nest, the deepest checkout wins.
+    public static func env(forCheckoutPath path: URL, in envs: [WorktreeEnv]) -> WorktreeEnv? {
+        let target = path.resolvingSymlinksInPath().standardizedFileURL.path
+        var best: (env: WorktreeEnv, rootLength: Int)?
+        for env in envs {
+            let root = env.worktreePath.resolvingSymlinksInPath().standardizedFileURL.path
+            guard target == root || target.hasPrefix(root + "/"),
+                  root.count > (best?.rootLength ?? -1) else { continue }
+            best = (env, root.count)
+        }
+        return best?.env
+    }
+
     /// The deterministic descriptor for an env of `parent` on `branch` — all
     /// fields except `provisioned` are knowable before any work happens. Used
     /// by callers to reserve the env (and its port) in the store atomically
