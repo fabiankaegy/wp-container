@@ -1,8 +1,9 @@
 import XCTest
 @testable import WPContainerKit
 
-/// `worktree adopt`: mapping a checkout another tool made (e.g. T3 Code) back
-/// to its site, and the env record that keeps wp-container's hands off it.
+/// `worktree adopt`: mapping a checkout another tool made (e.g. T3 Code or
+/// herdr) back to its site, and the env record that keeps wp-container's hands
+/// off it.
 final class WorktreeAdoptTests: XCTestCase {
 
     private var tempRoot: URL!
@@ -81,6 +82,39 @@ final class WorktreeAdoptTests: XCTestCase {
         json.removeValue(forKey: "adoptedWorktree")
         let legacy = try JSONDecoder().decode(WorktreeEnv.self, from: JSONSerialization.data(withJSONObject: json))
         XCTAssertFalse(legacy.adoptedWorktree)
+    }
+
+    // MARK: - Env lookup by checkout path
+
+    func testFindsEnvByCheckoutPathWhenTheCheckoutIsGone() {
+        let site = makeSite("blog")
+        let checkout = tempRoot.appendingPathComponent(".herdr/worktrees/wp-content/feat-x", isDirectory: true)
+        let env = WorktreeEnvService.descriptor(parent: site, repoRelPath: "wp-content", branch: "feat/x",
+                                                port: 8890, adopting: checkout)
+        let other = WorktreeEnvService.descriptor(parent: site, repoRelPath: "wp-content", branch: "feat/y", port: 8891)
+        let envs = [other, env]
+        XCTAssertFalse(FileManager.default.fileExists(atPath: checkout.path))
+
+        XCTAssertEqual(WorktreeEnvService.env(forCheckoutPath: checkout, in: envs)?.id, env.id)
+        let subfolder = checkout.appendingPathComponent("themes/twentytwentyfive", isDirectory: true)
+        XCTAssertEqual(WorktreeEnvService.env(forCheckoutPath: subfolder, in: envs)?.id, env.id)
+        // A sibling whose name only starts with the checkout's name.
+        let lookalike = tempRoot.appendingPathComponent(".herdr/worktrees/wp-content/feat-x-2", isDirectory: true)
+        XCTAssertNil(WorktreeEnvService.env(forCheckoutPath: lookalike, in: envs))
+        XCTAssertNil(WorktreeEnvService.env(forCheckoutPath: checkout.deletingLastPathComponent(), in: envs))
+    }
+
+    func testDeepestCheckoutWinsWhenCheckoutsNest() {
+        let site = makeSite("blog")
+        let outer = tempRoot.appendingPathComponent("work/wp-content", isDirectory: true)
+        let inner = outer.appendingPathComponent("plugins/my-plugin", isDirectory: true)
+        let outerEnv = WorktreeEnvService.descriptor(parent: site, repoRelPath: "wp-content", branch: "a",
+                                                     port: 8890, adopting: outer)
+        let innerEnv = WorktreeEnvService.descriptor(parent: site, repoRelPath: "wp-content/plugins/my-plugin",
+                                                     branch: "b", port: 8891, adopting: inner)
+        let path = inner.appendingPathComponent("src", isDirectory: true)
+        XCTAssertEqual(WorktreeEnvService.env(forCheckoutPath: path, in: [outerEnv, innerEnv])?.id, innerEnv.id)
+        XCTAssertEqual(WorktreeEnvService.env(forCheckoutPath: path, in: [innerEnv, outerEnv])?.id, innerEnv.id)
     }
 
     // MARK: - Git checkout location

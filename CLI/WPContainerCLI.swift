@@ -729,14 +729,6 @@ func createEnv(ctx: CLIContext, parent: Site, repoRelPath: String, branch: Strin
     }
 }
 
-/// The env whose checkout is `path` (symlinks resolved), if any.
-func envForWorktree(_ path: URL, in envelope: StoreEnvelope) -> WorktreeEnv? {
-    let target = path.resolvingSymlinksInPath().standardizedFileURL.path
-    return envelope.envs.first {
-        $0.worktreePath.resolvingSymlinksInPath().standardizedFileURL.path == target
-    }
-}
-
 struct WorktreeCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "worktree",
@@ -846,7 +838,7 @@ struct WorktreeAdopt: AsyncParsableCommand {
         commandName: "adopt",
         abstract: "Turn a git worktree another tool created into a branch environment.",
         discussion: """
-        For tools that manage their own worktrees, such as T3 Code. The \
+        For tools that manage their own worktrees, such as T3 Code or herdr. The \
         checkout's main repo must live inside a site's wordpress/ folder; the \
         site and repo path are found from it, and the branch from the \
         checkout. Everything else matches `worktree create`: dependencies \
@@ -883,7 +875,12 @@ struct WorktreeAdopt: AsyncParsableCommand {
 
             // Already adopted (a re-run, or a thread coming back): just make
             // sure it's up.
-            if let existing = envForWorktree(location.topLevel, in: envelope) {
+            if let existing = WorktreeEnvService.env(forCheckoutPath: location.topLevel, in: envelope.envs) {
+                // The record is reserved before creation runs. If adopt starts
+                // it now, it reports an env that has no files or database yet.
+                guard existing.provisioned else {
+                    throw CLIErrorJSON("env_not_ready", detail: "Env \(existing.envSlug) is still being created, or its creation stopped. If no adopt is running, delete it with `wp-container worktree delete \(existing.envSlug)` and adopt again.")
+                }
                 let env = existing.isSettled
                     ? try await ctx.restore(existing, envelope: envelope)
                     : existing
@@ -971,7 +968,7 @@ struct WorktreeSettle: AsyncParsableCommand {
         """
     )
     @Argument(help: "Env slug.") var envSlug: String?
-    @Option(name: .long, help: "Settle the env whose worktree checkout is at this path instead of naming it.") var path: String?
+    @Option(name: .long, help: "Settle the env whose worktree checkout is at this path instead of naming it. Works after the checkout was removed.") var path: String?
     @Flag(name: .long, help: "With --path: exit 0 quietly when no env uses that checkout.") var skipUnmatched = false
     @OptionGroup var output: JSONOptions
 
@@ -987,8 +984,7 @@ struct WorktreeSettle: AsyncParsableCommand {
             let envelope = try await ctx.load()
             let found: WorktreeEnv?
             if let path {
-                let checkout = (try? await ctx.git.checkoutLocation(of: URL(fileURLWithPath: path)))?.topLevel
-                found = checkout.flatMap { envForWorktree($0, in: envelope) }
+                found = WorktreeEnvService.env(forCheckoutPath: URL(fileURLWithPath: path), in: envelope.envs)
                 if found == nil, skipUnmatched {
                     if output.json { emitLine(#"{"matched":false}"#) } else { emitLine("Skipped: no env uses \(path).") }
                     return
