@@ -16,6 +16,7 @@ struct WPContainerCLI: AsyncParsableCommand {
             StartCommand.self,
             StopCommand.self,
             DeleteCommand.self,
+            MoveCommand.self,
             WorktreeCommand.self,
             WPCommand.self,
             RunCommand.self,
@@ -175,6 +176,7 @@ func emitLine(_ text: String) {
 func failCommand(_ error: Error, json: Bool) -> ExitCode {
     let cliError = (error as? CLIErrorJSON)
         ?? (error as? SiteMounts.Failure)?.cliError
+        ?? (error as? SiteMover.Failure)?.cliError
         ?? errorCode(error).map { CLIErrorJSON($0, detail: humanText(error)) }
         ?? CLIErrorJSON(humanText(error))
     if json {

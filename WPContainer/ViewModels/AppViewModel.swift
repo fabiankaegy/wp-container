@@ -106,6 +106,9 @@ public final class AppViewModel {
     public var presentingExportSite = false
     /// The site the export sheet exports.
     public var exportSiteTarget: Site?
+    public var presentingMoveSite = false
+    /// The site the move sheet moves.
+    public var moveSiteTarget: Site?
     public var presentingImportSite = false
     /// A .zip dropped on the main window's panel, which the import sheet opens with.
     public var pendingImportArchive: URL?
@@ -1037,6 +1040,29 @@ public final class AppViewModel {
 
     public func moveSite(_ site: Site, toGroup groupID: UUID?) {
         Task { await store.moveSite(site.id, toGroup: groupID) }
+    }
+
+    /// Moves the site's folder into `parent` (see `SiteMover`) and reloads the
+    /// store with the new paths. On failure, sets `lastError` and returns nil.
+    public func moveSiteFolder(
+        _ site: Site,
+        toParent parent: URL,
+        onPhase: @escaping @Sendable (SiteMovePhase) -> Void
+    ) async -> SiteMover.Outcome? {
+        lastError = nil
+        lastErrorDetail = nil
+        let mover = SiteMover(cli: cli, lifecycle: lifecycle, git: git, persistence: StorePersistence())
+        let current = store.site(id: site.id) ?? site
+        do {
+            let outcome = try await mover.move(current, envs: store.envs(forSite: site.id), toParent: parent) { phase in
+                Task { @MainActor in onPhase(phase) }
+            }
+            await store.reload()
+            return outcome
+        } catch {
+            lastError = SiteLifecycleErrorText(error)
+            return nil
+        }
     }
 
     /// Debug helper used by the placeholder UI.
