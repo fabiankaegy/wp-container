@@ -89,12 +89,28 @@ struct MainWindow: View {
                 ExportSiteSheet(site: site)
             }
         }
+        .confirmationDialog("Delete \"\(vm.deleteSiteTarget?.name ?? "")\"?", isPresented: $vm.presentingDeleteSite,
+                            titleVisibility: .visible, presenting: vm.deleteSiteTarget) { site in
+            Button("Delete Site & Move Folder to Trash", role: .destructive) { deleteSite(site, trashFolder: true) }
+            Button("Delete Site (Keep Folder)", role: .destructive) { deleteSite(site, trashFolder: false) }
+            Button("Cancel", role: .cancel) { vm.deleteSiteTarget = nil }
+        } message: { site in
+            Text("Removes the site's containers. Choose whether to also move \(site.path.lastPathComponent) to the Trash.")
+        }
         .sheet(isPresented: $vm.presentingImportSite, onDismiss: { vm.pendingImportArchive = nil }) {
             ImportSiteSheet(initialArchive: vm.pendingImportArchive)
         }
         .sheet(isPresented: $vm.presentingCLIInstallOffer) {
             CLIInstallOfferSheet()
         }
+    }
+
+    /// Deletes the site, then leaves its screen and drops its selection.
+    private func deleteSite(_ site: Site, trashFolder: Bool) {
+        vm.deleteSiteTarget = nil
+        vm.deleteSite(site, trashFolder: trashFolder)
+        if vm.selection == site.id { vm.selection = nil }
+        if vm.screen?.id == site.id { vm.showLibrary(vm.library) }
     }
 
     #if DEBUG

@@ -106,6 +106,9 @@ public final class AppViewModel {
     public var presentingExportSite = false
     /// The site the export sheet exports.
     public var exportSiteTarget: Site?
+    public var presentingDeleteSite = false
+    /// The site the delete confirmation deletes.
+    public var deleteSiteTarget: Site?
     public var presentingImportSite = false
     /// A .zip dropped on the main window's panel, which the import sheet opens with.
     public var pendingImportArchive: URL?
@@ -1355,6 +1358,12 @@ public final class AppViewModel {
         if CLIToolInstaller.currentState() == .notInstalled {
             presentingCLIInstallOffer = true
         }
+    }
+
+    /// Asks the user to confirm before deleting `site`.
+    public func confirmDeleteSite(_ site: Site) {
+        deleteSiteTarget = site
+        presentingDeleteSite = true
     }
 
     public func deleteSite(_ site: Site, trashFolder: Bool) {
