@@ -99,6 +99,32 @@ public actor GitService {
         try await git(args, cwd: repo)
     }
 
+    /// Where a checkout sits in git's worktree layout: its own top level, and
+    /// the main checkout that owns the shared `.git` directory. The two are
+    /// equal for the main checkout itself. Used by `worktree adopt` to map a
+    /// linked worktree some other tool created back to the repo it came from.
+    public struct CheckoutLocation: Sendable, Equatable {
+        public let topLevel: URL
+        public let mainCheckout: URL
+        public var isLinkedWorktree: Bool { topLevel.standardizedFileURL != mainCheckout.standardizedFileURL }
+    }
+
+    /// Locate the checkout containing `path`. Throws when it isn't in a git
+    /// work tree. A bare main repo has no checkout to map back to, so it is
+    /// reported as its own `mainCheckout` and `worktree adopt` won't find a site.
+    public func checkoutLocation(of path: URL) async throws -> CheckoutLocation {
+        let out = try await git(["-C", path.path, "rev-parse", "--path-format=absolute",
+                                 "--show-toplevel", "--git-common-dir"], cwd: path)
+        let lines = out.split(separator: "\n").map { String($0).trimmingCharacters(in: .whitespaces) }
+        guard lines.count >= 2 else {
+            throw GitError(command: ["rev-parse"], exitCode: 0, stderr: "unexpected output: \(out)")
+        }
+        let topLevel = URL(fileURLWithPath: lines[0], isDirectory: true).resolvingSymlinksInPath()
+        let commonDir = URL(fileURLWithPath: lines[1], isDirectory: true).resolvingSymlinksInPath()
+        let main = commonDir.lastPathComponent == ".git" ? commonDir.deletingLastPathComponent() : commonDir
+        return CheckoutLocation(topLevel: topLevel, mainCheckout: main.standardizedFileURL)
+    }
+
     /// `git -C <repo> worktree remove [--force] <path>`.
     public func worktreeRemove(repo: URL, path: URL, force: Bool) async throws {
         var args = ["-C", repo.path, "worktree", "remove"]
