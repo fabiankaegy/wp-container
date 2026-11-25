@@ -993,12 +993,12 @@ struct WorktreeSettle: AsyncParsableCommand {
                 found = envelope.envs.first { $0.envSlug == envSlug }
             }
             guard let env = found else { throw CLIErrorJSON("env_not_found", detail: envSlug ?? path ?? "") }
-            let envSlug = env.envSlug
+            let slug = env.envSlug
             let parent = envelope.sites.first { $0.id == env.parentSiteID }
             do { try await ctx.settler.settle(env, parent: parent) }
             catch let error as EnvSettlementError { throw CLIErrorJSON("settle_failed", detail: error.description) }
-            if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(envSlug) settled"))) }
-            else { emitLine("Settled \(envSlug). Restore it with: wp-container worktree restore \(envSlug)") }
+            if output.json { emitLine(CLIJSON.string(CLIErrorJSON("ok", detail: "\(slug) settled"))) }
+            else { emitLine("Settled \(slug). Restore it with: wp-container worktree restore \(slug)") }
         } catch {
             throw failCommand(error, json: output.json)
         }
