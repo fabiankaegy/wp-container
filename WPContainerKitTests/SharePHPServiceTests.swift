@@ -1,0 +1,220 @@
+import XCTest
+@testable import WPContainerKit
+
+/// Coverage for the managed PHP that rewrites origins for share visitors: the
+/// handler files, their markers, and the origin file they read.
+final class SharePHPServiceTests: XCTestCase {
+
+    private var tempRoot: URL!
+
+    override func setUpWithError() throws {
+        tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wpc-share-php-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: tempRoot)
+    }
+
+    func testActivateWritesHandlersAndOriginFile() throws {
+        let site = makeSite()
+        try SharePHPService.activate(for: site, publicOrigin: "https://example-share.example.com")
+
+        let folder = site.phpConfFolder
+        XCTAssertTrue(PrependService.isHandlerPresent(
+            phpConfFolder: folder, name: SharePHPService.earlyHandlerName, marker: SharePHPService.earlyMarker))
+        XCTAssertTrue(PrependService.isHandlerPresent(
+            phpConfFolder: folder, name: SharePHPService.saveHandlerName, marker: SharePHPService.saveMarker))
+        XCTAssertEqual(SharePHPService.earlyHandlerName, "early/wpc-share.php")
+        XCTAssertEqual(SharePHPService.saveHandlerName, "wpc-share-save.php")
+
+        let data = try Data(contentsOf: folder.appendingPathComponent(SharePHPService.originFileName))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(json["origin"] as? String, "https://example-share.example.com")
+        XCTAssertEqual(json["local"] as? String, site.sharePrimaryOrigin)
+        XCTAssertEqual(json["locals"] as? [String], site.shareLocalOrigins)
+    }
+
+    func testActivateIsIdempotentAndUpdatesTheOrigin() throws {
+        let site = makeSite()
+        try SharePHPService.activate(for: site, publicOrigin: "https://one.example.com")
+        try SharePHPService.activate(for: site, publicOrigin: "https://two.example.com")
+        let data = try Data(contentsOf: site.phpConfFolder.appendingPathComponent(SharePHPService.originFileName))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(json["origin"] as? String, "https://two.example.com")
+    }
+
+    func testDeactivateRemovesOriginFileAndMarkedHandlers() throws {
+        let site = makeSite()
+        try SharePHPService.activate(for: site, publicOrigin: "https://example-share.example.com")
+        SharePHPService.deactivate(for: site)
+
+        let folder = site.phpConfFolder
+        let fm = FileManager.default
+        XCTAssertFalse(fm.fileExists(atPath: folder.appendingPathComponent(SharePHPService.originFileName).path))
+        XCTAssertFalse(fm.fileExists(atPath: PrependService.handlerURL(
+            phpConfFolder: folder, name: SharePHPService.earlyHandlerName).path))
+        XCTAssertFalse(fm.fileExists(atPath: PrependService.handlerURL(
+            phpConfFolder: folder, name: SharePHPService.saveHandlerName).path))
+    }
+
+    func testDeactivateLeavesUnmarkedFiles() throws {
+        let site = makeSite()
+        let folder = site.phpConfFolder
+        for name in [SharePHPService.earlyHandlerName, SharePHPService.saveHandlerName] {
+            try PrependService.writeHandler(phpConfFolder: folder, name: name, contents: "<?php // user file")
+        }
+        SharePHPService.deactivate(for: site)
+        for name in [SharePHPService.earlyHandlerName, SharePHPService.saveHandlerName] {
+            XCTAssertTrue(FileManager.default.fileExists(
+                atPath: PrependService.handlerURL(phpConfFolder: folder, name: name).path), name)
+        }
+    }
+
+    func testDeactivateWithNothingActiveIsANoOp() throws {
+        let site = makeSite()
+        let folder = site.phpConfFolder
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let unrelated = folder.appendingPathComponent("custom.php")
+        try "<?php // user file".write(to: unrelated, atomically: true, encoding: .utf8)
+        let before = try FileManager.default.subpathsOfDirectory(atPath: folder.path).sorted()
+
+        SharePHPService.deactivate(for: site)
+
+        let after = try FileManager.default.subpathsOfDirectory(atPath: folder.path).sorted()
+        XCTAssertEqual(after, before)
+        XCTAssertEqual(try String(contentsOf: unrelated, encoding: .utf8), "<?php // user file")
+    }
+
+    func testEarlyHandlerSkipsRewriteWithoutContentType() {
+        XCTAssertTrue(SharePHPService.earlyContents.contains("if ( '' === $type || ( ! $is_text && ! in_array( $type, $allowed, true ) ) ) {"))
+    }
+
+    func testEarlyHandlerRefusesPostRestRouteOnExemptRequests() {
+        let php = SharePHPService.earlyContents
+        XCTAssertTrue(php.contains("$is_exempt = isset( $_SERVER['HTTP_X_WPC_SHARE_EXEMPT'] );"))
+        XCTAssertTrue(php.contains("if ( $is_exempt && isset( $_POST['rest_route'] ) ) {"))
+        XCTAssertTrue(php.contains("http_response_code( 401 );"))
+    }
+
+    func testSaveHandlerSwapsTheSubmittedDomainBackBeforeComparing() throws {
+        let php = SharePHPService.saveContents
+        let swap = php.range(of: "$submitted = wpc_share_swap_back_domain( $submitted );")
+        let compare = php.range(of: "$submitted !== $current")
+        XCTAssertNotNil(swap)
+        XCTAssertNotNil(compare)
+        if let swap, let compare { XCTAssertLessThan(swap.lowerBound, compare.lowerBound) }
+    }
+
+    /// Runs the early handler under the host `php` with the CLI guard removed, so
+    /// the share-origin and exemption checks run against stubbed request globals.
+    func testEarlyHandlerSmokeRunRefusesExemptRestRoute() throws {
+        let candidates = [
+            "/opt/homebrew/bin/php", "/usr/local/bin/php", "/usr/bin/php",
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support/Herd/bin/php").path,
+        ]
+        guard let php = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            throw XCTSkip("php is not installed")
+        }
+        let site = makeSite()
+        try SharePHPService.activate(for: site, publicOrigin: "https://example-share.example.com")
+        let handler = PrependService.handlerURL(phpConfFolder: site.phpConfFolder, name: SharePHPService.earlyHandlerName)
+        let stubbed = SharePHPService.earlyContents.replacingOccurrences(of: "'cli' === PHP_SAPI", with: "false")
+        try stubbed.write(to: handler, atomically: true, encoding: .utf8)
+
+        func run(exempt: Bool, origin: String = "https://example-share.example.com") throws -> String {
+            let exemptLine = exempt ? "$_SERVER['HTTP_X_WPC_SHARE_EXEMPT'] = '1';" : ""
+            let driver = """
+                <?php
+                $_SERVER['HTTP_X_WPC_SHARE_ORIGIN'] = '\(origin)';
+                \(exemptLine)
+                $_POST['rest_route'] = '/wp/v2/users';
+                require '\(handler.path)';
+                echo "REACHED";
+                """
+            let script = tempRoot.appendingPathComponent("driver-\(UUID().uuidString).php")
+            try driver.write(to: script, atomically: true, encoding: .utf8)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: php)
+            process.arguments = ["-n", script.path]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            return String(decoding: data, as: UTF8.self)
+        }
+
+        let refused = try run(exempt: true)
+        XCTAssertTrue(refused.contains("Authentication required."), refused)
+        XCTAssertFalse(refused.contains("REACHED"), refused)
+        XCTAssertTrue(try run(exempt: false).contains("REACHED"))
+        XCTAssertTrue(try run(exempt: true, origin: "https://forged.example.com").contains("REACHED"))
+    }
+
+    /// Runs the save handler's exempt-request check under the host `php` with
+    /// WordPress's hook functions and `$wp` stubbed.
+    func testSaveHandlerSmokeRunRefusesQueryVarsOnExemptRequests() throws {
+        let candidates = [
+            "/opt/homebrew/bin/php", "/usr/local/bin/php", "/usr/bin/php",
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support/Herd/bin/php").path,
+        ]
+        guard let php = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            throw XCTSkip("php is not installed")
+        }
+        let handler = tempRoot.appendingPathComponent("save-\(UUID().uuidString).php")
+        try SharePHPService.saveContents.write(to: handler, atomically: true, encoding: .utf8)
+
+        func run(exempt: Bool, keys: String? = nil, get: String = "", post: String = "",
+                 queryVars: String = "array()") throws -> String {
+            let exemptLine = exempt ? "$_SERVER['HTTP_X_WPC_SHARE_EXEMPT'] = '1';" : ""
+            let keysLine = keys.map { "$_SERVER['HTTP_X_WPC_SHARE_EXEMPT_KEYS'] = '\($0)';" } ?? ""
+            let driver = """
+                <?php
+                define( 'WPC_SHARE_ORIGIN', 'https://example-share.example.com' );
+                define( 'WPC_SHARE_LOCAL', 'https://my-site.localhost' );
+                function wpc_share_replace_origins( $value ) { return $value; }
+                function add_filter() {}
+                function add_action() {}
+                $wp = (object) array( 'public_query_vars' => array( 'p', 'page_id', 'wc-api' ) );
+                \(exemptLine)
+                \(keysLine)
+                parse_str( '\(get)', $_GET );
+                parse_str( '\(post)', $_POST );
+                require '\(handler.path)';
+                wpc_share_refuse_exempt_query_vars( \(queryVars) );
+                echo "REACHED";
+                """
+            let script = tempRoot.appendingPathComponent("driver-\(UUID().uuidString).php")
+            try driver.write(to: script, atomically: true, encoding: .utf8)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: php)
+            process.arguments = ["-n", script.path]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            return String(decoding: data, as: UTF8.self)
+        }
+
+        XCTAssertTrue(try run(exempt: true, get: "p=5").contains("Authentication required."))
+        XCTAssertTrue(try run(exempt: true, post: "page_id=5").contains("Authentication required."))
+        XCTAssertTrue(try run(exempt: true, get: "wc-api=1").contains("Authentication required."))
+        XCTAssertTrue(try run(exempt: true, keys: "wc-api", get: "wc-api=1").contains("REACHED"))
+        XCTAssertTrue(try run(exempt: true, keys: "wc-api", get: "wc-api=1&p=5").contains("Authentication required."))
+        XCTAssertTrue(try run(exempt: true, get: "other=1").contains("REACHED"))
+        XCTAssertTrue(try run(exempt: true, get: "p=5", queryVars: "array( 'rest_route' => '/x' )").contains("REACHED"))
+        XCTAssertTrue(try run(exempt: false, get: "p=5").contains("REACHED"))
+    }
+
+    private func makeSite() -> Site {
+        Site(name: "Example", slug: "my-site", path: tempRoot.appendingPathComponent("my-site", isDirectory: true),
+             port: 8881, imageTag: SiteRecipe.defaultWordPressImage)
+    }
+}

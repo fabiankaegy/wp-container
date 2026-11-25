@@ -18,6 +18,9 @@ public enum ProxyControl {
     /// See `EnvPortReport`.
     public static var envPortsFileURL: URL { directory.appendingPathComponent("proxy-env-ports.json") }
 
+    /// Runtime state of every active share, published by the proxy owner.
+    public static var sharesFileURL: URL { directory.appendingPathComponent("proxy-shares.json") }
+
     public struct Status: Sendable {
         public let pid: pid_t
         public let port: UInt16?
@@ -29,7 +32,7 @@ public enum ProxyControl {
     /// definition — whether the pid is dead, or alive-but-reused by an
     /// unrelated process (#4) — and is cleaned up so the caller starts its own
     /// proxy. The file overrides exist for isolated testing.
-    public static func current(pidFile: URL? = nil, portFile: URL? = nil) -> Status? {
+    public static func current(pidFile: URL? = nil, portFile: URL? = nil, sharesFile: URL? = nil) -> Status? {
         let pidURL = pidFile ?? pidFileURL
         let portURL = portFile ?? portFileURL
         guard let pidStr = try? String(contentsOf: pidURL, encoding: .utf8),
@@ -43,9 +46,12 @@ public enum ProxyControl {
         guard let port, isPortAccepting(port) else {
             try? FileManager.default.removeItem(at: pidURL)
             try? FileManager.default.removeItem(at: portURL)
-            // The env-port report belongs to that dead owner too; a stale one
-            // would claim ports nothing is serving.
-            clearEnvPorts()
+            // The env-port and share reports belong to that dead owner too; with
+            // an overridden pidfile they live next to it, so isolated callers
+            // never touch the default directory.
+            let reportDir = pidFile?.deletingLastPathComponent()
+            clearEnvPorts(file: reportDir?.appendingPathComponent("proxy-env-ports.json"))
+            clearShares(file: sharesFile ?? reportDir?.appendingPathComponent("proxy-shares.json"))
             return nil
         }
         return Status(pid: pid, port: port)
@@ -101,14 +107,41 @@ public enum ProxyControl {
         try? data.write(to: envPortsFileURL, options: .atomic)
     }
 
-    public static func clearEnvPorts() {
-        try? FileManager.default.removeItem(at: envPortsFileURL)
+    public static func clearEnvPorts(file: URL? = nil) {
+        try? FileManager.default.removeItem(at: file ?? envPortsFileURL)
     }
 
     /// The report as written by the live proxy, or nil when there is none.
     public static func envPorts() -> EnvPortReport? {
         guard let data = try? Data(contentsOf: envPortsFileURL) else { return nil }
         return try? JSONDecoder().decode(EnvPortReport.self, from: data)
+    }
+
+    // MARK: - Share status report
+
+    /// Publish the share statuses (best-effort; a failure here must never affect serving).
+    public static func writeShares(_ statuses: [ShareStatus], file: URL? = nil) {
+        let url = file ?? sharesFileURL
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(statuses) else { return }
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
+        try? data.write(to: url, options: .atomic)
+    }
+
+    /// The share statuses as written by the live proxy, or empty when there are none.
+    /// Consumers must gate on `current() != nil`, as a crashed proxy leaves the file behind.
+    public static func shares(file: URL? = nil) -> [ShareStatus] {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let data = try? Data(contentsOf: file ?? sharesFileURL),
+              let statuses = try? decoder.decode([ShareStatus].self, from: data) else { return [] }
+        return statuses
+    }
+
+    public static func clearShares(file: URL? = nil) {
+        try? FileManager.default.removeItem(at: file ?? sharesFileURL)
     }
 
     /// Resolve one env port to a statement we are willing to make out loud.
@@ -210,6 +243,7 @@ public enum ProxyControl {
         // The env-port report is part of this owner's record; leaving it would
         // have consumers believing ports are served after the proxy is gone.
         clearEnvPorts()
+        clearShares()
     }
 
     /// Release ownership only if THIS process holds the pidfile (#4) — safe to

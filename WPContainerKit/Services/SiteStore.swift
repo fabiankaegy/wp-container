@@ -77,10 +77,15 @@ public final class SiteStore {
 
     // MARK: - Mutations (write-through to disk under lock)
 
+    /// Writes `site`, keeping the stored record's `share`: share state is written through
+    /// `ShareControl`, the proxy host and the lifecycle, and a caller holding a record
+    /// across a long operation must not bring back an older share.
     public func upsertSite(_ site: Site) async {
         await apply { env in
             if let i = env.sites.firstIndex(where: { $0.id == site.id }) {
-                env.sites[i] = site
+                var updated = site
+                updated.share = env.sites[i].share
+                env.sites[i] = updated
             } else {
                 env.sites.append(site)
             }
@@ -95,10 +100,13 @@ public final class SiteStore {
         }
     }
 
+    /// Writes `wtEnv`, keeping the stored record's `share` (see `upsertSite`).
     public func upsertEnv(_ wtEnv: WorktreeEnv) async {
         await apply { store in
             if let i = store.envs.firstIndex(where: { $0.id == wtEnv.id }) {
-                store.envs[i] = wtEnv
+                var updated = wtEnv
+                updated.share = store.envs[i].share
+                store.envs[i] = updated
             } else {
                 store.envs.append(wtEnv)
             }

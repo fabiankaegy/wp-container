@@ -23,6 +23,7 @@ public enum AgentToolsService {
         "worktree_create", "worktree_list", "worktree_delete",
         "xdebug_toggle", "web_server_set", "elasticsearch_toggle", "mailpit_toggle", "redis_toggle",
         "login_link", "create_user", "db_import", "set_idle_stop",
+        "share_start", "share_stop", "share_status",
     ]
 
     public static let defaultDocName = "AGENTS.md"

@@ -40,7 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         // Nothing to wind down (or already doing it) → terminate right away.
-        guard let vm = viewModel, !isStopping, vm.hasRunningInstances else {
+        guard let vm = viewModel, !isStopping, vm.hasRunningInstances || vm.ownsProxy else {
             return .terminateNow
         }
         isStopping = true
@@ -48,7 +48,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Defer termination until the stops finish OR the budget runs out,
         // whichever comes first.
         Task { @MainActor in
+            // The proxy host ends its shares, so they go down with the app.
+            async let proxyStopped: Void = vm.stopProxyForQuit()
             await vm.stopAllForQuit()
+            await proxyStopped
             self.replyToTerminate()
         }
         Task { @MainActor in
