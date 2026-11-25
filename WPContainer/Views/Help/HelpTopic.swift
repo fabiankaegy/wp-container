@@ -126,6 +126,15 @@ extension HelpTopic {
                 ]
             ),
             HelpSection(
+                title: "Moving a site folder",
+                body: "Choose Move Site Folder… from a site's ••• menu and pick a folder. The site folder moves there under the same name.",
+                bullets: [
+                    "A running site and its running branch environments stop before the move and start again after it.",
+                    "The `wp` shim, agent-tools files, mounts and git worktree links are updated to the new path.",
+                    "From the command line: `wpc move <slug> <folder>`. AI agents can use the `site_move` MCP tool.",
+                ]
+            ),
+            HelpSection(
                 title: "PHP settings",
                 body: "Every site mounts a `php/` folder scanned via `PHP_INI_SCAN_DIR`. WP Container manages `php/wpc-defaults.ini` there (the 50 MB upload limits — `upload_max_filesize = 50M`, `post_max_size = 64M`).",
                 tip: "Need custom PHP settings? Delete the marker line at the top of `wpc-defaults.ini` to take ownership, or drop your own `.ini` file into `php/` — both are loaded on the next start."

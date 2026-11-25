@@ -50,4 +50,19 @@ enum SystemActions {
         pb.clearContents()
         pb.setString(string, forType: .string)
     }
+
+    /// Asks for one folder, starting in `directory`. Returns nil when the
+    /// user cancels.
+    static func chooseFolder(message: String, prompt: String, startingAt directory: URL?) -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = directory
+        panel.message = message
+        panel.prompt = prompt
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
+    }
 }

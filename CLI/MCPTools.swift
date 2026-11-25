@@ -175,5 +175,11 @@ enum MCPTools {
                 "domain": str("Custom domain for the new site, e.g. mysite.local. Omit to keep the archive's domain."),
                 "no_domain": bool("Give the new site no custom domain. Cannot be combined with `domain`."),
              ], required: ["file"])),
+        Tool(name: "site_move",
+             description: "Move a site's folder into another folder; the folder keeps its name (parent /Users/me/Sites moves it to /Users/me/Sites/<folder>). Running containers of the site and its worktree environments stop before the move and start again after it. Updates the stored paths, the wp shim, the agent-tools files and the git worktree links. Refuses an archived site or an existing destination. The working directory of an agent inside the old folder is gone after the move. Returns {slug, from, path, restarted, warnings}.",
+             inputSchema: obj([
+                "parent": str("Absolute path of the folder to move the site into."),
+                "slug": str("Site slug (defaults to the scoped site). Worktree environments can't be moved."),
+             ], required: ["parent"])),
     ]
 }

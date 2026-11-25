@@ -89,6 +89,11 @@ struct MainWindow: View {
                 ExportSiteSheet(site: site)
             }
         }
+        .sheet(isPresented: $vm.presentingMoveSite, onDismiss: { vm.moveSiteTarget = nil }) {
+            if let site = vm.moveSiteTarget {
+                MoveSiteSheet(site: site)
+            }
+        }
         .confirmationDialog("Delete \"\(vm.deleteSiteTarget?.name ?? "")\"?", isPresented: $vm.presentingDeleteSite,
                             titleVisibility: .visible, presenting: vm.deleteSiteTarget) { site in
             Button("Delete Site & Move Folder to Trash", role: .destructive) { deleteSite(site, trashFolder: true) }

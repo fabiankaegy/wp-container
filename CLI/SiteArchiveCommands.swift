@@ -237,6 +237,6 @@ func runCancellingOnSignal<T: Sendable>(
     return try result.get()
 }
 
-private func writeStderr(_ text: String) {
+func writeStderr(_ text: String) {
     FileHandle.standardError.write(Data((text + "\n").utf8))
 }

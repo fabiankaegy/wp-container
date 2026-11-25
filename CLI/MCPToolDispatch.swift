@@ -44,6 +44,7 @@ enum MCPToolDispatch {
             case "db_import":         return try await dbImport(args, ctx: ctx, slug: scopedSlug)
             case "site_export":       return try await siteExport(args, ctx: ctx, slug: scopedSlug)
             case "site_import":       return try await siteImport(args, ctx: ctx)
+            case "site_move":         return try await siteMove(args, ctx: ctx, slug: scopedSlug)
             case "set_idle_stop":     return try await setIdleStop(args, ctx: ctx, slug: scopedSlug)
             default:
                 return MCPResult.failure("Unknown tool: \(params.name)")
@@ -904,6 +905,35 @@ enum MCPToolDispatch {
         return MCPResult.text(CLIJSON.string(summary), isError: false)
     }
 
+    /// Moves a site's folder into `parent`. See `SiteMover`.
+    private static func siteMove(_ args: [String: Value], ctx: CLIContext, slug: String) async throws -> CallTool.Result {
+        guard let parent = args["parent"]?.stringValue else {
+            throw ToolError("bad_args", "`parent` is required (absolute path of the folder to move the site into).")
+        }
+        let expanded = (parent as NSString).expandingTildeInPath
+        guard expanded.hasPrefix("/") else {
+            throw ToolError("bad_args", "`parent` must be an absolute path.")
+        }
+        let targetSlug = args["slug"]?.stringValue ?? slug
+        let envelope = try await ctx.load()
+        guard let resolved = resolveTarget(targetSlug, in: envelope) else {
+            throw ToolError("site_not_found", "No site or environment with slug \(targetSlug).")
+        }
+        guard case .site(let site) = resolved else {
+            throw ToolError("bad_args", "site_move works on sites, not worktree environments.")
+        }
+        let envs = envelope.envs.filter { $0.parentSiteID == site.id }
+        let mover = SiteMover(cli: ctx.cli, lifecycle: ctx.lifecycle, git: ctx.git, persistence: ctx.persistence)
+        let outcome = try await mover.move(site, envs: envs, toParent: URL(fileURLWithPath: expanded, isDirectory: true))
+        return MCPResult.json([
+            "slug": outcome.site.slug,
+            "from": outcome.from.path,
+            "path": outcome.site.path.path,
+            "restarted": outcome.restarted,
+            "warnings": outcome.warnings,
+        ])
+    }
+
     /// Creates a new site from an export zip. The MCP session stays scoped to its own site.
     private static func siteImport(_ args: [String: Value], ctx: CLIContext) async throws -> CallTool.Result {
         guard let file = args["file"]?.stringValue else {
@@ -976,6 +1006,7 @@ enum MCPToolDispatch {
         if let e = error as? ToolError { return MCPJSON.string(["error": e.code, "detail": e.detail]) }
         if let e = error as? ContainerCLIError { return MCPJSON.string(["error": "container_error", "detail": e.description]) }
         if let e = error as? SiteArchiveError { return MCPJSON.string(["error": errorCode(e) ?? "internal", "detail": e.description]) }
+        if let e = error as? SiteMover.Failure { return MCPJSON.string(["error": e.code, "detail": e.description]) }
         if let e = error as? WPConfigService.ConfigError { return MCPJSON.string(["error": "wp_config_error", "detail": e.description]) }
         return MCPJSON.string(["error": "internal", "detail": "\(error)"])
     }
