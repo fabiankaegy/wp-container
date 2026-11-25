@@ -98,6 +98,8 @@ final class WorktreeAdoptTests: XCTestCase {
         XCTAssertEqual(WorktreeEnvService.env(forCheckoutPath: checkout, in: envs)?.id, env.id)
         let subfolder = checkout.appendingPathComponent("themes/twentytwentyfive", isDirectory: true)
         XCTAssertEqual(WorktreeEnvService.env(forCheckoutPath: subfolder, in: envs)?.id, env.id)
+        XCTAssertNil(WorktreeEnvService.env(forCheckoutPath: subfolder, in: envs, exact: true))
+        XCTAssertEqual(WorktreeEnvService.env(forCheckoutPath: checkout, in: envs, exact: true)?.id, env.id)
         // A sibling whose name only starts with the checkout's name.
         let lookalike = tempRoot.appendingPathComponent(".herdr/worktrees/wp-content/feat-x-2", isDirectory: true)
         XCTAssertNil(WorktreeEnvService.env(forCheckoutPath: lookalike, in: envs))

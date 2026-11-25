@@ -875,7 +875,7 @@ struct WorktreeAdopt: AsyncParsableCommand {
 
             // Already adopted (a re-run, or a thread coming back): just make
             // sure it's up.
-            if let existing = WorktreeEnvService.env(forCheckoutPath: location.topLevel, in: envelope.envs) {
+            if let existing = WorktreeEnvService.env(forCheckoutPath: location.topLevel, in: envelope.envs, exact: true) {
                 // The record is reserved before creation runs. If adopt starts
                 // it now, it reports an env that has no files or database yet.
                 guard existing.provisioned else {

@@ -119,13 +119,15 @@ public actor WorktreeEnvService {
 
     /// The env whose checkout is `path` or contains it. The match uses the
     /// path only, so it also finds the env after the checkout was removed from
-    /// disk. When checkouts nest, the deepest checkout wins.
-    public static func env(forCheckoutPath path: URL, in envs: [WorktreeEnv]) -> WorktreeEnv? {
+    /// disk. When checkouts nest, the deepest checkout wins. With `exact`, only
+    /// a checkout at `path` itself matches, so a worktree nested inside another
+    /// env's checkout isn't mistaken for that env.
+    public static func env(forCheckoutPath path: URL, in envs: [WorktreeEnv], exact: Bool = false) -> WorktreeEnv? {
         let target = path.resolvingSymlinksInPath().standardizedFileURL.path
         var best: (env: WorktreeEnv, rootLength: Int)?
         for env in envs {
             let root = env.worktreePath.resolvingSymlinksInPath().standardizedFileURL.path
-            guard target == root || target.hasPrefix(root + "/"),
+            guard target == root || (!exact && target.hasPrefix(root + "/")),
                   root.count > (best?.rootLength ?? -1) else { continue }
             best = (env, root.count)
         }
