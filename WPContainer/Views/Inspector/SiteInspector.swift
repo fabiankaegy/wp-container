@@ -46,6 +46,8 @@ struct SiteInspector: View {
             Spacer(minLength: 0)
             Menu {
                 SiteMoreMenuItems(site: site)
+                Divider()
+                Button("Delete Site…", systemImage: "trash", role: .destructive) { vm.confirmDeleteSite(site) }
             } label: {
                 Image(systemName: "ellipsis")
             }

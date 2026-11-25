@@ -67,7 +67,9 @@ Sites are provisioned automatically (no install wizard) and log in with
   and database (`wp-container worktree settle|restore <env>`, or the Settle
   buttons in the app). Settled envs are deleted after 30 days unless that's
   turned off in Settings → Sites; a checkout with uncommitted changes is
-  left on disk.
+  left on disk. Tools that make their own worktrees can hand them over with
+  `worktree adopt` instead — see
+  [Using worktrees from other tools](#using-worktrees-from-other-tools).
 - **`wp-container` CLI** — everything the app does, scriptable, with `--json`
   everywhere: `list`, `create` (`--wp/--php/--web-server/--multisite/--domain/--group`),
   `start`, `stop`, `delete`, `worktree …`, `wp …` (wp-cli proxy), `web-server`, `xdebug`,
@@ -344,6 +346,71 @@ database** in the New Branch Environment sheet to opt out and get a dedicated
 container. It's worth it for a genuinely large database: an isolated env off a
 *stopped* parent copy-on-write-clones the `database/` folder, which is instant at
 any size, whereas the shared path is always a logical dump and restore.
+
+### Using worktrees from other tools
+
+Agent tools like [T3 Code](https://t3.codes) and [herdr](https://herdr.dev)
+create their own git worktree for each thread or workspace. `worktree adopt`
+turns such a checkout into a branch environment without moving it:
+
+```bash
+wp-container worktree adopt --path ~/.t3/worktrees/wp-content/t3code-1a2b3c4d
+# → Adopted … as env my-blog-wt-t3code-1a2b3c4d at http://my-blog-wt-t3code-1a2b3c4d.localhost
+```
+
+The site and repo path are found from the checkout's main repo (it must live in
+a site's `wordpress/` folder), and the branch from the checkout. The rest is the
+same as `worktree create`. The other tool keeps ownership of the checkout:
+deleting the env, rolling back a failed adopt, and the settled-env purge all
+leave it on disk. Running `adopt` again on an adopted checkout starts its env,
+restoring it first if it was settled.
+
+Because the env records where the checkout lives, `wp`, `wp-container run` and
+the MCP tools resolve to the env from anywhere inside it, so an agent working in
+the other tool's worktree reaches its own site and database without any setup.
+
+Any tool that can run a command on its worktree events can drive this:
+
+| Tool event | Command |
+|---|---|
+| Worktree created, or opened again | `wp-container worktree adopt --path <checkout> --skip-unmatched` |
+| Worktree archived or removed | `wp-container worktree settle --path <checkout> --skip-unmatched` |
+
+`--skip-unmatched` makes both commands do nothing for repos that aren't in a WP
+Container site, so one global hook covers every project. `settle --path` finds
+the env by the checkout path it recorded, so it also works after the tool has
+deleted the checkout. A settled env keeps its files and database: when a
+checkout comes back at the same path, `adopt` restores the env.
+
+#### T3 Code
+
+Add two scripts. Set them as the default project scripts to cover every
+project at once.
+
+| Script | Command | Options |
+|---|---|---|
+| WP env | `wp-container worktree adopt --path "$T3CODE_WORKTREE_PATH" --skip-unmatched` | Run on worktree creation, not async (the agent waits until the env is up) |
+| Settle WP env | `wp-container worktree settle --path "$T3CODE_WORKTREE_PATH" --skip-unmatched` | Run on settle |
+
+Unsettling a T3 thread has no hook. The env comes back on the next `wp`, `run`
+or `login` against it, or by running the **WP env** script again.
+
+#### herdr
+
+Install the [herdr-wp-container](https://github.com/s3rgiosan/herdr-wp-container)
+plugin (`herdr plugin install s3rgiosan/herdr-wp-container`), or write your own
+with event hooks. Each hook reads the checkout path from `.data.worktree.path`
+in `HERDR_PLUGIN_EVENT_JSON`.
+
+| herdr event | Command |
+|---|---|
+| `worktree.created`, `worktree.opened` | `wp-container worktree adopt --path <path> --skip-unmatched` |
+| `worktree.removed` | `wp-container worktree settle --path <path> --skip-unmatched` |
+
+herdr runs event hooks in the background, so a new workspace can open before
+its env is up. herdr removes the checkout before `worktree.removed` fires; the
+env is settled, and comes back if the branch is checked out again at the same
+path.
 
 ## Development
 

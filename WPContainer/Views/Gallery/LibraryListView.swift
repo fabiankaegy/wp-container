@@ -284,6 +284,7 @@ struct LibraryListView: View {
             } else {
                 Button("Archive", systemImage: "archivebox") { vm.archiveSite(site) }
             }
+            Button("Delete Site…", systemImage: "trash", role: .destructive) { vm.confirmDeleteSite(site) }
         }
     }
 }

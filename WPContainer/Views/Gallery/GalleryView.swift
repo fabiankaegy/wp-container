@@ -139,7 +139,6 @@ struct SiteCard: View {
     let site: Site
 
     @State private var hovering = false
-    @State private var confirmingDelete = false
     @FocusState private var focused: Bool
 
     private var isSelected: Bool { vm.selection == site.id }
@@ -182,13 +181,6 @@ struct SiteCard: View {
         .simultaneousGesture(TapGesture().onEnded { vm.selection = site.id; vm.branchSelection = [] })
         .draggable(site.id.uuidString)
         .contextMenu { contextMenu }
-        .confirmationDialog("Delete \"\(site.name)\"?", isPresented: $confirmingDelete, titleVisibility: .visible) {
-            Button("Delete Site & Move Folder to Trash", role: .destructive) { vm.deleteSite(site, trashFolder: true) }
-            Button("Delete Site (Keep Folder)", role: .destructive) { vm.deleteSite(site, trashFolder: false) }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Removes the site's containers. Choose whether to also move \(site.path.lastPathComponent) to the Trash.")
-        }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
         .accessibilityAction(named: "Open") { vm.openScreen(site.id) }
@@ -297,7 +289,7 @@ struct SiteCard: View {
         } else {
             Button("Archive", systemImage: "archivebox") { vm.archiveSite(site) }
         }
-        Button("Delete Site…", systemImage: "trash", role: .destructive) { confirmingDelete = true }
+        Button("Delete Site…", systemImage: "trash", role: .destructive) { vm.confirmDeleteSite(site) }
     }
 }
 
