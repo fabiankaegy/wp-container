@@ -10,6 +10,9 @@ public enum WorktreeError: Error, Sendable, CustomStringConvertible {
     /// of them collide on hostname, container names and DB schema, and the proxy
     /// can only ever route to one.
     case duplicateEnvSlug(String)
+    /// `worktree adopt` was pointed at a path that isn't a linked git worktree
+    /// (a main checkout, or no checkout at all).
+    case notALinkedWorktree(String)
     /// Creation failed and the half-created env was rolled back. `short` is the
     /// first fatal line (surface this); `full` is the complete underlying text
     /// (keep behind a disclosure).
@@ -21,6 +24,7 @@ public enum WorktreeError: Error, Sendable, CustomStringConvertible {
         case .repoNotFound(let p):         return "No git repo found at \(p)."
         case .invalidRepoPath(let p):      return "Invalid repo path \"\(p)\": must be relative to wordpress/ with no \"..\" components (e.g. wp-content/plugins/my-plugin)."
         case .duplicateEnvSlug(let s):     return "An environment named \(s) already exists. Delete it first, or use a different branch."
+        case .notALinkedWorktree(let p):   return "\(p) is not a linked git worktree. Adopt takes a checkout made with `git worktree add`, not a repo's main checkout."
         case .creationFailed(let short, _): return short
         }
     }
@@ -96,12 +100,34 @@ public actor WorktreeEnvService {
             .allSatisfy { $0 != ".." && $0 != "." && !$0.isEmpty }
     }
 
+    /// The site whose `wordpress/` tree contains `mainCheckout`, and the repo's
+    /// path relative to it (`wp-content`, `wp-content/plugins/x`). nil when no
+    /// site does, which `worktree adopt --skip-unmatched` treats as "not a
+    /// WordPress project". The deepest match wins, though sites never nest.
+    public static func adoptionParent(mainCheckout: URL, sites: [Site]) -> (site: Site, repoRelPath: String)? {
+        let target = mainCheckout.resolvingSymlinksInPath().standardizedFileURL.path
+        var best: (site: Site, repoRelPath: String, rootLength: Int)?
+        for site in sites {
+            let root = site.wordpressFolder.resolvingSymlinksInPath().standardizedFileURL.path
+            guard target.hasPrefix(root + "/") else { continue }
+            let rel = String(target.dropFirst(root.count + 1))
+            guard isValidRepoRelPath(rel), root.count > (best?.rootLength ?? -1) else { continue }
+            best = (site, rel, root.count)
+        }
+        return best.map { ($0.site, $0.repoRelPath) }
+    }
+
     /// The deterministic descriptor for an env of `parent` on `branch` — all
     /// fields except `provisioned` are knowable before any work happens. Used
     /// by callers to reserve the env (and its port) in the store atomically
     /// BEFORE the (long) creation flow runs (#3), then passed to `create` so
     /// the final record keeps the same identity.
-    public static func descriptor(parent: Site, repoRelPath: String, branch: String, port: Int) -> WorktreeEnv {
+    ///
+    /// `adopting` is an existing checkout to use instead of
+    /// `<site>/.worktrees/<branch-slug>`; the env is then marked
+    /// `adoptedWorktree` and `create` skips `git worktree add`.
+    public static func descriptor(parent: Site, repoRelPath: String, branch: String, port: Int,
+                                  adopting: URL? = nil) -> WorktreeEnv {
         let branchSlug = Slug.make(branch)
         var env = WorktreeEnv(
             parentSiteID: parent.id,
@@ -109,7 +135,7 @@ public actor WorktreeEnvService {
             envSlug: WorktreeEnv.makeSlug(parentSlug: parent.slug, branch: branch),
             repoRelPath: repoRelPath,
             branch: branch,
-            worktreePath: parent.worktreesFolder.appendingPathComponent(branchSlug, isDirectory: true),
+            worktreePath: adopting ?? parent.worktreesFolder.appendingPathComponent(branchSlug, isDirectory: true),
             envPath: parent.envsFolder.appendingPathComponent(branchSlug, isDirectory: true),
             port: port,
             imageTag: parent.imageTag,
@@ -118,7 +144,8 @@ public actor WorktreeEnvService {
             provisioned: false,
             xdebugEnabled: parent.xdebugEnabled,
             cpuLimit: parent.cpuLimit,
-            memoryLimitMB: parent.memoryLimitMB
+            memoryLimitMB: parent.memoryLimitMB,
+            adoptedWorktree: adopting != nil
         )
         env.inheritedMounts = parent.mounts
         // Inherit the parent's sidecars at creation.
@@ -134,8 +161,10 @@ public actor WorktreeEnvService {
     /// closure (which already reserved the env's main `port`): every port lands
     /// in the same critical section, so a concurrent creator can't reuse any.
     public static func reservedDescriptor(parent: Site, repoRelPath: String, branch: String,
-                                          port: Int, into envelope: inout StoreEnvelope) -> WorktreeEnv {
-        var env = descriptor(parent: parent, repoRelPath: repoRelPath, branch: branch, port: port)
+                                          port: Int, adopting: URL? = nil,
+                                          into envelope: inout StoreEnvelope) -> WorktreeEnv {
+        var env = descriptor(parent: parent, repoRelPath: repoRelPath, branch: branch, port: port,
+                             adopting: adopting)
         var taken = PortAllocator.reservedPorts(sites: envelope.sites, envs: envelope.envs).union([port])
         for addon in SidecarAddons.enabled(for: env) where addon.publishesHostPort {
             guard let hostPort = PortAllocator.firstFreePort(from: port + 1, excluding: taken) else { continue }
@@ -244,10 +273,17 @@ public actor WorktreeEnvService {
         }
 
         do {
-            // 1. git worktree add (create branch if new).
-            try fm.createDirectory(at: parent.worktreesFolder, withIntermediateDirectories: true)
-            try await git.worktreeAdd(repo: repoURL, path: worktreePath, branch: branch,
-                                      createIfMissing: true, from: from)
+            // 1. git worktree add (create branch if new). An adopted env's
+            // checkout already exists: another tool made it and owns it.
+            if env.adoptedWorktree {
+                guard fm.fileExists(atPath: worktreePath.path) else {
+                    throw WorktreeError.notALinkedWorktree(worktreePath.path)
+                }
+            } else {
+                try fm.createDirectory(at: parent.worktreesFolder, withIntermediateDirectories: true)
+                try await git.worktreeAdd(repo: repoURL, path: worktreePath, branch: branch,
+                                          createIfMissing: true, from: from)
+            }
 
             // 1b. Seed the checkout with the parent's gitignored runtime deps so
             // the shadow-mounted worktree isn't missing vendor/, built assets, or
@@ -323,7 +359,8 @@ public actor WorktreeEnvService {
         } catch {
             // Transactional rollback: leave NO half-created env behind. Stop and
             // delete the env's containers, remove the git worktree checkout (but
-            // KEEP the branch), and delete `.envs/<b>`. The caller only writes the
+            // KEEP the branch; an adopted checkout isn't ours to remove), and
+            // delete `.envs/<b>`. The caller only writes the
             // store entry on success, so there is nothing to unwind there.
             //
             // Release the lease FIRST: the DB retirement at the end of this block
@@ -345,7 +382,9 @@ public actor WorktreeEnvService {
                     "Could not remove the database schema \(sharedSchema) from \(parent.slug)'s database server while rolling back. Drop it manually if it lingers.",
                 ], for: env.id)
             }
-            try? await git.worktreeRemove(repo: repoURL, path: worktreePath, force: true)
+            if !env.adoptedWorktree {
+                try? await git.worktreeRemove(repo: repoURL, path: worktreePath, force: true)
+            }
             try? fm.removeItem(at: envPath)
             // The shared path may have booted the parent's DB container purely
             // for this create (parent site stopped). Nothing needs it now, so
@@ -359,7 +398,8 @@ public actor WorktreeEnvService {
     }
 
     /// Deletion: stop containers → drop the shared schema → git worktree remove
-    /// → delete `.envs/<b>`.
+    /// → delete `.envs/<b>`. An adopted env's checkout is always kept, whatever
+    /// `keepWorktree` says: the tool that created it owns its lifecycle.
     ///
     /// Returns what the caller still has to persist: when a schema couldn't be
     /// dropped (server down), `tombstonedSchemas` must be appended to the parent
@@ -371,7 +411,7 @@ public actor WorktreeEnvService {
         await lifecycle.deleteContainers(env)
         let dropped = await dropSharedSchema(of: env, parent: parent)
         let testSchemaDropped = await dropSharedTestSchema(of: env, parent: parent)
-        if !keepWorktree, let parent {
+        if !keepWorktree, !env.adoptedWorktree, let parent {
             let repoURL = parent.repoURL(forRelativePath: env.repoRelPath)
             try? await git.worktreeRemove(repo: repoURL, path: env.worktreePath, force: true)
         }
